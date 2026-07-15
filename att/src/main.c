@@ -24,6 +24,10 @@
 #include <zephyr/drivers/uart.h>
 #include <zephyr/net/net_if.h>
 #include <zephyr/net/ethernet.h>
+
+#ifndef ETH_P_ALL
+#define ETH_P_ALL 0x0003
+#endif
 #include <zephyr/net/socket.h>
 #include <errno.h>
 #include <zephyr/net/phy.h>
@@ -144,18 +148,25 @@ static struct sockaddr_ll tx_dst;
 
 static int spe_tx_init(struct net_if *iface)
 {
-	tx_sock = zsock_socket(AF_PACKET, SOCK_RAW, htons(ATT_ETHERTYPE));
+	/* OJO: Zephyr SOLO acepta proto = 0 | ETH_P_ALL | ETH_P_ECAT | ETH_P_IEEE802154
+	 * en SOCK_RAW (ver packet_is_supported() en sockets_packet.c). Un ethertype
+	 * propio da EAFNOSUPPORT (errno 106). El proto del socket solo filtra el RX;
+	 * el ethertype real (ATT_ETHERTYPE) va en la cabecera de la trama. */
+	tx_sock = zsock_socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
 	if (tx_sock < 0) {
-		LOG_ERR("socket AF_PACKET fallo: %d", errno);
+		LOG_ERR("SPE: socket(AF_PACKET,SOCK_RAW) FALLO: ret=%d errno=%d", tx_sock, errno);
 		return -errno;
 	}
 	memset(&tx_dst, 0, sizeof(tx_dst));
 	tx_dst.sll_family   = AF_PACKET;
-	tx_dst.sll_protocol = htons(ATT_ETHERTYPE);
+	tx_dst.sll_protocol = htons(ETH_P_ALL);
 	tx_dst.sll_ifindex  = net_if_get_by_iface(iface);
 
-	if (zsock_bind(tx_sock, (struct sockaddr *)&tx_dst, sizeof(tx_dst)) < 0) {
-		LOG_ERR("bind fallo: %d", errno);
+	/* No se hace bind: con AF_PACKET/SOCK_RAW la interfaz de salida la elige
+	 * sll_ifindex en cada sendto(). Asi el firmware no depende de en que
+	 * puerto SPE este el cable. */
+	if (0) {
+		LOG_ERR("SPE: bind(ifindex=%d) FALLO: errno=%d", tx_dst.sll_ifindex, errno);
 		zsock_close(tx_sock); tx_sock = -1;
 		return -errno;
 	}
@@ -179,6 +190,7 @@ static int spe_tx(struct net_if *iface, uint32_t seq)
 	f.errors        = htonl(enc_errors);
 	f.uptime_ms     = htonl(k_uptime_get_32());
 
+	tx_dst.sll_ifindex = net_if_get_by_iface(iface);
 	return zsock_sendto(tx_sock, &f, sizeof(f), 0, (struct sockaddr *)&tx_dst, sizeof(tx_dst));
 }
 
@@ -224,7 +236,9 @@ int main(void)
 	for (int i = 0; i < 100 && !net_if_is_carrier_ok(iface); i++) {
 		k_msleep(100);
 	}
-	LOG_INF("iface 1: carrier=%d", net_if_is_carrier_ok(iface) ? 1 : 0);
+	LOG_INF("carrier al arrancar: if1=%d if2=%d",
+		net_if_is_carrier_ok(net_if_get_by_index(1)) ? 1 : 0,
+		net_if_is_carrier_ok(net_if_get_by_index(2)) ? 1 : 0);
 
 	if (spe_tx_init(iface) < 0) {
 		LOG_ERR("No se pudo abrir el socket SPE");
@@ -234,19 +248,32 @@ int main(void)
 	while (1) {
 		k_msleep(500);
 		rs485_poll();
+		if (tx_sock < 0 && (seq % 8) == 0) {
+			LOG_WRN("SPE: socket cerrado, reintentando...");
+			spe_tx_init(iface);
+		}
 		if ((seq % 2) == 0) {
 			char b[64];
 			snprintk(b, sizeof(b), "ATT485 seq=%u enc=%d" "\r\n", seq, enc_count);
 			rs485_send(b);
 		}
-		if (tx_sock >= 0 && net_if_is_carrier_ok(iface)) {
-			int r = spe_tx(iface, ++seq);
-			if (r > 0) { sent++; } else { failed++; }
+		{
+			/* transmitir por la PRIMERA iface con portadora, sea cual sea */
+			struct net_if *o = NULL;
+			for (int i = 1; i <= 2; i++) {
+				struct net_if *f = net_if_get_by_index(i);
+				if (f && net_if_is_carrier_ok(f)) { o = f; break; }
+			}
+			if (tx_sock >= 0 && o != NULL) {
+				int r = spe_tx(o, ++seq);
+				if (r > 0) { sent++; } else { failed++; }
+			}
 		}
 		if ((seq % 4) == 0) {
-			LOG_INF("RS485 rx=%u bytes | encoder: count=%d edges=%u err=%u | SPE tx: ok=%u fail=%u carrier=%d", r485_rx_bytes,
+			LOG_INF("RS485 rx=%u bytes | encoder: count=%d edges=%u err=%u | SPE tx: ok=%u fail=%u | carrier: if1=%d if2=%d", r485_rx_bytes,
 				enc_count, enc_edges, enc_errors, sent, failed,
-				net_if_is_carrier_ok(iface) ? 1 : 0);
+				net_if_is_carrier_ok(net_if_get_by_index(1)) ? 1 : 0,
+				net_if_is_carrier_ok(net_if_get_by_index(2)) ? 1 : 0);
 		}
 	}
 	return 0;
