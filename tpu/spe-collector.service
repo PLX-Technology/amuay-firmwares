@@ -1,0 +1,16 @@
+[Unit]
+Description=Concentrador de datos SPE + RS485 de la TPU (API HTTP en :8080)
+After=network.target
+
+[Service]
+Type=simple
+# El RS-485 necesita el puerto a 115200 8N1 antes de leerlo
+ExecStartPre=-/bin/stty -F /dev/ttyAMA2 115200 cs8 -cstopb -parenb raw -echo
+ExecStart=/usr/bin/python3 /usr/local/bin/spe-collector
+Restart=always
+RestartSec=3
+# AF_PACKET necesita privilegios de red
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+
+[Install]
+WantedBy=multi-user.target
