@@ -22,6 +22,7 @@
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/uart.h>
+#include <zephyr/sys/ring_buffer.h>
 #include <zephyr/net/net_if.h>
 #include <zephyr/net/ethernet.h>
 
@@ -63,16 +64,33 @@ static volatile uint32_t r485_rx_bytes;
 static char r485_line[96];
 static int  r485_len;
 
+RING_BUF_DECLARE(r485_rb, 256);
+
+/* ISR: vacia el FIFO del UART al ring buffer. Imprescindible: con uart_poll_in()
+ * cada 500ms se perdian todos los bytes menos el ultimo (a 115200 un mensaje de
+ * 21 bytes dura 1.8ms y el registro RX solo guarda uno). */
+static void r485_isr(const struct device *dev, void *user_data)
+{
+	uint8_t buf[32];
+	int n;
+
+	uart_irq_update(dev);   /* devuelve void en esta version de Zephyr */
+	if (!uart_irq_rx_ready(dev)) { return; }
+	while ((n = uart_fifo_read(dev, buf, sizeof(buf))) > 0) {
+		r485_rx_bytes += n;
+		ring_buf_put(&r485_rb, buf, n);
+	}
+}
+
 static void rs485_poll(void)
 {
-	unsigned char c;
+	uint8_t c;
 
-	while (uart_poll_in(rs485, &c) == 0) {
-		r485_rx_bytes++;
+	while (ring_buf_get(&r485_rb, &c, 1) == 1) {
 		if (c == 10 || c == 13 || r485_len >= (int)sizeof(r485_line) - 1) {
 			if (r485_len > 0) {
 				r485_line[r485_len] = 0;
-				LOG_INF("RS485 RX <<< \"%s\"  (total %u bytes)", r485_line, r485_rx_bytes);
+				LOG_INF("RS485 RX <<< [%s]  (total %u bytes)", r485_line, r485_rx_bytes);
 				r485_len = 0;
 			}
 		} else {
@@ -219,6 +237,8 @@ int main(void)
 	if (!device_is_ready(rs485)) {
 		LOG_ERR("RS485 (usart2) NO listo");
 	} else {
+		uart_irq_callback_user_data_set(rs485, r485_isr, NULL);
+		uart_irq_rx_enable(rs485);
 		LOG_INF("RS485 listo: USART2 115200 8N1 (PA12=TX PA11=RX), DE automatico");
 	}
 
