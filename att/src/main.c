@@ -30,6 +30,8 @@
 #define ETH_P_ALL 0x0003
 #endif
 #include <zephyr/net/socket.h>
+#include <zephyr/net/net_mgmt.h>
+#include <zephyr/net/net_event.h>
 #include <errno.h>
 #include <zephyr/net/phy.h>
 #include <zephyr/logging/log.h>
@@ -102,6 +104,25 @@ static void rs485_poll(void)
 static void rs485_send(const char *msg)
 {
 	while (*msg) { uart_poll_out(rs485, *msg++); }
+}
+
+/* DHCP: el servidor es la TPU (dnsmasq via NetworkManager, 192.168.50.1/24).
+ * La IP es para gestion/diagnostico; el encoder sigue en tramas L2 (0x88B5). */
+static struct net_mgmt_event_callback dhcp_cb;
+
+static void dhcp_handler(struct net_mgmt_event_callback *cb,
+			uint64_t mgmt_event, struct net_if *iface)
+{
+	char buf[NET_IPV4_ADDR_LEN];
+
+	if (mgmt_event != NET_EVENT_IPV4_ADDR_ADD) { return; }
+	for (int i = 0; i < NET_IF_MAX_IPV4_ADDR; i++) {
+		struct net_if_addr *ia = &iface->config.ip.ipv4->unicast[i].ipv4;
+
+		if (ia->addr_type != NET_ADDR_DHCP) { continue; }
+		LOG_INF("DHCP OK en iface %d: IP=%s", net_if_get_by_iface(iface),
+			net_addr_ntop(AF_INET, &ia->address.in_addr, buf, sizeof(buf)));
+	}
 }
 
 static void enc_isr(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
@@ -252,6 +273,16 @@ int main(void)
 
 	/* 4) esperar carrier en la iface 1 (por donde transmitimos).
 	 *    Se usa UNA SOLA iface a proposito: dos enlaces al mismo switch = lazo L2. */
+	{
+		net_mgmt_init_event_callback(&dhcp_cb, dhcp_handler, NET_EVENT_IPV4_ADDR_ADD);
+		net_mgmt_add_event_callback(&dhcp_cb);
+		for (int i = 1; i <= 2; i++) {
+			struct net_if *f = net_if_get_by_index(i);
+			if (f) { net_dhcpv4_start(f); }
+		}
+		LOG_INF("DHCP arrancado en los puertos SPE, esperando direccion...");
+	}
+
 	iface = net_if_get_by_index(1);
 	for (int i = 0; i < 100 && !net_if_is_carrier_ok(iface); i++) {
 		k_msleep(100);
