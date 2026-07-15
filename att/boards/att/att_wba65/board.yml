@@ -1,0 +1,6 @@
+board:
+  name: att_wba65
+  full_name: ATT Varec2500 (STM32WBA65 + ADIN2111 SPE)
+  vendor: adi
+  socs:
+    - name: stm32wba65xx

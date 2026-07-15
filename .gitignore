@@ -1,0 +1,19 @@
+# Credenciales -- NUNCA versionar
+tools/provision.env
+*.env
+!*.env.example
+
+# Artefactos de build de Zephyr
+build/
+*.o
+*.obj
+
+# Binarios de firmware (se generan; los firmados van por release)
+*.bin
+*.sbin
+*.sig
+*.elf
+*.map
+
+# Artefactos de la maquina de build
+tpu-artifacts/

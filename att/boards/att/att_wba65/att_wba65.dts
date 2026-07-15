@@ -1,0 +1,148 @@
+/*
+ * ATT Varec2500 board: STM32WBA65RIV6 + ADIN2111 (2-port SPE)
+ * SPDX-License-Identifier: Apache-2.0
+ */
+/dts-v1/;
+#include <st/wba/stm32wba65Xi.dtsi>
+#include <st/wba/stm32wba65rivx-pinctrl.dtsi>
+
+/ {
+	model = "ATT Varec2500 STM32WBA65 + ADIN2111 SPE";
+	compatible = "adi,att-wba65";
+
+	chosen {
+		zephyr,console = &usart1;
+		zephyr,shell-uart = &usart1;
+		zephyr,sram = &sram0;
+		zephyr,flash = &flash0;
+		zephyr,code-partition = &slot0_partition;
+	};
+
+	leds: leds {
+		compatible = "gpio-leds";
+		uc_led_0: led_0 {
+			gpios = <&gpiod 9 GPIO_ACTIVE_LOW>;
+			label = "uC LED0";
+		};
+		uc_led_1: led_1 {
+			gpios = <&gpiob 9 GPIO_ACTIVE_LOW>;
+			label = "uC LED1";
+		};
+		uc_led_2: led_2 {
+			gpios = <&gpiod 8 GPIO_ACTIVE_LOW>;
+			label = "uC LED2";
+		};
+	};
+
+	aliases {
+		led0 = &uc_led_0;
+		led1 = &uc_led_1;
+		led2 = &uc_led_2;
+	};
+};
+
+&clk_lse { status = "okay"; };
+&clk_hse {
+	status = "okay";
+	/delete-property/ hse-trimming;
+};
+&clk_hsi { status = "okay"; };
+
+&rcc {
+	clocks = <&clk_hse>;
+	clock-frequency = <DT_FREQ_M(32)>;
+	ahb-prescaler = <1>;
+	ahb5-prescaler = <1>;
+	apb1-prescaler = <1>;
+	apb2-prescaler = <2>;
+	apb7-prescaler = <1>;
+};
+
+&pwr { power-supply = "smps"; };
+
+&usart1 {
+	clocks = <&rcc STM32_CLOCK(APB2, 14)>,
+		 <&rcc STM32_SRC_HSI16 USART1_SEL(2)>;
+	pinctrl-0 = <&usart1_tx_pb12 &usart1_rx_pa8>;
+	pinctrl-names = "default";
+	current-speed = <115200>;
+	status = "okay";
+};
+
+&flash0 {
+	partitions {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		slot0_partition: partition@0 {
+			label = "image-0";
+			reg = <0x00000000 DT_SIZE_K(2048)>;
+		};
+	};
+};
+
+/* GPIO ports usados por el ADIN2111 (SPI bit-bang + int/reset) */
+&gpioa { status = "okay"; };
+&gpioc { status = "okay"; };
+
+/ {
+	/* SPI por software (bit-bang) - PA9=SCK no puede ser SPI3 HW */
+	spi_bb: spi-bitbang {
+		compatible = "zephyr,spi-bitbang";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		clk-gpios = <&gpioa 9 GPIO_ACTIVE_HIGH>;    /* SPI3_SCLK */
+		mosi-gpios = <&gpioc 3 GPIO_ACTIVE_HIGH>;   /* SPI3_SDI  */
+		miso-gpios = <&gpioc 4 GPIO_ACTIVE_HIGH>;   /* SPI3_SDO  */
+		cs-gpios = <&gpioa 5 (GPIO_ACTIVE_LOW | GPIO_OPEN_DRAIN)>;      /* SPI3_NSS  */
+		status = "okay";
+
+		adin2111: adin2111@0 {
+			compatible = "adi,adin2111";
+			reg = <0x0>;
+			spi-max-frequency = <4000000>;
+			int-gpios = <&gpioa 10 GPIO_ACTIVE_LOW>;   /* ADIN_INT1 */
+			reset-gpios = <&gpioc 5 GPIO_ACTIVE_LOW>;  /* ADIN_RESET */
+			status = "okay";
+			spi-oa;
+			spi-oa-protection;
+
+			port1 { local-mac-address = [02 00 00 ad 21 11]; };
+			port2 { local-mac-address = [02 00 00 ad 21 12]; };
+
+			mdio {
+				compatible = "adi,adin2111-mdio";
+				#address-cells = <1>;
+				#size-cells = <0>;
+				status = "okay";
+				attphy1: ethernet-phy@1 { reg = <0x1>; compatible = "adi,adin2111-phy"; status = "okay"; };
+				attphy2: ethernet-phy@2 { reg = <0x2>; compatible = "adi,adin2111-phy"; status = "okay"; };
+			};
+		};
+	};
+};
+
+/* RS-485 (U21 = ADM2587E aislado). Direccion AUTOMATICA via el comparador
+ * ADCMP600 (U24), que vigila la linea TX y gobierna RE/DE -> NO hace falta
+ * GPIO de DE. OJO: RE y DE van atados, asi que MIENTRAS TRANSMITE el receptor
+ * esta apagado -> NO hay eco local; hace falta un segundo nodo para probar.
+ * El esquematico llama a estos nets UART0_TX/UART0_RX, pero en el WBA65
+ * PA12/PA11 son USART2 (AF3).
+ */
+&usart2 {
+	/* PA11 (RX) con pull-up: sin el, con el bus RS485 abierto la entrada flota
+	 * y el UART lee basura con errores de trama. */
+	pinctrl-0 = <&usart2_tx_pa12 &usart2_rx_pa11_pu>;
+	pinctrl-names = "default";
+	current-speed = <115200>;
+	status = "okay";
+};
+
+/* variante de usart2_rx_pa11 con pull-up (el pinctrl del SoC no lo trae) */
+&pinctrl {
+	usart2_rx_pa11_pu: usart2_rx_pa11_pu {
+		pinmux = <STM32_PINMUX('A', 11, AF3)>;
+		bias-pull-up;
+	};
+};
