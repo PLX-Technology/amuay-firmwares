@@ -1,4 +1,5 @@
 /*
+#include <zephyr/dt-bindings/i2c/i2c.h>
  * ATT Varec2500 board: STM32WBA65RIV6 + ADIN2111 (2-port SPE)
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -131,6 +132,15 @@
  * PA12/PA11 son USART2 (AF3).
  */
 &usart2 {
+	/* Modbus RTU sobre el RS-485 (U21 = ADM2587E).
+	 * NO se declaran de-gpios/re-gpios: la direccion la conmuta solo el
+	 * comparador ADCMP600 (U24) vigilando la linea TX. En el binding
+	 * zephyr,modbus-serial esos pines son OPCIONALES. */
+	modbus0: modbus0 {
+		compatible = "zephyr,modbus-serial";
+		status = "okay";
+	};
+
 	/* PA11 (RX) con pull-up: sin el, con el bus RS485 abierto la entrada flota
 	 * y el UART lee basura con errores de trama. */
 	pinctrl-0 = <&usart2_tx_pa12 &usart2_rx_pa11_pu>;
@@ -150,4 +160,25 @@
 /* RNG por hardware: lo necesita el cliente DHCPv4 (XID y temporizadores de reintento) */
 &rng {
 	status = "okay";
+};
+
+/* EEPROM IC14 = AT24C64D (8 KB) en I2C1. A0/A1/A2 a GND -> direccion 0x50.
+ * WP (pin 7) a GND = proteccion de escritura DESHABILITADA -> se puede escribir.
+ * Guarda la configuracion en caliente (modo, unit id Modbus, baudios...) para
+ * no tener que recompilar un firmware por sensor.
+ */
+&i2c1 {
+	pinctrl-0 = <&i2c1_scl_pb2 &i2c1_sda_pb1>;
+	pinctrl-names = "default";
+	clock-frequency = <I2C_BITRATE_STANDARD>;
+	status = "okay";
+
+	eeprom0: eeprom@50 {
+		compatible = "atmel,at24";
+		reg = <0x50>;
+		size = <8192>;
+		pagesize = <32>;
+		address-width = <16>;
+		timeout = <5>;
+	};
 };

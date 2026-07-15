@@ -32,6 +32,9 @@
 #include <zephyr/net/socket.h>
 #include <zephyr/net/net_mgmt.h>
 #include <zephyr/net/net_event.h>
+#include <zephyr/modbus/modbus.h>
+#include <zephyr/drivers/eeprom.h>
+#include <zephyr/sys/crc.h>
 #include <errno.h>
 #include <zephyr/net/phy.h>
 #include <zephyr/logging/log.h>
@@ -40,7 +43,6 @@ LOG_MODULE_REGISTER(att, LOG_LEVEL_INF);
 static const struct device *const adin = DEVICE_DT_GET(DT_NODELABEL(adin2111));
 static const struct device *const gpa  = DEVICE_DT_GET(DT_NODELABEL(gpioa));
 static const struct device *const gpd  = DEVICE_DT_GET(DT_NODELABEL(gpiod));
-static const struct device *const rs485 = DEVICE_DT_GET(DT_NODELABEL(usart2));
 
 #define BYPASS_EN_PIN 14   /* PD14 = UC_BYPASS_EN */
 #define ENC_A_PIN      0   /* PA0  = ENCODER AA */
@@ -63,48 +65,14 @@ static const int8_t QTAB[16] = {
 
 /* ---------------- RS-485 (USART2, PA12=TX PA11=RX) ---------------- */
 static volatile uint32_t r485_rx_bytes;
-static char r485_line[96];
-static int  r485_len;
 
 RING_BUF_DECLARE(r485_rb, 256);
 
 /* ISR: vacia el FIFO del UART al ring buffer. Imprescindible: con uart_poll_in()
  * cada 500ms se perdian todos los bytes menos el ultimo (a 115200 un mensaje de
  * 21 bytes dura 1.8ms y el registro RX solo guarda uno). */
-static void r485_isr(const struct device *dev, void *user_data)
-{
-	uint8_t buf[32];
-	int n;
 
-	uart_irq_update(dev);   /* devuelve void en esta version de Zephyr */
-	if (!uart_irq_rx_ready(dev)) { return; }
-	while ((n = uart_fifo_read(dev, buf, sizeof(buf))) > 0) {
-		r485_rx_bytes += n;
-		ring_buf_put(&r485_rb, buf, n);
-	}
-}
 
-static void rs485_poll(void)
-{
-	uint8_t c;
-
-	while (ring_buf_get(&r485_rb, &c, 1) == 1) {
-		if (c == 10 || c == 13 || r485_len >= (int)sizeof(r485_line) - 1) {
-			if (r485_len > 0) {
-				r485_line[r485_len] = 0;
-				LOG_INF("RS485 RX <<< [%s]  (total %u bytes)", r485_line, r485_rx_bytes);
-				r485_len = 0;
-			}
-		} else {
-			r485_line[r485_len++] = (char)c;
-		}
-	}
-}
-
-static void rs485_send(const char *msg)
-{
-	while (*msg) { uart_poll_out(rs485, *msg++); }
-}
 
 /* DHCP: el servidor es la TPU (dnsmasq via NetworkManager, 192.168.50.1/24).
  * La IP es para gestion/diagnostico; el encoder sigue en tramas L2 (0x88B5). */
@@ -124,6 +92,311 @@ static void dhcp_handler(struct net_mgmt_event_callback *cb,
 			net_addr_ntop(AF_INET, &ia->address.in_addr, buf, sizeof(buf)));
 	}
 }
+
+/* =================== CONFIGURACION PERSISTENTE (EEPROM) ===================
+ * Se guarda en la AT24C64 (I2C1, 0x50). Permite cambiar el modo, la unit id
+ * de Modbus y los baudios SIN recompilar ni destapar el sensor: en campo van
+ * varios Varec en el mismo bus RS-485 y cada uno necesita su propia unit id.
+ *
+ * Se configura desde la CM5 por SPE, escribiendo los HOLDING REGISTERS por
+ * Modbus TCP. Los cambios se guardan con el comando 0xA5 y se aplican en el
+ * siguiente arranque (comportamiento habitual en equipo industrial).
+ *
+ * ★ El servidor Modbus TCP NO se puede apagar: es el canal de configuracion.
+ *   Si se pudiera, un cambio equivocado dejaria el sensor inalcanzable.
+ * ====================================================================== */
+#define CFG_MAGIC   0x41545431u   /* "ATT1" */
+#define CFG_ADDR    0
+
+struct att_cfg {
+	uint32_t magic;
+	uint16_t flags;      /* bit0 = push L2 0x88B5 | bit1 = Modbus RTU */
+	uint16_t unit_id;    /* 1..247 */
+	uint16_t baud_div;   /* baudios/100: 96, 192, 384, 1152 */
+	uint16_t parity;     /* 0=none 1=even 2=odd */
+	uint16_t push_ms10;  /* periodo del push L2, en decenas de ms */
+	uint16_t crc;
+} __packed;
+
+#define CFG_F_PUSH   BIT(0)
+#define CFG_F_RTU    BIT(1)
+
+static const struct device *const eep = DEVICE_DT_GET(DT_NODELABEL(eeprom0));
+static struct att_cfg cfg;
+
+static void cfg_defaults(void)
+{
+	cfg.magic = CFG_MAGIC;
+	cfg.flags = CFG_F_PUSH | CFG_F_RTU;   /* el push L2 es el modo PRINCIPAL */
+	cfg.unit_id = 1;
+	cfg.baud_div = 192;                   /* 19200 = default del estandar Modbus */
+	cfg.parity = 1;                       /* even */
+	cfg.push_ms10 = 50;                   /* 500 ms */
+}
+
+static uint16_t cfg_crc(const struct att_cfg *c)
+{
+	return crc16_ansi((const uint8_t *)c, sizeof(*c) - sizeof(uint16_t));
+}
+
+static void cfg_load(void)
+{
+	struct att_cfg t;
+
+	if (!device_is_ready(eep)) {
+		LOG_WRN("EEPROM no lista: uso la configuracion por defecto");
+		cfg_defaults();
+		return;
+	}
+	if (eeprom_read(eep, CFG_ADDR, &t, sizeof(t)) < 0) {
+		LOG_WRN("EEPROM ilegible: configuracion por defecto");
+		cfg_defaults();
+		return;
+	}
+	if (t.magic != CFG_MAGIC || t.crc != cfg_crc(&t)) {
+		LOG_INF("EEPROM sin configuracion valida: escribo la de fabrica");
+		cfg_defaults();
+		cfg.crc = cfg_crc(&cfg);
+		eeprom_write(eep, CFG_ADDR, &cfg, sizeof(cfg));
+		return;
+	}
+	cfg = t;
+	LOG_INF("Config leida de EEPROM: flags=0x%04x unit_id=%u baud=%u parity=%u push=%ums",
+		cfg.flags, cfg.unit_id, cfg.baud_div * 100u, cfg.parity, cfg.push_ms10 * 10u);
+}
+
+static int cfg_save(void)
+{
+	int r;
+
+	if (!device_is_ready(eep)) { return -ENODEV; }
+	cfg.magic = CFG_MAGIC;
+	cfg.crc = cfg_crc(&cfg);
+	r = eeprom_write(eep, CFG_ADDR, &cfg, sizeof(cfg));
+	LOG_INF("Config guardada en EEPROM (ret=%d). Se aplica al reiniciar.", r);
+	return r;
+}
+
+/* ================= Modbus: la ATT es ESCLAVO (servidor) =================
+ * Mismo mapa de registros por los dos caminos:
+ *   - RTU  sobre RS-485 (usart2 -> ADM2587E), unit id 1
+ *   - TCP  sobre SPE, puerto 502
+ *
+ * Se usan INPUT REGISTERS (FC 04): son de solo lectura, que es lo que
+ * semanticamente corresponde a una medida.
+ *
+ *   IR 0-1 : posicion del encoder (int32, palabra alta primero)
+ *   IR 2-3 : flancos totales (uint32)
+ *   IR 4   : transiciones ilegales (rebotes / pulsos perdidos)
+ *   IR 5   : uptime en segundos
+ *   IR 6   : estado (bit0 = portadora SPE if1, bit1 = if2)
+ * ====================================================================== */
+#define MB_UNIT_ID   1
+#define MB_TCP_PORT  502
+
+static int mb_input_reg_rd(uint16_t addr, uint16_t *reg)
+{
+	uint32_t v;
+
+	switch (addr) {
+	case 0: *reg = (uint16_t)((uint32_t)enc_count >> 16); break;
+	case 1: *reg = (uint16_t)((uint32_t)enc_count & 0xFFFF); break;
+	case 2: *reg = (uint16_t)(enc_edges >> 16); break;
+	case 3: *reg = (uint16_t)(enc_edges & 0xFFFF); break;
+	case 4: *reg = (uint16_t)enc_errors; break;
+	case 5: *reg = (uint16_t)(k_uptime_get() / 1000); break;
+	case 6:
+		v = 0;
+		if (net_if_is_carrier_ok(net_if_get_by_index(1))) { v |= BIT(0); }
+		if (net_if_is_carrier_ok(net_if_get_by_index(2))) { v |= BIT(1); }
+		*reg = (uint16_t)v;
+		break;
+	default:
+		return -ENOTSUP;   /* -> el esclavo responde ILLEGAL DATA ADDRESS */
+	}
+	return 0;
+}
+
+/* --- HOLDING REGISTERS = configuracion (FC 03 leer / FC 06 escribir) ---
+ *   HR 0 : flags (bit0 = push L2, bit1 = Modbus RTU)
+ *   HR 1 : unit id Modbus (1..247)
+ *   HR 2 : baudios RTU / 100 (96, 192, 384, 1152)
+ *   HR 3 : paridad RTU (0=none 1=even 2=odd)
+ *   HR 4 : periodo del push L2, en decenas de ms
+ *   HR 9 : comando -> 0xA5 = guardar en EEPROM, 0x5A = valores de fabrica
+ */
+static int mb_holding_rd(uint16_t addr, uint16_t *reg)
+{
+	switch (addr) {
+	case 0: *reg = cfg.flags; break;
+	case 1: *reg = cfg.unit_id; break;
+	case 2: *reg = cfg.baud_div; break;
+	case 3: *reg = cfg.parity; break;
+	case 4: *reg = cfg.push_ms10; break;
+	case 9: *reg = 0; break;
+	default: return -ENOTSUP;
+	}
+	return 0;
+}
+
+static int mb_holding_wr(uint16_t addr, uint16_t reg)
+{
+	switch (addr) {
+	case 0: cfg.flags = reg & (CFG_F_PUSH | CFG_F_RTU); break;
+	case 1:
+		if (reg < 1 || reg > 247) { return -ENOTSUP; }   /* fuera del rango Modbus */
+		cfg.unit_id = reg;
+		break;
+	case 2:
+		if (reg != 96 && reg != 192 && reg != 384 && reg != 1152) { return -ENOTSUP; }
+		cfg.baud_div = reg;
+		break;
+	case 3:
+		if (reg > 2) { return -ENOTSUP; }
+		cfg.parity = reg;
+		break;
+	case 4:
+		if (reg < 5 || reg > 6000) { return -ENOTSUP; }  /* 50ms .. 60s */
+		cfg.push_ms10 = reg;
+		break;
+	case 9:
+		if (reg == 0xA5) { return cfg_save() < 0 ? -EIO : 0; }
+		if (reg == 0x5A) { cfg_defaults(); return cfg_save() < 0 ? -EIO : 0; }
+		return -ENOTSUP;
+	default: return -ENOTSUP;
+	}
+	return 0;
+}
+
+static struct modbus_user_callbacks mb_cbs = {
+	.input_reg_rd = mb_input_reg_rd,
+	.holding_reg_rd = mb_holding_rd,
+	.holding_reg_wr = mb_holding_wr,
+};
+
+/* ---- RTU sobre RS-485 ---- */
+static struct modbus_iface_param mb_rtu = {
+	.mode = MODBUS_MODE_RTU,
+	.server = { .user_cb = &mb_cbs, .unit_id = MB_UNIT_ID },
+	.serial = {
+		.baud = 19200,
+		.parity = UART_CFG_PARITY_EVEN,   /* 19200 8E1 = el default del estandar */
+		.stop_bits = UART_CFG_STOP_BITS_1,
+	},
+};
+
+/* ---- TCP sobre SPE: Zephyr no trae servidor, se usa RAW ADU ---- */
+static int mb_tcp_iface = -1;
+static volatile int mb_tcp_state;   /* 0=sin arrancar 1=escuchando -N=errno */
+static volatile int mb_tcp_conns;
+static int mb_tcp_client = -1;
+
+/* El callback del nucleo de Modbus SOLO copia y avisa. NO envia por el socket:
+ * se ejecuta en el contexto del nucleo de Modbus, y hacer E/S de red ahi (con
+ * buffers grandes en su pila) tumbaba la placa. El envio lo hace el hilo TCP.
+ * Es el patron del sample oficial samples/subsys/modbus/tcp_server. */
+static struct modbus_adu tmp_adu;
+K_SEM_DEFINE(mb_resp, 0, 1);
+
+static int mb_raw_tx(const int iface, const struct modbus_adu *adu, void *user_data)
+{
+	tmp_adu.trans_id = adu->trans_id;
+	tmp_adu.proto_id = adu->proto_id;
+	tmp_adu.length   = adu->length;
+	tmp_adu.unit_id  = adu->unit_id;
+	tmp_adu.fc       = adu->fc;
+	memcpy(tmp_adu.data, adu->data, MIN(adu->length, CONFIG_MODBUS_BUFFER_SIZE));
+	k_sem_give(&mb_resp);
+	return 0;
+}
+
+static struct modbus_iface_param mb_raw = {
+	.mode = MODBUS_MODE_RAW,
+	.server = { .user_cb = &mb_cbs, .unit_id = MB_UNIT_ID },
+	.rawcb = { .raw_tx_cb = mb_raw_tx, .user_data = NULL },
+};
+
+/* Encuadre MBAP con los helpers de Zephyr (modbus_raw_get_header /
+ * modbus_raw_put_header). Armarlo a mano estaba MAL: el codigo de funcion (fc)
+ * es un campo propio del ADU, no parte de data -> todo iba corrido un byte.
+ * MSG_WAITALL: sin el, un TCP fragmentado rompe el encuadre. */
+static int mb_tcp_reply(int client, struct modbus_adu *adu)
+{
+	uint8_t header[MODBUS_MBAP_AND_FC_LENGTH];
+
+	modbus_raw_put_header(adu, header);
+	if (zsock_send(client, header, sizeof(header), 0) < 0) { return -errno; }
+	if (adu->length && zsock_send(client, adu->data, adu->length, 0) < 0) { return -errno; }
+	return 0;
+}
+
+static int mb_tcp_txn(int client)
+{
+	uint8_t header[MODBUS_MBAP_AND_FC_LENGTH];
+	int rc;
+
+	rc = zsock_recv(client, header, sizeof(header), ZSOCK_MSG_WAITALL);
+	if (rc <= 0) { return rc == 0 ? -ENOTCONN : -errno; }
+
+	modbus_raw_get_header(&tmp_adu, header);
+	if (tmp_adu.length > CONFIG_MODBUS_BUFFER_SIZE) { return -EMSGSIZE; }
+
+	if (tmp_adu.length) {
+		rc = zsock_recv(client, tmp_adu.data, tmp_adu.length, ZSOCK_MSG_WAITALL);
+		if (rc <= 0) { return rc == 0 ? -ENOTCONN : -errno; }
+	}
+
+	if (modbus_raw_submit_rx(mb_tcp_iface, &tmp_adu)) {
+		LOG_ERR("Modbus TCP: submit_rx fallo");
+		return -EIO;
+	}
+	if (k_sem_take(&mb_resp, K_MSEC(1000)) != 0) {
+		LOG_ERR("Modbus TCP: sin respuesta del nucleo");
+		modbus_raw_set_server_failure(&tmp_adu);
+	}
+	return mb_tcp_reply(client, &tmp_adu);
+}
+
+static void mb_tcp_thread(void *a, void *b, void *c)
+{
+	struct sockaddr_in sa = { .sin_family = AF_INET, .sin_port = htons(MB_TCP_PORT),
+				.sin_addr.s_addr = htonl(INADDR_ANY) };
+	int srv;
+
+	srv = zsock_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if (srv < 0) {
+		mb_tcp_state = -errno;
+		LOG_ERR("Modbus TCP: socket fallo, errno=%d", errno);
+		return;
+	}
+	if (zsock_bind(srv, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
+		mb_tcp_state = -errno;
+		LOG_ERR("Modbus TCP: bind fallo, errno=%d", errno);
+		return;
+	}
+	if (zsock_listen(srv, 2) < 0) {
+		mb_tcp_state = -errno;
+		LOG_ERR("Modbus TCP: listen fallo, errno=%d", errno);
+		return;
+	}
+	mb_tcp_state = 1;
+	LOG_INF("Modbus TCP escuchando en el puerto %d (esclavo, unit id %u)",
+		MB_TCP_PORT, cfg.unit_id);
+
+	while (1) {
+		mb_tcp_client = zsock_accept(srv, NULL, NULL);
+		if (mb_tcp_client < 0) { k_msleep(200); continue; }
+		mb_tcp_conns++;
+		LOG_INF("Modbus TCP: maestro conectado");
+		while (mb_tcp_txn(mb_tcp_client) >= 0) {
+			/* siguiente transaccion */
+		}
+		LOG_INF("Modbus TCP: maestro desconectado");
+		zsock_close(mb_tcp_client);
+		mb_tcp_client = -1;
+	}
+}
+K_THREAD_DEFINE(mb_tcp_tid, 4096, mb_tcp_thread, NULL, NULL, NULL, 7, 0, 3000);
 
 static void enc_isr(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
@@ -255,12 +528,41 @@ int main(void)
 	/* 2) encoder */
 	enc_init();
 
-	if (!device_is_ready(rs485)) {
-		LOG_ERR("RS485 (usart2) NO listo");
-	} else {
-		uart_irq_callback_user_data_set(rs485, r485_isr, NULL);
-		uart_irq_rx_enable(rs485);
-		LOG_INF("RS485 listo: USART2 115200 8N1 (PA12=TX PA11=RX), DE automatico");
+	cfg_load();
+
+	{
+		int mb;
+		static const enum uart_config_parity par[3] = {
+			UART_CFG_PARITY_NONE, UART_CFG_PARITY_EVEN, UART_CFG_PARITY_ODD };
+
+		/* Los parametros salen de la EEPROM, no van fijos en el firmware:
+		 * en campo hay varios Varec en el mismo bus RS-485 y cada uno
+		 * necesita su propia unit id. */
+		mb_rtu.server.unit_id = cfg.unit_id;
+		mb_rtu.serial.baud    = cfg.baud_div * 100u;
+		mb_rtu.serial.parity  = par[cfg.parity % 3];
+		mb_raw.server.unit_id = cfg.unit_id;
+
+		/* RTU sobre el RS-485, solo si la configuracion lo pide */
+		if (!(cfg.flags & CFG_F_RTU)) {
+			LOG_INF("Modbus RTU: deshabilitado por configuracion");
+		} else {
+			mb = modbus_iface_get_by_name("modbus0");
+			if (mb < 0 || modbus_init_server(mb, mb_rtu)) {
+				LOG_ERR("Modbus RTU: no arranco (iface=%d)", mb);
+			} else {
+				LOG_INF("Modbus RTU listo: %u baud, paridad %u, esclavo unit id %u",
+					cfg.baud_div * 100u, cfg.parity, cfg.unit_id);
+			}
+		}
+
+		/* TCP sobre el SPE (RAW ADU). SIEMPRE activo: es el canal de
+		 * configuracion. Si se pudiera apagar, un cambio equivocado dejaria
+		 * el sensor inalcanzable. */
+		mb_tcp_iface = modbus_iface_get_by_name("RAW_0");
+		if (mb_tcp_iface < 0 || modbus_init_server(mb_tcp_iface, mb_raw)) {
+			LOG_ERR("Modbus RAW/TCP: no arranco (iface=%d)", mb_tcp_iface);
+		}
 	}
 
 
@@ -297,16 +599,10 @@ int main(void)
 
 	/* 5) transmitir la medida periodicamente */
 	while (1) {
-		k_msleep(500);
-		rs485_poll();
+		k_msleep(cfg.push_ms10 * 10u);
 		if (tx_sock < 0 && (seq % 8) == 0) {
 			LOG_WRN("SPE: socket cerrado, reintentando...");
 			spe_tx_init(iface);
-		}
-		if ((seq % 2) == 0) {
-			char b[64];
-			snprintk(b, sizeof(b), "ATT485 seq=%u enc=%d" "\r\n", seq, enc_count);
-			rs485_send(b);
 		}
 		{
 			/* transmitir por la PRIMERA iface con portadora, sea cual sea */
@@ -315,16 +611,18 @@ int main(void)
 				struct net_if *f = net_if_get_by_index(i);
 				if (f && net_if_is_carrier_ok(f)) { o = f; break; }
 			}
-			if (tx_sock >= 0 && o != NULL) {
+			if ((cfg.flags & CFG_F_PUSH) && tx_sock >= 0 && o != NULL) {
 				int r = spe_tx(o, ++seq);
 				if (r > 0) { sent++; } else { failed++; }
 			}
 		}
 		if ((seq % 4) == 0) {
-			LOG_INF("RS485 rx=%u bytes | encoder: count=%d edges=%u err=%u | SPE tx: ok=%u fail=%u | carrier: if1=%d if2=%d", r485_rx_bytes,
+			LOG_INF("enc: count=%d edges=%u err=%u | SPE tx ok=%u fail=%u | carrier if1=%d if2=%d"
+			" | MODBUS tcp_state=%d conns=%d iface=%d | cfg flags=0x%04x uid=%u",
 				enc_count, enc_edges, enc_errors, sent, failed,
-				net_if_is_carrier_ok(net_if_get_by_index(1)) ? 1 : 0,
-				net_if_is_carrier_ok(net_if_get_by_index(2)) ? 1 : 0);
+			net_if_is_carrier_ok(net_if_get_by_index(1)) ? 1 : 0,
+			net_if_is_carrier_ok(net_if_get_by_index(2)) ? 1 : 0,
+			mb_tcp_state, mb_tcp_conns, mb_tcp_iface, cfg.flags, cfg.unit_id);
 		}
 	}
 	return 0;
