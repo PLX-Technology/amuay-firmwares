@@ -30,8 +30,13 @@ from collections import defaultdict
 # ---------------------------------------------------------------- constantes
 ETHERTYPE = 0x88B5
 MAGIC = 0x56415245                      # "VARE"
-FRAME_FMT = "!IIHiIIII"                 # magic, ver/seq, tank_id, count, edges, errors, uptime, rsv
+
+# Trama de la ATT (28 bytes, big-endian). El `version` importa: sin el,
+# cualquier cambio futuro del formato rompe a los consumidores en silencio.
+#            magic  ver  tank  seq  count edges errors uptime
+FRAME_FMT = "!I     H    H     I    i     I     I      I".replace(" ", "")
 FRAME_LEN = struct.calcsize(FRAME_FMT)
+FRAME_VERSION = 1
 
 STOP = threading.Event()
 
@@ -228,6 +233,10 @@ class Live:
 
 
 # ================================================================ ingesta
+_warned_ver: set = set()
+_warned_id: set = set()
+
+
 def ingest(cfg: dict, store: Store, live: Live, outs: list):
     iface = find_iface(cfg["ingest"]["iface_driver"], cfg["ingest"].get("iface", ""))
     print(f"[spe] escuchando ethertype 0x{ETHERTYPE:04X} en {iface}")
@@ -251,11 +260,26 @@ def ingest(cfg: dict, store: Store, live: Live, outs: list):
             continue
         mac = ":".join(f"{b:02x}" for b in pkt[6:12])
         try:
-            magic, seq, tank_id, count, edges, errors, uptime, _ = struct.unpack(
+            magic, ver, tank_id, seq, count, edges, errors, uptime = struct.unpack(
                 FRAME_FMT, pkt[14:14 + FRAME_LEN])
         except struct.error:
             continue
         if magic != MAGIC:
+            continue
+        if ver != FRAME_VERSION:
+            # Una ATT con firmware distinto: mejor decirlo que interpretar mal
+            # sus bytes. Se avisa una vez por MAC, no en cada trama.
+            if mac not in _warned_ver:
+                _warned_ver.add(mac)
+                print(f"[spe] {mac} habla version {ver}, esperaba {FRAME_VERSION}"
+                      f" -- ignorada", file=sys.stderr)
+            continue
+        if tank_id == 0:
+            # 0 = sin asignar. Es un error de puesta en marcha, no un dato.
+            if mac not in _warned_id:
+                _warned_id.add(mac)
+                print(f"[spe] {mac} reporta tank_id=0 (sin asignar): escribele el"
+                      f" HR 5 por Modbus y guarda con HR 9=0xA5", file=sys.stderr)
             continue
 
         if time.time() - last_cfg > 30:
