@@ -17,3 +17,6 @@ build/
 
 # Artefactos de la maquina de build
 tpu-artifacts/
+
+# Claves del equipo, nunca versionar
+tpu/varec-gateway/secrets.env

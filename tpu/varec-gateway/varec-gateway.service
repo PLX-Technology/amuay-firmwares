@@ -26,7 +26,13 @@ EnvironmentFile=-/etc/varec-gateway/secrets.env
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-ReadWritePaths=/mnt/ssd/varec
+# ProtectSystem=strict deja todo en solo lectura. Se abre SOLO lo justo:
+#   /mnt/ssd  -> la base de datos (el punto de montaje entero: el namespace
+#                no ve un submontaje hecho despues)
+#   /etc/varec-gateway -> la UI reescribe su propio config
+ReadWritePaths=/mnt/ssd
+ReadWritePaths=/etc/varec-gateway
+BindPaths=/mnt/ssd
 
 [Install]
 WantedBy=multi-user.target

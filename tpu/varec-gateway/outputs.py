@@ -229,11 +229,14 @@ class ModbusOut:
         return pdu + struct.pack("<H", self.crc16(pdu))
 
 
-# ============================================================ HTTP / JSON
+# ============================================================ HTTP / JSON / UI
 class HttpOut:
-    def __init__(self, cfg, live, store, stop):
+    def __init__(self, cfg, live, store, stop, full_cfg=None, cfg_path=None):
         import http.server
+        import webui
         self.live, self.store, self.stop = live, store, stop
+        self.full_cfg = full_cfg or {}
+        self.cfg_path = cfg_path
         outer = self
 
         class H(http.server.BaseHTTPRequestHandler):
@@ -246,10 +249,51 @@ class HttpOut:
                 self.end_headers()
                 self.wfile.write(b)
 
+            def _auth(self) -> bool:
+                """La UI puede reconfigurar el equipo: sin clave valida, nada."""
+                if webui.check_auth(self.headers, outer.full_cfg):
+                    return True
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", 'Basic realm="Pasarela Varec"')
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return False
+
+            def do_POST(self):
+                if self.path.rstrip("/") != "/api/config":
+                    return self._send({"error": "no existe"}, 404)
+                if not self._auth():
+                    return
+                try:
+                    n = int(self.headers.get("Content-Length", 0))
+                    new = json.loads(self.rfile.read(n))
+                except Exception as e:
+                    return self._send({"error": f"json invalido: {e}"}, 400)
+                ok, msg = webui.save_config(outer.cfg_path, outer.full_cfg, new)
+                if not ok:
+                    return self._send({"error": msg}, 400)
+                self._send({"ok": True, "msg": "guardado, reiniciando"})
+                # Salir en diferido: primero se responde al navegador, luego
+                # systemd (Restart=always) levanta el proceso con el config nuevo.
+                webui.restart_later(1.0)
+
             def do_GET(self):
                 p = self.path.split("?")[0].rstrip("/")
                 snap = outer.live.snapshot()
-                if p in ("", "/api", "/api/tanks"):
+                if p in ("", "/ui", "/index.html"):
+                    if not self._auth():
+                        return
+                    b = webui.PAGE.encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(b)))
+                    self.end_headers()
+                    self.wfile.write(b)
+                elif p == "/api/config":
+                    if not self._auth():
+                        return
+                    self._send(webui.public_config(outer.full_cfg))
+                elif p in ("/api", "/api/tanks"):
                     self._send({"tanks": list(snap.values()),
                                 "n": len(snap), "ts": int(time.time())})
                 elif p.startswith("/api/tank/"):
@@ -269,8 +313,9 @@ class HttpOut:
                         self._send(snap.get(tid) or {"error": "sin datos"},
                                    200 if tid in snap else 404)
                 else:
-                    self._send({"rutas": ["/api/tanks", "/api/tank/<id>",
-                                          "/api/tank/<id>/history?res=raw|1m|1h"]}, 404)
+                    self._send({"rutas": ["/  (UI web)", "/api/tanks", "/api/tank/<id>",
+                                          "/api/tank/<id>/history?res=raw|1m|1h",
+                                          "/api/config"]}, 404)
 
             def log_message(self, *a):
                 pass
@@ -279,7 +324,10 @@ class HttpOut:
             (cfg.get("bind", "0.0.0.0"), cfg.get("port", 8080)), H)
         threading.Thread(target=self.srv.serve_forever, daemon=True,
                          name="http").start()
-        print(f"[http] sirviendo en :{cfg.get('port', 8080)}")
+        port = cfg.get("port", 8080)
+        prot = "con clave" if (os.environ.get("VAREC_UI_PASS") or
+                               (full_cfg or {}).get("ui", {}).get("password")) else "SIN CLAVE"
+        print(f"[http] UI en :{port} ({prot}) | API en :{port}/api/tanks")
 
     def on_sample(self, rec):
         pass
@@ -296,5 +344,6 @@ def build_outputs(cfg, live, store, stop) -> list:
     if cfg.get("modbus_tcp", {}).get("enabled") or cfg.get("modbus_rtu", {}).get("enabled"):
         outs.append(ModbusOut(cfg.get("modbus_tcp"), cfg.get("modbus_rtu"), live, stop))
     if cfg.get("http", {}).get("enabled"):
-        outs.append(HttpOut(cfg["http"], live, store, stop))
+        outs.append(HttpOut(cfg["http"], live, store, stop,
+                            full_cfg=cfg, cfg_path=cfg.get("_path")))
     return outs

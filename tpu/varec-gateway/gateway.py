@@ -325,6 +325,7 @@ def main():
     ap.add_argument("--config", default="/etc/varec-gateway/config.yaml")
     args = ap.parse_args()
     cfg = load_cfg(args.config)
+    cfg["_path"] = args.config          # la UI necesita saber donde guardar
 
     def stop(*_):
         print("\n[gw] parando...")
