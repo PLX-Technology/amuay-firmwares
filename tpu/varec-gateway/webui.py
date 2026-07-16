@@ -203,8 +203,12 @@ PAGE = r"""<!doctype html>
     <div class="card">
       <h2>Tanques</h2>
       <table><thead><tr><th>ID</th><th>Nombre</th><th>Valor</th><th>Errores</th>
-        <th>Últ. dato</th><th>Estado</th></tr></thead><tbody id="tb">
-        <tr><td colspan="6" class="mut">cargando…</td></tr></tbody></table>
+        <th>Últ. dato</th><th>Estado</th><th></th></tr></thead><tbody id="tb">
+        <tr><td colspan="7" class="mut">cargando…</td></tr></tbody></table>
+      <p class="mut" style="margin:10px 0 0">El <b>tank_id</b> vive en la EEPROM de cada
+        sensor y viaja en cada trama: al cambiarlo aquí se escribe <b>en el sensor</b> por
+        Modbus, no en la pasarela. Así, si sustituyes una ATT averiada, le pones su id y
+        listo.</p>
     </div>
   </div>
 
@@ -238,17 +242,51 @@ document.querySelectorAll('.tab').forEach(x=>x.onclick=()=>{
   $('#cfg').style.display  = x.dataset.t=='cfg'?'':'none';
 });
 
+let editing=false;
+
+async function saveId(btn){
+  const tr=btn.closest('tr'), inp=tr.querySelector('.tid');
+  const old=btn.dataset.id, nid=parseInt(inp.value,10);
+  if(!confirm(`¿Cambiar el tank_id ${old} → ${nid}?
+
+Se escribe en la EEPROM del `+
+              `sensor por Modbus y se aplica de inmediato.`)) return;
+  btn.disabled=true; btn.textContent='…';
+  try{
+    const r=await fetch(`/api/tank/${old}/config`,{method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({tank_id:nid})});
+    const d=await r.json();
+    if(r.ok){ btn.textContent='✓'; setTimeout(tanks,1500); }
+    else { alert('No se pudo: '+(d.error||'error')); btn.textContent='Guardar';
+           btn.disabled=false; }
+  }catch(e){ alert('Error: '+e); btn.textContent='Guardar'; btn.disabled=false; }
+}
+
 async function tanks(){
+  // No repintar mientras se edita: borraria lo que el usuario esta escribiendo.
+  if(document.querySelector('.tid:focus')) return;
   try{
     const r=await fetch('/api/tanks'); const d=await r.json();
     $('#hdr').textContent = d.n+' tanque'+(d.n==1?'':'s');
     $('#tb').innerHTML = d.tanks.length ? d.tanks.map(t=>`<tr>
-      <td>${t.tank_id}</td><td>${t.name||''}</td>
+      <td><input type="number" class="tid" value="${t.tank_id}" data-old="${t.tank_id}"
+           style="width:80px"></td>
+      <td>${t.name||''}</td>
       <td><b>${(t.value??0).toFixed(2)}</b> <span class="mut">${t.unit||''}</span></td>
       <td>${t.errors??0}</td><td>${t.age_s}s</td>
       <td><span class="dot ${t.online?'up':'down'}"></span>${t.online?'en línea':'sin señal'}</td>
+      <td><button class="sid" data-id="${t.tank_id}" style="padding:5px 10px;font-size:13px"
+           disabled>Guardar</button></td>
       </tr>`).join('') :
-      '<tr><td colspan="6" class="mut">ningún tanque reportando todavía</td></tr>';
+      '<tr><td colspan="7" class="mut">ningún tanque reportando todavía</td></tr>';
+    // El boton solo se activa si el valor cambio: evita escrituras accidentales
+    // a la EEPROM del sensor.
+    document.querySelectorAll('.tid').forEach(x=>x.oninput=()=>{
+      const b=x.closest('tr').querySelector('.sid');
+      b.disabled = (x.value==x.dataset.old || !x.value);
+    });
+    document.querySelectorAll('.sid').forEach(b=>b.onclick=()=>saveId(b));
   }catch(e){ $('#hdr').textContent='sin conexión'; }
 }
 

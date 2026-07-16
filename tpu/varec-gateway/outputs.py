@@ -260,7 +260,10 @@ class HttpOut:
                 return False
 
             def do_POST(self):
-                if self.path.rstrip("/") != "/api/config":
+                p = self.path.rstrip("/")
+                if p.startswith("/api/tank/"):
+                    return self._tank_post(p)
+                if p != "/api/config":
                     return self._send({"error": "no existe"}, 404)
                 if not self._auth():
                     return
@@ -276,6 +279,54 @@ class HttpOut:
                 # Salir en diferido: primero se responde al navegador, luego
                 # systemd (Restart=always) levanta el proceso con el config nuevo.
                 webui.restart_later(1.0)
+
+            def _tank_post(self, p):
+                """Reconfigura un sensor ATT en remoto por Modbus."""
+                if not self._auth():
+                    return
+                import sensor
+                parts = p.split("/")
+                try:
+                    tid = int(parts[3])
+                except (IndexError, ValueError):
+                    return self._send({"error": "tank_id invalido"}, 400)
+                try:
+                    n = int(self.headers.get("Content-Length", 0))
+                    body = json.loads(self.rfile.read(n))
+                except Exception as e:
+                    return self._send({"error": f"json invalido: {e}"}, 400)
+
+                snap = outer.live.snapshot()
+                rec = snap.get(tid)
+                if not rec:
+                    return self._send({"error": "ese tanque no esta reportando"}, 404)
+                ip = sensor.mac_to_ip(rec["mac"])
+                if not ip:
+                    # Sin IP no hay Modbus. Suele ser que el sensor aun no tomo
+                    # DHCP: es informacion util, no un fallo generico.
+                    return self._send({"error": f"no se encuentra la IP de {rec['mac']}"
+                                                f" (¿tomo DHCP?)"}, 409)
+                try:
+                    unit = int(body.get("unit_id") or 1)
+                    if "tank_id" in body:
+                        nid = int(body["tank_id"])
+                        if not (1 <= nid <= 65535):
+                            return self._send({"error": "tank_id debe ser 1-65535"}, 400)
+                        # Dos sensores con el mismo tank_id es el error de campo
+                        # que mas cuesta detectar despues. Pero comparar solo el id
+                        # da falsos positivos: la identidad ANTERIOR de este mismo
+                        # sensor sigue un rato en el estado vivo. Comparar la MAC.
+                        other = snap.get(nid)
+                        if nid != tid and other and other.get("mac") != rec["mac"]:
+                            return self._send({"error": f"el tank_id {nid} ya lo usa"
+                                                        f" otro sensor ({other['mac']})"},
+                                              409)
+                        sensor.set_tank_id(ip, nid, unit)
+                    if "push_ms" in body:
+                        sensor.set_push_ms(ip, int(body["push_ms"]), unit)
+                except Exception as e:
+                    return self._send({"error": str(e)}, 502)
+                self._send({"ok": True, "ip": ip})
 
             def do_GET(self):
                 p = self.path.split("?")[0].rstrip("/")

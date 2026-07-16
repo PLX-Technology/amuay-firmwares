@@ -294,7 +294,10 @@ def ingest(cfg: dict, store: Store, live: Live, outs: list):
         c = tcfg.get(tank_id, {})
         rec = {
             "ts": now(), "tank_id": tank_id, "mac": mac, "seq": seq,
-            "count": count, "edges": edges, "errors": errors, "uptime_s": uptime,
+            "count": count, "edges": edges, "errors": errors,
+            # La ATT manda MILISEGUNDOS (k_uptime_get_32). Convertir aqui: un
+            # uptime de "121742 s" tras un reinicio delata el error de unidades.
+            "uptime_s": uptime // 1000,
             "value": count * (c.get("scale") or 1.0) + (c.get("offset") or 0.0),
             "unit": c.get("unit") or "mm",
             "name": c.get("name") or f"tank{tank_id}",
