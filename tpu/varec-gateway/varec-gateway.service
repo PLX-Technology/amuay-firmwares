@@ -1,0 +1,32 @@
+[Unit]
+Description=Pasarela Varec (SPE -> SQLite -> MQTT/Modbus/HTTP)
+After=network.target
+# La base vive en el SSD M.2, no en la eMMC: sin el SSD montado no arranca.
+RequiresMountsFor=/mnt/ssd
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/varec-gateway
+ExecStart=/usr/bin/python3 /opt/varec-gateway/gateway.py --config /etc/varec-gateway/config.yaml
+Restart=always
+RestartSec=5
+
+# AF_PACKET necesita privilegios de red. Nada mas: el servicio no corre como root.
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=yes
+
+# Modbus RTU necesita el puerto serie
+SupplementaryGroups=dialout
+
+# La clave del broker por entorno, nunca en el config versionado
+EnvironmentFile=-/etc/varec-gateway/secrets.env
+
+# Endurecido: solo puede escribir donde debe
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/mnt/ssd/varec
+
+[Install]
+WantedBy=multi-user.target

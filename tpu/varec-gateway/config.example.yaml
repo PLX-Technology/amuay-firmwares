@@ -1,0 +1,71 @@
+# Pasarela Varec — configuracion.
+# Copiar a /etc/varec-gateway/config.yaml y ajustar.
+
+# --------------------------------------------------------------- ingesta
+ingest:
+  # La interfaz SPE se detecta por DRIVER (adin1110), NUNCA por nombre:
+  # los nombres eth1/eth2/eth3 se intercambian entre arranques en esta CM5.
+  iface_driver: adin1110
+  iface: ""                 # forzar un nombre concreto (deja vacio para autodetectar)
+  ethertype: 0x88B5
+
+  # Un tanque que lleva este tiempo sin reportar pasa a 'offline'.
+  # Regla: 3 periodos + margen. Con push cada 30s -> 120s.
+  offline_after_s: 120
+
+# --------------------------------------------------- almacenamiento (SSD M.2)
+store:
+  # OJO: en el SSD, no en la eMMC. La eMMC es solo para el OS.
+  path: /mnt/ssd/varec/varec.db
+
+  retention:
+    raw_days: 7             # muestras crudas
+    minute_days: 90         # medias por minuto
+    hour_days: 3650         # medias por hora (~10 años)
+
+  # Guardar cada muestra cruda de 30+ tanques durante años no es viable
+  # ni util. Ademas del periodo, se descarta lo que no aporta:
+  deadband: 0.0             # 0 = guardar todo lo que llegue
+
+# ------------------------------------------------------------- salidas
+mqtt:
+  enabled: false
+  host: localhost
+  port: 1883
+  username: ""
+  password: ""              # dejar vacio y usar VAREC_MQTT_PASS en el entorno
+  topic_prefix: varec
+  # publica en:  varec/<tank_id>/value  |  /status  |  /raw
+  retain: true
+  qos: 1
+
+modbus_tcp:
+  enabled: true
+  bind: 0.0.0.0
+  port: 502
+  unit_id: 1
+
+modbus_rtu:
+  enabled: false
+  # OJO: la TPU tiene UN solo puerto RS-485. Si se usa para SERVIR al SCADA,
+  # no puede a la vez ser maestro de las ATT por ese bus. La ingesta va por
+  # SPE, asi que el RS-485 queda libre como salida.
+  device: /dev/ttyAMA2
+  baud: 19200
+  parity: E                 # 19200 8E1 = el default del estandar Modbus
+  unit_id: 1
+
+http:
+  enabled: true
+  bind: 0.0.0.0
+  port: 8080
+
+# ------------------------------------------------------------- tanques
+# El tank_id lo lleva cada ATT en su EEPROM y viaja en la trama. Aqui solo
+# se le pone etiqueta y escala; si un tanque no aparece, se auto-registra.
+tanks:
+  - tank_id: 1
+    name: "Tanque 1"
+    scale: 1.0              # pulsos del encoder -> unidad de ingenieria
+    offset: 0.0
+    unit: mm

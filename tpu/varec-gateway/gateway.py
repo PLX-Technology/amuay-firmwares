@@ -1,0 +1,323 @@
+#!/usr/bin/env python3
+"""
+Pasarela Varec — corre en la CM5 de la TPU.
+
+Recibe la medida de N sensores Varec 2500 (tarjeta ATT) por SPE, la almacena
+en el SSD M.2 y la reexpone por MQTT, Modbus TCP, Modbus RTU y HTTP/JSON.
+
+    ATT (encoder) --SPE 0x88B5--> power switch --> TPU  ==> MQTT
+                                                        ==> Modbus TCP/RTU
+                                                        ==> HTTP/JSON
+
+Cada tanque se identifica por el `tank_id` que la propia ATT lleva en su
+EEPROM y embebe en cada trama: la placa lleva su identidad consigo, asi que
+se puede sustituir una ATT averiada sin tocar la pasarela.
+
+Arranque:  python3 gateway.py --config /etc/varec-gateway/config.yaml
+"""
+import argparse
+import os
+import queue
+import signal
+import socket
+import sqlite3
+import struct
+import sys
+import threading
+import time
+from collections import defaultdict
+
+# ---------------------------------------------------------------- constantes
+ETHERTYPE = 0x88B5
+MAGIC = 0x56415245                      # "VARE"
+FRAME_FMT = "!IIHiIIII"                 # magic, ver/seq, tank_id, count, edges, errors, uptime, rsv
+FRAME_LEN = struct.calcsize(FRAME_FMT)
+
+STOP = threading.Event()
+
+
+# ================================================================ utilidades
+def now() -> int:
+    return int(time.time())
+
+
+def find_iface(driver: str, forced: str = "") -> str:
+    """Localiza la interfaz SPE por DRIVER, nunca por nombre: los nombres
+    eth1/eth2/eth3 se intercambian entre arranques en esta CM5."""
+    if forced:
+        return forced
+    base = "/sys/class/net"
+    for name in sorted(os.listdir(base)):
+        try:
+            drv = os.path.basename(os.readlink(f"{base}/{name}/device/driver"))
+            if drv == driver:
+                return name
+        except OSError:
+            continue
+    raise RuntimeError(f"no encuentro ninguna interfaz con driver '{driver}'")
+
+
+# ================================================================ almacen
+class Store:
+    """SQLite en el SSD. Un solo hilo escribe (cola) para no pelear por el
+    lock; los lectores usan sus propias conexiones en modo WAL."""
+
+    def __init__(self, path: str, retention: dict):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        self.path = path
+        self.retention = retention
+        self.q: "queue.Queue" = queue.Queue(maxsize=10000)
+        self._init_schema()
+        threading.Thread(target=self._writer, daemon=True, name="store").start()
+        threading.Thread(target=self._roller, daemon=True, name="roll").start()
+
+    def _conn(self):
+        c = sqlite3.connect(self.path, timeout=10)
+        c.execute("PRAGMA journal_mode=WAL")
+        c.execute("PRAGMA synchronous=NORMAL")
+        return c
+
+    def _init_schema(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(here, "schema.sql")) as f:
+            sql = f.read()
+        c = self._conn()
+        c.executescript(sql)
+        c.commit()
+        c.close()
+
+    def put(self, rec: dict):
+        try:
+            self.q.put_nowait(rec)
+        except queue.Full:
+            # Perder una muestra es preferible a bloquear la ingesta: el
+            # siguiente push llega en 30s. Se registra para no ocultarlo.
+            print("[store] cola llena, muestra descartada", file=sys.stderr)
+
+    def _writer(self):
+        c = self._conn()
+        pend = []
+        last_flush = time.time()
+        while not STOP.is_set():
+            try:
+                pend.append(self.q.get(timeout=1.0))
+            except queue.Empty:
+                pass
+            # Agrupar escrituras: con 30+ tanques evita un commit por trama
+            # y reduce el desgaste del SSD.
+            if pend and (len(pend) >= 50 or time.time() - last_flush > 5):
+                try:
+                    c.executemany(
+                        "INSERT OR REPLACE INTO samples_raw"
+                        "(ts,tank_id,count,value,edges,errors,uptime_s)"
+                        " VALUES(?,?,?,?,?,?,?)",
+                        [(r["ts"], r["tank_id"], r["count"], r["value"],
+                          r["edges"], r["errors"], r["uptime_s"]) for r in pend],
+                    )
+                    c.commit()
+                except Exception as e:
+                    print(f"[store] error escribiendo: {e}", file=sys.stderr)
+                pend.clear()
+                last_flush = time.time()
+        c.close()
+
+    def _roller(self):
+        """Consolida crudo -> 1m -> 1h y purga lo vencido. Sin esto, el
+        historico largo no cabe."""
+        while not STOP.is_set():
+            for _ in range(600):                 # cada 10 min, saliendo rapido
+                if STOP.is_set():
+                    return
+                time.sleep(1)
+            try:
+                c = self._conn()
+                # crudo -> minuto
+                c.execute("""
+                    INSERT OR REPLACE INTO samples_1m
+                      (ts,tank_id,value_avg,value_min,value_max,n,errors)
+                    SELECT (ts/60)*60, tank_id, AVG(value), MIN(value), MAX(value),
+                           COUNT(*), MAX(errors)
+                      FROM samples_raw WHERE ts < strftime('%s','now') - 120
+                     GROUP BY tank_id, ts/60
+                """)
+                # minuto -> hora
+                c.execute("""
+                    INSERT OR REPLACE INTO samples_1h
+                      (ts,tank_id,value_avg,value_min,value_max,n,errors)
+                    SELECT (ts/3600)*3600, tank_id, AVG(value_avg), MIN(value_min),
+                           MAX(value_max), SUM(n), MAX(errors)
+                      FROM samples_1m WHERE ts < strftime('%s','now') - 7200
+                     GROUP BY tank_id, ts/3600
+                """)
+                # retencion
+                r = self.retention
+                c.execute("DELETE FROM samples_raw WHERE ts < ?",
+                          (now() - r["raw_days"] * 86400,))
+                c.execute("DELETE FROM samples_1m WHERE ts < ?",
+                          (now() - r["minute_days"] * 86400,))
+                c.execute("DELETE FROM samples_1h WHERE ts < ?",
+                          (now() - r["hour_days"] * 86400,))
+                c.commit()
+                c.close()
+            except Exception as e:
+                print(f"[store] error consolidando: {e}", file=sys.stderr)
+
+    def upsert_tank(self, tank_id: int, mac: str):
+        c = self._conn()
+        row = c.execute("SELECT mac FROM tanks WHERE tank_id=?", (tank_id,)).fetchone()
+        if row is None:
+            c.execute("INSERT INTO tanks(tank_id,mac,first_seen,last_seen) VALUES(?,?,?,?)",
+                      (tank_id, mac, now(), now()))
+            c.execute("INSERT INTO events(ts,tank_id,kind,detail) VALUES(?,?,?,?)",
+                      (now(), tank_id, "online", f"alta automatica, mac={mac}"))
+        else:
+            if row[0] and row[0] != mac:
+                # Dos placas con el mismo tank_id: error de campo. Gritarlo.
+                c.execute("INSERT INTO id_conflicts(ts,tank_id,mac_old,mac_new)"
+                          " VALUES(?,?,?,?)", (now(), tank_id, row[0], mac))
+                c.execute("INSERT INTO events(ts,tank_id,kind,detail) VALUES(?,?,?,?)",
+                          (now(), tank_id, "conflict",
+                           f"tank_id duplicado: {row[0]} -> {mac}"))
+                print(f"[!] CONFLICTO: tank_id {tank_id} visto en {row[0]} y {mac}",
+                      file=sys.stderr)
+            c.execute("UPDATE tanks SET mac=?, last_seen=? WHERE tank_id=?",
+                      (mac, now(), tank_id))
+        c.commit()
+        c.close()
+
+    def tank_cfg(self) -> dict:
+        c = self._conn()
+        out = {r[0]: {"name": r[1], "scale": r[2], "offset": r[3], "unit": r[4]}
+               for r in c.execute("SELECT tank_id,name,scale,offset,unit FROM tanks")}
+        c.close()
+        return out
+
+    def history(self, tank_id: int, table: str, since: int, limit: int = 5000):
+        c = self._conn()
+        rows = c.execute(
+            f"SELECT * FROM {table} WHERE tank_id=? AND ts>=? ORDER BY ts DESC LIMIT ?",
+            (tank_id, since, limit)).fetchall()
+        c.close()
+        return rows
+
+
+# ================================================================ estado vivo
+class Live:
+    """Ultimo valor de cada tanque, en RAM. Es lo que consultan MQTT, Modbus
+    y HTTP: nadie toca el disco para leer el valor actual."""
+
+    def __init__(self, offline_after: int):
+        self.lock = threading.Lock()
+        self.tanks: dict = {}
+        self.offline_after = offline_after
+
+    def update(self, rec: dict):
+        with self.lock:
+            self.tanks[rec["tank_id"]] = rec
+
+    def snapshot(self) -> dict:
+        t = now()
+        with self.lock:
+            out = {}
+            for tid, r in self.tanks.items():
+                d = dict(r)
+                d["age_s"] = t - r["ts"]
+                d["online"] = d["age_s"] <= self.offline_after
+                out[tid] = d
+            return out
+
+
+# ================================================================ ingesta
+def ingest(cfg: dict, store: Store, live: Live, outs: list):
+    iface = find_iface(cfg["ingest"]["iface_driver"], cfg["ingest"].get("iface", ""))
+    print(f"[spe] escuchando ethertype 0x{ETHERTYPE:04X} en {iface}")
+    s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETHERTYPE))
+    s.bind((iface, 0))
+    s.settimeout(1.0)
+    tcfg = store.tank_cfg()
+    last_cfg = time.time()
+
+    while not STOP.is_set():
+        try:
+            pkt = s.recv(2048)
+        except socket.timeout:
+            continue
+        except OSError as e:
+            print(f"[spe] {e}", file=sys.stderr)
+            time.sleep(1)
+            continue
+
+        if len(pkt) < 14 + FRAME_LEN:
+            continue
+        mac = ":".join(f"{b:02x}" for b in pkt[6:12])
+        try:
+            magic, seq, tank_id, count, edges, errors, uptime, _ = struct.unpack(
+                FRAME_FMT, pkt[14:14 + FRAME_LEN])
+        except struct.error:
+            continue
+        if magic != MAGIC:
+            continue
+
+        if time.time() - last_cfg > 30:
+            tcfg = store.tank_cfg()
+            last_cfg = time.time()
+        if tank_id not in tcfg:
+            store.upsert_tank(tank_id, mac)
+            tcfg = store.tank_cfg()
+        else:
+            store.upsert_tank(tank_id, mac)
+
+        c = tcfg.get(tank_id, {})
+        rec = {
+            "ts": now(), "tank_id": tank_id, "mac": mac, "seq": seq,
+            "count": count, "edges": edges, "errors": errors, "uptime_s": uptime,
+            "value": count * (c.get("scale") or 1.0) + (c.get("offset") or 0.0),
+            "unit": c.get("unit") or "mm",
+            "name": c.get("name") or f"tank{tank_id}",
+        }
+        live.update(rec)
+        store.put(rec)
+        for o in outs:
+            try:
+                o.on_sample(rec)
+            except Exception as e:
+                print(f"[out] {e}", file=sys.stderr)
+    s.close()
+
+
+# ================================================================ main
+def load_cfg(path: str) -> dict:
+    try:
+        import yaml
+    except ImportError:
+        print("Falta PyYAML:  sudo apt install python3-yaml", file=sys.stderr)
+        sys.exit(1)
+    with open(path) as f:
+        return yaml.safe_load(f)
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Pasarela Varec (SPE -> MQTT/Modbus/HTTP)")
+    ap.add_argument("--config", default="/etc/varec-gateway/config.yaml")
+    args = ap.parse_args()
+    cfg = load_cfg(args.config)
+
+    def stop(*_):
+        print("\n[gw] parando...")
+        STOP.set()
+    signal.signal(signal.SIGINT, stop)
+    signal.signal(signal.SIGTERM, stop)
+
+    store = Store(cfg["store"]["path"], cfg["store"]["retention"])
+    live = Live(cfg["ingest"]["offline_after_s"])
+
+    outs = []
+    from outputs import build_outputs           # noqa: E402
+    outs = build_outputs(cfg, live, store, STOP)
+
+    ingest(cfg, store, live, outs)
+    print("[gw] fin")
+
+
+if __name__ == "__main__":
+    main()
