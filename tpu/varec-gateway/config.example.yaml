@@ -13,6 +13,23 @@ ingest:
   # Regla: 3 periodos + margen. Con push cada 30s -> 120s.
   offline_after_s: 120
 
+  # SPE roto (OA-SPI del ADIN2111): poner en false para no arrancar el sniffer.
+  enabled: true
+
+# ------------------------------------------- ingesta por Modbus RTU (RS-485)
+# Alternativa al SPE: la gateway hace de MAESTRO Modbus y consulta a la ATT
+# (esclavo) por RS-485. Usa el nivel ya calibrado por la ATT (IR 7-8). Util
+# cuando el SPE de la ATT no funciona. OJO: no habilitar a la vez modbus_rtu
+# (salida esclavo) en el MISMO bus/puerto.
+modbus_ingest:
+  enabled: false
+  device: /dev/ttyAMA2
+  baud: 19200
+  parity: E                 # N/E/O
+  unit_id: 1
+  poll_s: 2                 # periodo de consulta
+  tank_id: 0                # fallback si la ATT reporta tank_id=0 (0 = ignorar)
+
 # --------------------------------------------------- almacenamiento (SSD M.2)
 store:
   # OJO: en el SSD, no en la eMMC. La eMMC es solo para el OS.

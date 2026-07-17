@@ -312,6 +312,98 @@ def ingest(cfg: dict, store: Store, live: Live, outs: list):
     s.close()
 
 
+# ============================================ ingesta por Modbus RTU
+# El SPE del ATT (ADIN2111/OA-SPI) esta roto, asi que el ATT solo habla por
+# RS-485. Aqui la gateway hace de MAESTRO Modbus: consulta al ATT (esclavo) y
+# mete el mismo `rec` en el pipeline (Store/Live/outputs), igual que la ingesta
+# SPE. Usa el nivel ya calibrado por el ATT (IR7-8) como valor.
+def _rtu_crc16(d: bytes) -> int:
+    c = 0xFFFF
+    for b in d:
+        c ^= b
+        for _ in range(8):
+            c = (c >> 1) ^ 0xA001 if c & 1 else c >> 1
+    return c
+
+
+def _rtu_read(ser, unit: int, func: int, addr: int, count: int):
+    req = struct.pack(">BBHH", unit, func, addr, count)
+    req += struct.pack("<H", _rtu_crc16(req))
+    ser.reset_input_buffer()
+    ser.write(req)
+    hdr = ser.read(3)                       # unit, func, byte_count
+    if len(hdr) < 3 or hdr[0] != unit or hdr[1] != func:
+        return None
+    nbytes = hdr[2]
+    body = ser.read(nbytes + 2)             # datos + CRC
+    if len(body) < nbytes + 2:
+        return None
+    data = body[:nbytes]
+    if struct.unpack("<H", body[nbytes:nbytes + 2])[0] != _rtu_crc16(hdr + data):
+        return None
+    return struct.unpack(">" + "H" * (nbytes // 2), data)
+
+
+def _s32(hi: int, lo: int) -> int:
+    v = ((hi & 0xFFFF) << 16) | (lo & 0xFFFF)
+    return v - (1 << 32) if v & 0x80000000 else v
+
+
+def ingest_modbus(cfg: dict, store: Store, live: Live, outs: list):
+    mc = cfg.get("modbus_ingest", {})
+    import serial
+    par = {"N": serial.PARITY_NONE, "E": serial.PARITY_EVEN,
+           "O": serial.PARITY_ODD}[mc.get("parity", "E")]
+    dev = mc.get("device", "/dev/ttyAMA2")
+    unit = mc.get("unit_id", 1)
+    poll = mc.get("poll_s", 2)
+    fallback_id = mc.get("tank_id", 0)      # si el ATT reporta tank_id=0
+    try:
+        ser = serial.Serial(dev, mc.get("baud", 19200), parity=par,
+                            stopbits=1, bytesize=8, timeout=0.4)
+    except Exception as e:
+        print(f"[rtu] no pude abrir {dev}: {e}", file=sys.stderr)
+        return
+    print(f"[rtu] ingesta Modbus del ATT en {dev} unit {unit} cada {poll}s")
+    while not STOP.is_set():
+        ir = _rtu_read(ser, unit, 4, 0, 10)     # IR 0-9
+        hr = _rtu_read(ser, unit, 3, 5, 1)      # HR 5 = tank_id
+        if ir is None:
+            time.sleep(poll)
+            continue
+        count    = _s32(ir[0], ir[1])
+        edges    = ((ir[2] & 0xFFFF) << 16) | (ir[3] & 0xFFFF)
+        errors   = ir[4]
+        uptime_s = ir[5]                        # IR5 ya viene en segundos
+        level    = _s32(ir[7], ir[8])           # nivel mm (calibrado por el ATT)
+        cal      = ir[9]
+        tank_id  = (hr[0] if hr else 0) or fallback_id
+        if tank_id == 0:
+            time.sleep(poll)
+            continue                            # sin asignar: no es un dato
+
+        store.upsert_tank(tank_id, dev)
+        c = store.tank_cfg().get(tank_id, {})
+        base = level if cal else count          # calibrado -> nivel; si no, cuenta
+        rec = {
+            "ts": now(), "tank_id": tank_id, "mac": dev, "seq": 0,
+            "count": count, "edges": edges, "errors": errors,
+            "uptime_s": uptime_s,
+            "value": base * (c.get("scale") or 1.0) + (c.get("offset") or 0.0),
+            "unit": c.get("unit") or "mm",
+            "name": c.get("name") or f"tank{tank_id}",
+        }
+        live.update(rec)
+        store.put(rec)
+        for o in outs:
+            try:
+                o.on_sample(rec)
+            except Exception as e:
+                print(f"[out] {e}", file=sys.stderr)
+        time.sleep(poll)
+    ser.close()
+
+
 # ================================================================ main
 def load_cfg(path: str) -> dict:
     try:
@@ -343,7 +435,17 @@ def main():
     from outputs import build_outputs           # noqa: E402
     outs = build_outputs(cfg, live, store, STOP)
 
-    ingest(cfg, store, live, outs)
+    # Ingesta por dos caminos: SPE (tramas L2) y/o Modbus RTU (RS-485).
+    # Con el SPE del ATT roto, el RTU es el que trae los datos.
+    if cfg.get("modbus_ingest", {}).get("enabled"):
+        threading.Thread(target=ingest_modbus, args=(cfg, store, live, outs),
+                         daemon=True, name="rtu").start()
+    if cfg["ingest"].get("enabled", True):
+        threading.Thread(target=ingest, args=(cfg, store, live, outs),
+                         daemon=True, name="spe").start()
+
+    while not STOP.is_set():
+        time.sleep(0.5)
     print("[gw] fin")
 
 
