@@ -40,19 +40,25 @@
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(att, LOG_LEVEL_INF);
 
+/* Build de BANCO: SPE/ADIN2111 desactivado (OA-SPI roto cuelga el arranque).
+ * Se conserva TODO el codigo SPE; solo se salta en tiempo de compilacion. */
+// #define BENCH_NO_SPE 1   /* descomentar para build de BANCO sin SPE (workaround OA-SPI) */
 static const struct device *const adin = DEVICE_DT_GET(DT_NODELABEL(adin2111));
 static const struct device *const gpa  = DEVICE_DT_GET(DT_NODELABEL(gpioa));
 static const struct device *const gpd  = DEVICE_DT_GET(DT_NODELABEL(gpiod));
 
 #define BYPASS_EN_PIN 14   /* PD14 = UC_BYPASS_EN */
 #define ENC_A_PIN      0   /* PA0  = ENCODER AA */
-#define ENC_B_PIN      1   /* PA1  = ENCODER AB */
+#define ENC_B_PIN      7   /* PA7  = canal 3 = A out (era PA1, pin equivocado) */
 
 /* ---------------- decodificador de cuadratura por software ---------------- */
 static struct gpio_callback enc_cb;
 static volatile int32_t  enc_count;      /* posicion (x4) */
 static volatile uint32_t enc_edges;      /* flancos vistos: prueba de vida del cableado */
 static volatile uint32_t enc_errors;     /* transiciones ilegales = pulso perdido/rebote */
+static volatile uint32_t enc_ea;         /* flancos vistos en PA0 (canal 1 = B out) */
+static volatile uint32_t enc_eb;         /* flancos vistos en PA1 (canal 3 = A out) */
+static volatile uint8_t  enc_pa, enc_pb; /* ultimo nivel de cada pin */
 static volatile uint8_t  enc_prev;       /* estado previo (A<<1|B) */
 
 /* Tabla de cuadratura x4: indice = (prev<<2)|cur -> -1, 0, +1, o 2 = ilegal */
@@ -115,6 +121,11 @@ struct att_cfg {
 	uint16_t baud_div;   /* baudios/100: 96, 192, 384, 1152 */
 	uint16_t parity;     /* 0=none 1=even 2=odd */
 	uint16_t push_ms10;  /* periodo del push L2, en decenas de ms */
+	uint16_t tank_id;    /* identidad del tanque: viaja en cada trama */
+	int32_t  cal_cnt_a;  /* calibracion 2 puntos: cuenta y nivel(mm) en A */
+	int32_t  cal_lvl_a;
+	int32_t  cal_cnt_b;  /* ...y en B. nivel = interpolacion lineal A..B  */
+	int32_t  cal_lvl_b;
 	uint16_t crc;
 } __packed;
 
@@ -132,6 +143,28 @@ static void cfg_defaults(void)
 	cfg.baud_div = 192;                   /* 19200 = default del estandar Modbus */
 	cfg.parity = 1;                       /* even */
 	cfg.push_ms10 = 50;                   /* 500 ms */
+	cfg.tank_id = 0;                      /* 0 = sin asignar */
+	cfg.cal_cnt_a = cfg.cal_lvl_a = 0;    /* sin calibrar: nivel = cuenta cruda */
+	cfg.cal_cnt_b = cfg.cal_lvl_b = 0;
+}
+
+/* nivel de calibracion en curso (staging para el comando de captura) */
+static int32_t cal_level_in;
+
+/* nivel calibrado en mm por interpolacion lineal entre los dos puntos.
+ * Sin calibrar (dc==0) devuelve la cuenta cruda. La direccion se corrige
+ * sola: si count baja cuando el nivel sube, la pendiente es negativa. */
+static int att_calibrated(void)
+{
+	return (cfg.cal_cnt_b - cfg.cal_cnt_a) != 0;
+}
+static int32_t att_level_mm(void)
+{
+	int32_t dc = cfg.cal_cnt_b - cfg.cal_cnt_a;
+	if (dc == 0) { return enc_count; }
+	return cfg.cal_lvl_a +
+	       (int32_t)((int64_t)(enc_count - cfg.cal_cnt_a) *
+	                 (cfg.cal_lvl_b - cfg.cal_lvl_a) / dc);
 }
 
 static uint16_t cfg_crc(const struct att_cfg *c)
@@ -161,8 +194,10 @@ static void cfg_load(void)
 		return;
 	}
 	cfg = t;
-	LOG_INF("Config leida de EEPROM: flags=0x%04x unit_id=%u baud=%u parity=%u push=%ums",
-		cfg.flags, cfg.unit_id, cfg.baud_div * 100u, cfg.parity, cfg.push_ms10 * 10u);
+	LOG_INF("Config leida de EEPROM: flags=0x%04x unit_id=%u tank_id=%u"
+		" baud=%u parity=%u push=%ums",
+		cfg.flags, cfg.unit_id, cfg.tank_id, cfg.baud_div * 100u,
+		cfg.parity, cfg.push_ms10 * 10u);
 }
 
 static int cfg_save(void)
@@ -205,6 +240,9 @@ static int mb_input_reg_rd(uint16_t addr, uint16_t *reg)
 	case 3: *reg = (uint16_t)(enc_edges & 0xFFFF); break;
 	case 4: *reg = (uint16_t)enc_errors; break;
 	case 5: *reg = (uint16_t)(k_uptime_get() / 1000); break;
+	case 7: *reg = (uint16_t)((uint32_t)att_level_mm() >> 16); break;   /* nivel mm hi */
+	case 8: *reg = (uint16_t)((uint32_t)att_level_mm() & 0xFFFF); break; /* nivel mm lo */
+	case 9: *reg = att_calibrated() ? 1 : 0; break;
 	case 6:
 		v = 0;
 		if (net_if_is_carrier_ok(net_if_get_by_index(1))) { v |= BIT(0); }
@@ -223,6 +261,7 @@ static int mb_input_reg_rd(uint16_t addr, uint16_t *reg)
  *   HR 2 : baudios RTU / 100 (96, 192, 384, 1152)
  *   HR 3 : paridad RTU (0=none 1=even 2=odd)
  *   HR 4 : periodo del push L2, en decenas de ms
+ *   HR 5 : tank_id (identidad del tanque; viaja en cada trama)
  *   HR 9 : comando -> 0xA5 = guardar en EEPROM, 0x5A = valores de fabrica
  */
 static int mb_holding_rd(uint16_t addr, uint16_t *reg)
@@ -233,7 +272,18 @@ static int mb_holding_rd(uint16_t addr, uint16_t *reg)
 	case 2: *reg = cfg.baud_div; break;
 	case 3: *reg = cfg.parity; break;
 	case 4: *reg = cfg.push_ms10; break;
+	case 5: *reg = cfg.tank_id; break;
 	case 9: *reg = 0; break;
+	case 10: *reg = (uint16_t)((uint32_t)cal_level_in >> 16); break;
+	case 11: *reg = (uint16_t)((uint32_t)cal_level_in & 0xFFFF); break;
+	case 12: *reg = (uint16_t)((uint32_t)cfg.cal_cnt_a >> 16); break;
+	case 13: *reg = (uint16_t)((uint32_t)cfg.cal_cnt_a & 0xFFFF); break;
+	case 14: *reg = (uint16_t)((uint32_t)cfg.cal_lvl_a >> 16); break;
+	case 15: *reg = (uint16_t)((uint32_t)cfg.cal_lvl_a & 0xFFFF); break;
+	case 16: *reg = (uint16_t)((uint32_t)cfg.cal_cnt_b >> 16); break;
+	case 17: *reg = (uint16_t)((uint32_t)cfg.cal_cnt_b & 0xFFFF); break;
+	case 18: *reg = (uint16_t)((uint32_t)cfg.cal_lvl_b >> 16); break;
+	case 19: *reg = (uint16_t)((uint32_t)cfg.cal_lvl_b & 0xFFFF); break;
 	default: return -ENOTSUP;
 	}
 	return 0;
@@ -259,9 +309,21 @@ static int mb_holding_wr(uint16_t addr, uint16_t reg)
 		if (reg < 5 || reg > 6000) { return -ENOTSUP; }  /* 50ms .. 60s */
 		cfg.push_ms10 = reg;
 		break;
+	case 5:
+		/* 0 = sin asignar. El rango util lo decide el sitio, no el firmware. */
+		cfg.tank_id = reg;
+		break;
+	case 10: cal_level_in = (int32_t)(((uint32_t)reg << 16) |
+	                                  ((uint32_t)cal_level_in & 0xFFFF)); break;
+	case 11: cal_level_in = (int32_t)(((uint32_t)cal_level_in & 0xFFFF0000u) |
+	                                  (uint32_t)reg); break;
 	case 9:
 		if (reg == 0xA5) { return cfg_save() < 0 ? -EIO : 0; }
 		if (reg == 0x5A) { cfg_defaults(); return cfg_save() < 0 ? -EIO : 0; }
+		/* capturar punto A/B: cuenta actual + nivel(mm) puesto en HR10-11.
+		 * No guarda solo: revisar con FC03 y luego 0xA5 para persistir. */
+		if (reg == 0xA1) { cfg.cal_cnt_a = enc_count; cfg.cal_lvl_a = cal_level_in; return 0; }
+		if (reg == 0xB1) { cfg.cal_cnt_b = enc_count; cfg.cal_lvl_b = cal_level_in; return 0; }
 		return -ENOTSUP;
 	default: return -ENOTSUP;
 	}
@@ -398,11 +460,25 @@ static void mb_tcp_thread(void *a, void *b, void *c)
 }
 K_THREAD_DEFINE(mb_tcp_tid, 4096, mb_tcp_thread, NULL, NULL, NULL, 7, 0, 3000);
 
+/* Reporta cada iface por su NOMBRE de dispositivo. El indice no basta:
+ * al habilitar IPv4 pueden aparecer interfaces y correrse la numeracion. */
+static void hb_cb(struct net_if *iface, void *ud)
+{
+	int *n = ud;
+	const struct device *d = net_if_get_device(iface);
+
+	LOG_INF("  iface %d dev=%-8s carrier=%d up=%d", ++(*n),
+		d ? d->name : "?",
+		net_if_is_carrier_ok(iface) ? 1 : 0, net_if_is_up(iface) ? 1 : 0);
+}
+
 static void enc_isr(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
 	uint8_t a = gpio_pin_get(gpa, ENC_A_PIN) ? 1 : 0;
 	uint8_t b = gpio_pin_get(gpa, ENC_B_PIN) ? 1 : 0;
 	uint8_t cur = (a << 1) | b;
+	if (a != enc_pa) { enc_ea++; enc_pa = a; }
+	if (b != enc_pb) { enc_eb++; enc_pb = b; }
 	int8_t d = QTAB[(enc_prev << 2) | cur];
 
 	enc_edges++;
@@ -448,8 +524,12 @@ static int enc_init(void)
 struct att_frame {
 	struct net_eth_hdr eth;
 	uint32_t magic;
+	uint16_t version;    /* 1. Sin esto, cambiar el formato rompe a los
+	                      * consumidores en silencio. */
+	uint16_t tank_id;    /* de la EEPROM: la placa lleva su identidad */
 	uint32_t seq;
-	int32_t  count;      /* posicion del encoder (x4) */
+	int32_t  count;      /* posicion del encoder (x4) -- REFERENCIA cruda */
+	int32_t  level_mm;   /* nivel calibrado (mm); == count si sin calibrar */
 	uint32_t edges;      /* flancos totales */
 	uint32_t errors;     /* transiciones ilegales */
 	uint32_t uptime_ms;
@@ -496,8 +576,11 @@ static int spe_tx(struct net_if *iface, uint32_t seq)
 	memcpy(f.eth.src.addr, ll->addr, 6);
 	f.eth.type      = htons(ATT_ETHERTYPE);
 	f.magic         = htonl(ATT_MAGIC);
+	f.version       = htons(2);   /* v2: anade level_mm tras count */
+	f.tank_id       = htons(cfg.tank_id);
 	f.seq           = htonl(seq);
 	f.count         = (int32_t)htonl((uint32_t)enc_count);
+	f.level_mm      = (int32_t)htonl((uint32_t)att_level_mm());
 	f.edges         = htonl(enc_edges);
 	f.errors        = htonl(enc_errors);
 	f.uptime_ms     = htonl(k_uptime_get_32());
@@ -566,6 +649,7 @@ int main(void)
 	}
 
 
+#ifndef BENCH_NO_SPE
 	/* 3) levantar interfaces */
 	iface = net_if_get_default();
 	for (int i = 1; i <= 2; i++) {
@@ -596,10 +680,15 @@ int main(void)
 	if (spe_tx_init(iface) < 0) {
 		LOG_ERR("No se pudo abrir el socket SPE");
 	}
+#else
+	(void)iface;
+	LOG_INF("BANCO: SPE deshabilitado -> solo encoder + RS-485 Modbus RTU");
+#endif
 
 	/* 5) transmitir la medida periodicamente */
 	while (1) {
 		k_msleep(cfg.push_ms10 * 10u);
+#ifndef BENCH_NO_SPE
 		if (tx_sock < 0 && (seq % 8) == 0) {
 			LOG_WRN("SPE: socket cerrado, reintentando...");
 			spe_tx_init(iface);
@@ -616,13 +705,16 @@ int main(void)
 				if (r > 0) { sent++; } else { failed++; }
 			}
 		}
+#else
+		seq++;   /* sin SPE: avanzar seq para la cadencia del heartbeat */
+#endif
 		if ((seq % 4) == 0) {
-			LOG_INF("enc: count=%d edges=%u err=%u | SPE tx ok=%u fail=%u | carrier if1=%d if2=%d"
-			" | MODBUS tcp_state=%d conns=%d iface=%d | cfg flags=0x%04x uid=%u",
-				enc_count, enc_edges, enc_errors, sent, failed,
-			net_if_is_carrier_ok(net_if_get_by_index(1)) ? 1 : 0,
-			net_if_is_carrier_ok(net_if_get_by_index(2)) ? 1 : 0,
-			mb_tcp_state, mb_tcp_conns, mb_tcp_iface, cfg.flags, cfg.unit_id);
+			LOG_INF("enc: count=%d level=%dmm cal=%d | edges=%u err=%u PA0=%u PA7=%u | tx ok=%u fail=%u tank=%u",
+				enc_count, att_level_mm(), att_calibrated(), enc_edges, enc_errors,
+				enc_ea, enc_eb, sent, failed, cfg.tank_id);
+#ifndef BENCH_NO_SPE
+			{ struct hb { int n; } h = { 0 }; net_if_foreach(hb_cb, &h.n); }
+#endif
 		}
 	}
 	return 0;
