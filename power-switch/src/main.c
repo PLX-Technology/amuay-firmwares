@@ -32,24 +32,8 @@ static struct k_sem semaphores[50];
 K_THREAD_STACK_DEFINE(stack_area, 2000);
 K_SEM_DEFINE(reader_thread_sem, 0, 1);
 K_MUTEX_DEFINE(spi_mutex);
+/* Estado de enlace por puerto, para inspeccion por SWD (no hay consola). */
 volatile int g_link[6];
-volatile unsigned int g_st[10];
-volatile unsigned int g_st3[5];
-volatile unsigned int g_rx[4], g_tx[4];
-volatile unsigned short g_rj[16];
-volatile unsigned short g_p4[16];
-volatile unsigned short g_map[128];
-volatile unsigned short g_an[4][6];
-volatile unsigned short g_r[6];
-volatile unsigned short g_v1, g_v2;
-volatile unsigned short g_t1, g_t2;
-volatile unsigned short g_ledw[4];
-volatile int g_ledfunc;
-volatile unsigned short g_ledrb;
-volatile unsigned short g_phyid1[4], g_phyid2[4], g_ledctrl[4], g_ethid1, g_ethid2;
-volatile int g_phyret[4];
-volatile unsigned short g_probe[8];
-volatile unsigned short g_scan[64];
 
 void* SES_PORT_CreateSemaphore(int initCount, int maxCount)
 {
@@ -406,17 +390,32 @@ int main(void)
 	uint8_t mac_addr[6] = {0x00, 0x18, 0x80, 0x03, 0x25, 0x60};
 
 	const struct device *const ltc4296_dev = DEVICE_DT_GET(DT_NODELABEL(ltc4296));
+	/* phyConfig = {autoNegEnable, phyPullupCtrl, phyAddr, speed, duplex, crossover}
+	 *
+	 * phyPullupCtrl DEBE ser 1. Con 0 el SES no llega a identificar el PHY
+	 * (PHYID lee 0x0000 en vez de 0x0283/0xBC81), no lo configura, y la
+	 * autonegociacion queda deshabilitada (BMCR 0x0100, bit12=0): el puerto
+	 * nunca enlaza y el LED del modulo no enciende. Con 1: PHYID 0x0283/0xBC81,
+	 * BMCR 0x1100 (autoneg ON) y enlace correcto en los 4 puertos SPE.
+	 *
+	 * Fuente: configuracion de referencia de ADI para el field switch,
+	 * portConfigurationFieldSwitch[] en example/src/SES_example_config.c de
+	 * github.com/analogdevicesinc/windows-project-for-adinx310 (ADI pone
+	 * phyPullupCtrl=1 en los seis puertos).
+	 *
+	 * NO volver a ponerlo en 0. Sintoma: puerto SPE presente que nunca linkea.
+	 */
 	const SES_portInit_t initializePorts_p[] = {
 		/* Port 0: fixed 1 Gbps MAC-to-MAC RGMII link to the LAN7431.
 		 * LAN7431 MAC_RGMII_ID=0x2: TXC delay enabled, RXC delay disabled.
 		 * Add only the complementary ADIN6310 TX delay. Px_LINK is active low.
 		 */
-		{ 1, SES_rgmiiMode, { 0, 1, 0 }, 1, SES_phyUnmanaged, {true, 0, 0, SES_phySpeed1000, SES_phyDuplexModeFull, SES_autoMdix}},
-		{ 1, SES_rmiiMode, { 0, 0, 0 }, 1, SES_phyADIN1100, {true, 0, 5, SES_phySpeed10, SES_phyDuplexModeFull, SES_autoMdix}},
-		{ 1, SES_rmiiMode, { 0, 0, 0 }, 1, SES_phyADIN1100, {true, 0, 2, SES_phySpeed10, SES_phyDuplexModeFull, SES_autoMdix}},
-		{ 1, SES_rmiiMode, { 0, 0, 0 }, 1, SES_phyADIN1100, {true, 0, 3, SES_phySpeed10, SES_phyDuplexModeFull, SES_autoMdix}},
-		{ 1, SES_rmiiMode, { 0, 0, 0 }, 1, SES_phyADIN1100, {true, 0, 4, SES_phySpeed10, SES_phyDuplexModeFull, SES_autoMdix}},
-		{ 1, SES_rmiiMode, { 0, 0, 0 }, 1, SES_phyADIN1300, {true, 0, 1, SES_phySpeed100, SES_phyDuplexModeFull, SES_autoMdix}}
+		{ 1, SES_rgmiiMode, { 0, 1, 0 }, 1, SES_phyUnmanaged, {true, 1, 0, SES_phySpeed1000, SES_phyDuplexModeFull, SES_autoMdix}},
+		{ 1, SES_rmiiMode, { 0, 0, 0 }, 1, SES_phyADIN1100, {true, 1, 5, SES_phySpeed10, SES_phyDuplexModeFull, SES_autoMdix}},
+		{ 1, SES_rmiiMode, { 0, 0, 0 }, 1, SES_phyADIN1100, {true, 1, 2, SES_phySpeed10, SES_phyDuplexModeFull, SES_autoMdix}},
+		{ 1, SES_rmiiMode, { 0, 0, 0 }, 1, SES_phyADIN1100, {true, 1, 3, SES_phySpeed10, SES_phyDuplexModeFull, SES_autoMdix}},
+		{ 1, SES_rmiiMode, { 0, 0, 0 }, 1, SES_phyADIN1100, {true, 1, 7, SES_phySpeed10, SES_phyDuplexModeFull, SES_autoMdix}},
+		{ 1, SES_rmiiMode, { 0, 0, 0 }, 1, SES_phyADIN1300, {true, 1, 1, SES_phySpeed100, SES_phyDuplexModeFull, SES_autoMdix}}
 	};
 
 	SES_driverFunctions_t comm_callbacks = {
@@ -564,97 +563,25 @@ int main(void)
 	printf("Configuration done\n");
 
 	{
-		SES_mac_t spe[4] = { SES_macPort1, SES_macPort2, SES_macPort3, SES_macPort4 };
+		/* El ADIN1300 del RJ45 (puerto 5) arranca en RGMII. Hay que habilitarle
+		 * RMII poniendo GE_RMII_CFG (MMD 0x1E, reg 0xFF24) bit0 = RMII_EN y
+		 * reiniciar su autonegociacion. Sin esto el puerto 5 no enlaza.
+		 * Se escribe por las dos vias: la codificacion C45 de SES no siempre
+		 * alcanza ese registro vendor.
+		 */
 		uint16_t v;
-		for (int k = 0; k < 4; k++) {
-			g_phyret[k] = SES_ReadPhyReg(spe[k], 0x0002, &v); g_phyid1[k] = v;
-			SES_ReadPhyReg(spe[k], 0x0003, &v); g_phyid2[k] = v;
-			SES_ReadPhyReg(spe[k], 0x1E8C82, &v); g_ledctrl[k] = v;
-		}
-		SES_ReadPhyReg(SES_macPort5, 0x0002, &v); g_ethid1 = v;
-		SES_ReadPhyReg(SES_macPort5, 0x0003, &v); g_ethid2 = v;
-	}
-	{
-		static SES_portInit_t kp[6];
-		uint16_t id1, led;
-		for (int i = 0; i < 6; i++) kp[i] = initializePorts_p[i];
-		for (int a = 0; a < 32; a++) {
-			kp[5].phyConfig.phyAddr = a;
-			SES_MX_InitializePorts(dev_id, 6, kp);
-			k_msleep(15);
-			SES_ReadPhyReg(SES_macPort5, 0x010002, &id1);
-			SES_ReadPhyReg(SES_macPort5, 0x1E8C82, &led);
-			g_scan[a*2] = id1; g_scan[a*2+1] = led;
-		}
-		SES_MX_InitializePorts(dev_id, 6, initializePorts_p);
-	}
-	{
-		uint16_t v;
-		/* --- ANTES: estado del ADIN1300 --- */
-		SES_ReadPhyReg(SES_macPort5, 0x0000, &v); g_rj[0] = v;  /* BMCR */
-		SES_ReadPhyReg(SES_macPort5, 0x0001, &v); g_rj[1] = v;  /* BMSR */
-		SES_ReadPhyReg(SES_macPort5, 0x0004, &v); g_rj[2] = v;  /* ANAR  */
-		SES_ReadPhyReg(SES_macPort5, 0x0005, &v); g_rj[3] = v;  /* ANLPAR */
-		g_rj[4] = rj_mmd_rd(0x1E, 0xFF24);   /* GE_RMII_CFG  bit0=RMII_EN */
-		g_rj[5] = rj_mmd_rd(0x1E, 0xFF23);   /* GE_RGMII_CFG */
 
-		/* --- FIX: forzar RMII. Via 1: codificacion C45 de SES (0xDDRRRR) --- */
-		SES_ReadPhyReg(SES_macPort5, 0x1EFF24, &v); g_rj[13] = v;
-		g_rj[14] = (unsigned short)SES_WritePhyReg(SES_macPort5, 0x1EFF24, v | 0x0001);
+		SES_ReadPhyReg(SES_macPort5, 0x1EFF24, &v);
+		SES_WritePhyReg(SES_macPort5, 0x1EFF24, v | 0x0001);
 		k_msleep(50);
-		SES_ReadPhyReg(SES_macPort5, 0x1EFF24, &v); g_rj[15] = v;
-		/* --- Via 2: indirecto manual 0x0D/0x0E --- */
-		rj_mmd_wr(0x1E, 0xFF24, g_rj[4] | 0x0001);
-		k_msleep(50);
-		g_rj[6] = rj_mmd_rd(0x1E, 0xFF24);   /* releer: bit0 debe quedar en 1 */
 
-		/* --- reiniciar autoneg (BMCR: AN_EN|AN_RESTART) --- */
+		rj_mmd_wr(0x1E, 0xFF24, rj_mmd_rd(0x1E, 0xFF24) | 0x0001);
+		k_msleep(50);
+
+		/* BMCR: AN_EN | AN_RESTART */
 		SES_ReadPhyReg(SES_macPort5, 0x0000, &v);
 		SES_WritePhyReg(SES_macPort5, 0x0000, v | 0x1200);
 		k_msleep(2000);
-		SES_ReadPhyReg(SES_macPort5, 0x0000, &v); g_rj[7] = v;  /* BMCR despues */
-		SES_ReadPhyReg(SES_macPort5, 0x0001, &v); g_rj[8] = v;  /* BMSR despues */
-		SES_ReadPhyReg(SES_macPort5, 0x0005, &v); g_rj[9] = v;  /* ANLPAR despues */
-	}
-	{
-		static SES_portInit_t kp5[6];
-		uint8_t addrs[2] = { 2, 4 };
-		uint16_t v;
-		int idx = 0;
-
-		for (int i = 0; i < 6; i++) { kp5[i] = initializePorts_p[i]; }
-		for (int a = 0; a < 2; a++) {
-			kp5[5].phyConfig.phyAddr = addrs[a];
-			SES_MX_InitializePorts(dev_id, 6, kp5);
-			k_msleep(30);
-			SES_ReadPhyReg(SES_macPort5, 0x010002, &v); g_p4[idx++] = v;  /* PHYID1 */
-			SES_ReadPhyReg(SES_macPort5, 0x010003, &v); g_p4[idx++] = v;  /* PHYID2 */
-			SES_ReadPhyReg(SES_macPort5, 0x0108F7, &v); g_p4[idx++] = v;  /* B10L_STAT bit0=LINK */
-			SES_ReadPhyReg(SES_macPort5, 0x070201, &v); g_p4[idx++] = v;  /* AN_STAT bit5=AN ok */
-			SES_ReadPhyReg(SES_macPort5, 0x010834, &v); g_p4[idx++] = v;  /* PMA_CTRL */
-			SES_ReadPhyReg(SES_macPort5, 0x1E8C82, &v); g_p4[idx++] = v;  /* LEDCTRL */
-		}
-		/* RESTAURAR port5: dejarlo mal-configurado CRASHEA la app */
-		SES_MX_InitializePorts(dev_id, 6, initializePorts_p);
-	}
-	{
-		static SES_portInit_t km[6];
-		uint16_t v;
-
-		for (int i = 0; i < 6; i++) { km[i] = initializePorts_p[i]; }
-		for (int a = 0; a < 32; a++) {
-			km[5].phyConfig.phyAddr = a;
-			SES_MX_InitializePorts(dev_id, 6, km);
-			k_msleep(20);
-			/* clause 45: MMD1 regs 2/3 -> ADIN1100 (modulos SPE) */
-			v = 0; SES_ReadPhyReg(SES_macPort5, 0x010002, &v); g_map[a*4+0] = v;
-			v = 0; SES_ReadPhyReg(SES_macPort5, 0x010003, &v); g_map[a*4+1] = v;
-			/* clause 22: regs 2/3 -> ADIN1300 (RJ45) */
-			v = 0; SES_ReadPhyReg(SES_macPort5, 0x0002, &v);   g_map[a*4+2] = v;
-			v = 0; SES_ReadPhyReg(SES_macPort5, 0x0003, &v);   g_map[a*4+3] = v;
-		}
-		/* RESTAURAR port5: dejarlo mal-configurado CRASHEA la app */
-		SES_MX_InitializePorts(dev_id, 6, initializePorts_p);
 	}
 	while (1) {
 		k_sleep(K_MSEC(1000));
@@ -664,49 +591,6 @@ int main(void)
 		g_link[3] = SES_GetLinkState(SES_macPort3);
 		g_link[4] = SES_GetLinkState(SES_macPort4);
 		g_link[5] = SES_GetLinkState(SES_macPort5);
-		{
-			uint16_t v;
-			SES_ReadPhyReg(SES_macPort5, 0x0001, &v); g_rj[10] = v;  /* BMSR vivo */
-			SES_ReadPhyReg(SES_macPort5, 0x0005, &v); g_rj[11] = v;  /* ANLPAR vivo */
-			g_rj[12] = rj_mmd_rd(0x1E, 0xFF24);
-		}
-		{
-			SES_statistic_t s0, s5, s3;
-			SES_GetStatistics(SES_macPort0, &s0, sizeof(s0));
-			SES_GetStatistics(SES_macPort5, &s5, sizeof(s5));
-			SES_GetStatistics(SES_macPort3, &s3, sizeof(s3));
-			g_st[0]=s0.rxByte; g_st[1]=s0.rxBroadcast; g_st[2]=s0.rxFcsError; g_st[3]=s0.txByte; g_st[4]=s0.txBroadcast;
-			g_st[5]=s5.rxByte; g_st[6]=s5.rxBroadcast; g_st[7]=s5.rxFcsError; g_st[8]=s5.txByte; g_st[9]=s5.txBroadcast;
-			g_st3[0]=s3.rxByte; g_st3[1]=s3.rxBroadcast; g_st3[2]=s3.rxFcsError; g_st3[3]=s3.txByte; g_st3[4]=s3.txBroadcast;
-		}
-		{
-			SES_statistic_t sp;
-			SES_mac_t pl[4] = { SES_macPort1, SES_macPort2, SES_macPort3, SES_macPort4 };
-			for (int q = 0; q < 4; q++) {
-				SES_GetStatistics(pl[q], &sp, sizeof(sp));
-				g_rx[q] = sp.rxByte;
-				g_tx[q] = sp.txByte;
-			}
-		}
-		{
-			SES_mac_t pa[4] = { SES_macPort1, SES_macPort2, SES_macPort3, SES_macPort4 };
-			/* devad<<16 | reg  --  ADIN1100 clause 45 */
-			uint32_t rg[6] = { 0x070200, 0x070201, 0x010834, 0x0108F7, 0x030001, 0x010001 };
-			uint16_t rv;
-			for (int q = 0; q < 4; q++)
-				for (int w = 0; w < 6; w++) {
-					rv = 0;
-					SES_ReadPhyReg(pa[q], rg[w], &rv);
-					g_an[q][w] = rv;
-				}
-		}
-		{
-			uint8_t lp;
-			g_probe[0] = SES_GetLinkPartnerAutoNegStatus(SES_macPort1, &lp); g_probe[1]=lp;
-			g_probe[2] = SES_GetLinkPartnerAutoNegStatus(SES_macPort2, &lp); g_probe[3]=lp;
-			g_probe[4] = SES_GetLinkPartnerAutoNegStatus(SES_macPort3, &lp); g_probe[5]=lp;
-			g_probe[6] = SES_GetLinkPartnerAutoNegStatus(SES_macPort4, &lp); g_probe[7]=lp;
-		}
 	}
 
 	return 0;
