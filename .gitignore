@@ -25,3 +25,8 @@ tpu/varec-gateway/secrets.env
 !field-switch/prebuilt/
 !field-switch/prebuilt/*.sbin
 !field-switch/prebuilt/*.bin
+
+# Firmware prebuilt del power switch (config segura LTC4296) - SI versionar
+!power-switch/prebuilt/
+!power-switch/prebuilt/*.sbin
+!power-switch/prebuilt/*.bin

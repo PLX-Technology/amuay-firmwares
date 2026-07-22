@@ -100,17 +100,65 @@ exactamente lo que hace `ltc4296_retry_spoe_sccp`: clasifica por SCCP y energiza
 | Validación Vin en rango | ❌ | ✅ (50-58 V, clase 13) |
 | Encendido | 4 a la vez, forzado/ciego | por puerto, cada uno **iff negoció** (independiente); los 4 pueden quedar activos si todos negociaron |
 
-## Dependencia importante
+## Resolución de la línea de baja (actualizado 2026-07-22)
 
-Este bloque **no fuerza** potencia: entrega **solo si la clasificación SCCP
-tiene éxito**. La SCCP fallaba (`PD_LINE_NOT_HIGH`) por el **problema de
-hardware de la línea de baja** que Mayker está resolviendo. Orden correcto:
+**Mayker indica que NO hay hardware que resolver en la línea de baja.** Es
+decir, que el lado bajo (LGATE/Q18) "no se activara" **no es un fallo de HW**:
+se resuelve por **firmware**, con el paso de **re-arme del disyuntor tras la
+negociación** (ver sección siguiente) — que es justo lo que él pidió ("activar
+el LGATE tras negociar"). Orden:
 
-1. Mayker resuelve la línea de baja (Q18 / R103-R106 / polaridad) y ajusta la
-   fuente a 50 V.
-2. Aplicar estos dos cambios y compilar (sin las protecciones desactivadas).
-3. Energizar **un puerto**, con el PD real, mirando corriente/temperatura.
+1. Ajustar la fuente a **50 V**.
+2. Flashear `pse_safe_class13.sbin` (Clase 13 + eliminación del forzado +
+   re-arme/verificación del lado bajo).
+3. Con el PD real, verificar por SWD que `g_lg_any = 1` (negoció) y
+   `g_lg_gfltev` bit0 = **0** (la baja queda enganchada y no dispara). Si aún
+   disparara, se revisa entonces con los datos de `g_lg_pxev` (fwd/rev).
 
-Si se necesitara probar entrega **antes** de que SCCP funcione, usar
-`ltc4296_force_port_pwr()` (fuerza salida pero **mantiene** TLIM, foldback,
-soft-start; solo desactiva TMFVDO) — nunca volver al bloque con `TLIM_DISABLE`.
+Este bloque **no fuerza** potencia: entrega solo si la clasificación SCCP tiene
+éxito. Si se necesitara probar entrega **antes** de que SCCP negocie, usar
+`ltc4296_force_port_pwr()` (mantiene TLIM/foldback/soft-start) — nunca volver al
+bloque con `TLIM_DISABLE`.
+
+## Paso lado bajo — re-arme/verificación del LGATE tras negociar (petición Mayker)
+
+**Hallazgo del datasheet:** el LTC4296-1 tiene **un único `LGATE` compartido** (un
+solo FET de retorno, Q18) — **no per-puerto** — y **no hay bit de firmware para
+"encender el LGATE"**. El LGATE engancha automáticamente al entrar en power-up; el
+disyuntor de baja compartido lo desconecta si dispara `LOW_CKT_BRK_FAULT`. Por
+tanto "activar el LGATE tras negociar" se implementa así:
+
+Bloque añadido en `main.c` (tras el monitoreo, antes de VIN/VOUT):
+1. Detecta qué puertos **negociaron** (PxST bits 2:0 = 2 = DELIVERING).
+2. Si **alguno** negoció, **re-arma el disyuntor de baja** (`ltc4296_clear_ckt_breaker`)
+   para que Q18/LGATE enganche — **sin** tocar `MASK_LOWFAULT` (la baja queda
+   visible y protegiendo). Si nadie negoció, **no** re-arma (correcto).
+3. **Verifica**: lee `GFLTEV` (bit0 `LOW_CKT_BRK_FAULT`) y `PxEV` por puerto
+   (bit0 `LSNS_REVERSE`, bit1 `LSNS_FORWARD`). Baja sin disparar = LGATE enganchado.
+
+No fuerza potencia: solo actúa si hubo negociación. Si el HW de la línea de baja
+sigue con fallo, el re-arme se vuelve a disparar y `g_lg_gfltev` bit0 lo delata.
+
+### Globals de verificación por SWD (build actual `build_final`, revalidar con el `.map`)
+| Global | Dirección | Significado |
+|---|---|---|
+| `g_lg_deliver[4]` | `0x20097908` | 1 = puerto entregando (negoció) |
+| `g_lg_any` | `0x20097904` | 1 = al menos un puerto negoció |
+| `g_lg_rearm_rc` | `0x20097900` | retorno de `clear_ckt_breaker` (-1 = no negoció) |
+| `g_lg_gfltev` | `0x2009916c` | GFLTEV tras re-arme (**bit0 = LOW_CKT_BRK_FAULT**) |
+| `g_lg_pxev[4]` | `0x20099164` | PxEV por puerto (bit0 rev, bit1 fwd) |
+| `g_lg_st[4]` | `0x2009915c` | PxST por puerto |
+
+**Criterio de éxito:** `g_lg_any=1` (negoció), `g_lg_gfltev` bit0 = **0** (la baja no
+dispara tras re-armar) y `g_lg_pxev[q]` bits 0/1 = **0** en el puerto activo.
+
+### Pendiente de aclarar con Mayker
+El LGATE es **compartido**, no per-puerto, y **no hay control de firmware directo**.
+Confirmar si con "activar el LGATE de ese puerto" se refería a esta secuencia
+(power-up tras negociar + re-arme del retorno, ya implementada) o a un mecanismo
+específico (GPIO / pin `AUTO` / mod de hardware) que haga el retorno per-puerto.
+
+## Artefacto
+`prebuilt/pse_safe_class13.sbin` — firmado (rom_version 010203ff, jump 0x100064b8),
+Clase 13 + bloque forzado eliminado + paso de re-arme/verificación del lado bajo.
+**Compilado, NO flasheado.**
