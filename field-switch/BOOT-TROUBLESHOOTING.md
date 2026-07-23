@@ -112,6 +112,100 @@ Requisitos de build que si faltan producen firmware que **nunca** arranca:
 
 ---
 
+## Investigación del bloqueo "builds frescas no arrancan" (2026-07-23)
+
+Estado: **parcialmente resuelto, con un factor residual abierto.**
+
+### Factor 1 (CONFIRMADO y corregido): `FLASH_LOAD_OFFSET=0`
+
+Análisis binario byte a byte de 4 builds: el `prj.conf` del sample tenía
+`# CONFIG_FLASH_LOAD_OFFSET is not set`, así que cada build pristine linkeaba en
+`0x10000000` (offset 0). Con el header de secure boot (256 B) el cuerpo baja a
+`0x10000100`, dejando **cada dirección 0x100 por debajo** de su sitio físico →
+el ROM salta 0x100 antes de `__start` → basura → ROM.
+
+- Imágenes que ARRANCAN (mfs_pullup y derivadas): `.bin` con **256 bytes de
+  ceros al inicio**, vectores en file `0x100`, `_vector_table=0x10000200`.
+- Imágenes que NO arrancaban (build_mfs, build_shortcheck): **0 bytes de
+  relleno**, vectores en file `0x0`, `_vector_table=0x10000000`.
+
+**Fix aplicado:** `prj.conf` línea 30 → `CONFIG_FLASH_LOAD_OFFSET=0x100`. Un
+rebuild pristine ya sale con `_vector_table=0x10000200` y el `.bin` con los 256
+ceros. Verificado.
+
+### Factor 2 (ABIERTO): sigue sin arrancar con offset correcto
+
+⚠️ **El offset era necesario pero NO suficiente.** Probado en vivo:
+
+| Imagen | offset | estructura | POR |
+|---|---|---|---|
+| mfs_class11 (cuerpo mfs_pullup, re-firmada hoy) | 0x100 | 256-ceros ✓ | **arranca** ✓ |
+| mfs_short (build fresco, offset corregido, firmada hoy) | 0x100 | 256-ceros ✓, vectores/jump correctos | **ROM** ✗ |
+| mfs_ms (otro build fresco, offset 0x100) | 0x100 | 256-ceros ✓ | **ROM** ✗ |
+
+Descartado con datos:
+- **Placa sana**: mfs_class11 arranca una y otra vez (PC `0x1000xxxx`).
+- **No es fault de runtime**: el PC tras POR es ROM (`0x0000xxxx`) con HFSR/CFSR
+  = 0 → rechazo del secure boot, no arranque-y-cuelgue.
+- **No es `sign_app` intermitente**: firma **determinista** (3 firmas del mismo
+  `.bin` = byte-idénticas). Re-firmar no cambia nada.
+- **Header estructuralmente idéntico** entre la que arranca y la que no
+  (mfs_class11 vs mfs_short): `load=0x10000000`, `imglen=cuerpo+224`, vectores
+  y SP/Reset correctos. Solo difieren `imglen`, `jump` y los 64 B de firma
+  (todo esperable). Firmas bien formadas (sin ceros a la cabeza en r/s).
+
+### Factor 3 (PROBADO cripto): la firma es VÁLIDA — NO es el secure boot
+
+Verificación criptográfica offline (código fuente de `sign_app` + `cryptography`):
+- Esquema: **ECDSA P-256 + SHA-256**, firma `r||s` big-endian (64 B), sobre el
+  rango `data[0 : len-64]` (header + payload, todo menos la firma).
+- Clave: `maximtestcrk` (`devices/MAX32690/keys/maximtestcrk.key`):
+  X=`a823c8857948dc68…1dcf0142`, Y=`3be124619cbbeb51…f2db8efe`.
+- **Resultado: los 14 `.sbin` verifican TRUE, incluida `mfs_short.sbin` (la que
+  no arranca) y todos los builds frescos.** La firma de los builds frescos es
+  criptográficamente válida contra la misma clave que valida las que arrancan.
+- `imglen` correcto en ambos (`=filesize+224`). Header sano.
+
+⇒ **El ROM ACEPTA la imagen fresca y salta a `jump_address`.** El "no arranca"
+**NO es rechazo del secure boot** — es un **cuelgue/fault DESPUÉS del salto**,
+en el arranque de la app. La nota de memoria "sign_app firma intermitente"
+queda **DESMENTIDA** (firma determinista y válida; re-firmar no cambia nada).
+
+### ✅ RESUELTO (2026-07-23): el bloqueo NUNCA fue de arranque — era código tóxico
+
+**Los builds frescos SÍ arrancan.** Todo lo de "fresh builds no arrancan" era un
+diagnóstico equivocado. Cadena de descubrimientos:
+
+1. Offset corregido (`prj.conf` → `0x100`) — necesario.
+2. Firma probada VÁLIDA (cripto) — secure boot descartado.
+3. **Firmware mínimo "blink+spin" compilado fresco → ARRANCA** (PC flash,
+   moviéndose). Prueba definitiva: secure boot, offset, firma y arranque base
+   están PERFECTOS para builds frescos.
+4. **Bisección con `while(1)` spin + lectura de PC** (fiable; la vía `srst`+SWD
+   es engañosa, no replica secure boot): el spin tras `SES_MX_InitializePorts`
+   se alcanza → toda la init del switch (LTC + SES + 6 puertos) funciona en
+   fresco. El fault estaba DESPUÉS.
+5. **Root cause: el bloque de sondeo RJ45/ADIN1300 del `macPort5`** en `main.c`
+   (tras "Configuration done"): reconfigura `macPort5` como `SES_phyADIN1300`,
+   hace `rj_mmd_rd/wr`, fuerza RMII, reinicia autoneg... sobre un **PHY RJ45 que
+   NO EXISTE en el field switch** (es todo SPE; el RJ45 es del power switch). Su
+   propio comentario avisaba: *"dejarlo mal-configurado CRASHEA la app"*.
+   Crashea → hard-fault → reset → ROM (por eso parecía "no arranca").
+
+**FIX:** eliminar ese bloque (inútil y dañino aquí). Firmware definitivo:
+`prebuilt/mfs_clean_class11.sbin` = init limpia del switch SPE + overlay
+**Clase 11** (seguro, sin entrega ciega) + feature de detección de cortos
+(`mfs-short-detect/`). **Compila, arranca y la feature corre** (probado:
+`g_short_mask=0`, sondeo 5178 mV/puerto). Fuente de referencia:
+`mfs-short-detect/main.c.reference`.
+
+**Lección:** un build fresco del mfs se compila, firma (jump = su `__start`) y
+flashea con la receta de siempre y ARRANCA. El firmware es libremente
+modificable como el del power switch. Para depurar arranque: firmware mínimo +
+bisección con spin+PC, NO asumir secure boot ni perseguir `srst`.
+
+---
+
 ## ¿Era la CRK el problema? (corrección de una hipótesis previa)
 
 **No, para las placas que YA traen la CRK.** Se creyó que el "no auto-arranque"
