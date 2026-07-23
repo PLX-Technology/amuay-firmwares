@@ -1,0 +1,30 @@
+&ltc4296 {
+        port0 {
+                adi,power-class = <LTC4296_PSE_SCCP_CLASS_13>;
+                adi,hs-resistor = <250>;
+        };
+
+        port1 {
+                adi,power-class = <LTC4296_PSE_SCCP_CLASS_13>;
+                adi,hs-resistor = <250>;
+        };
+
+        port2 {
+                adi,power-class = <LTC4296_PSE_SCCP_CLASS_13>;
+                adi,hs-resistor = <250>;
+        };
+
+        port3 {
+                adi,power-class = <LTC4296_PSE_SCCP_CLASS_13>;
+                adi,hs-resistor = <250>;
+        };
+};
+/ {
+	mfsleds {
+		compatible = "gpio-leds";
+		mfs_fault_led: mfs_fault_led {
+			gpios = <&gpio0 13 0>;   /* P0.13, activo alto = LED de fallo del field switch */
+			label = "FAULT_P013";
+		};
+	};
+};

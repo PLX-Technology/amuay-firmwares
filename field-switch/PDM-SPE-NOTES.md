@@ -293,6 +293,48 @@ el OR-ing con la entrada externa en el esquemático MFS). Nota: 6 mA cae en
 la banda gris del MFVS (2.5-10 mA) — la entrega se sostiene de milagro; si
 el chip la considera ausente, irá a settle-sleep (VSLEEP 3.4 V).
 
+## 🏆 ENTREGA NEGOCIADA A 50 V (Clase 13) — 2026-07-23
+
+**Segunda entrega SPoE del field switch, ahora a 50 V.** Firmware
+`prebuilt/mfs_clean_class13.sbin` (overlay Clase 13, piso Vin ampliado a 49 V
+en el driver para tolerar 50.0 V con el error del ADC). Cadena: PSM sano en
+slot Port 4 → cable → PDM re-strapeado a **Clase 13** (`CLASSV:STBY, CLASSC:GND`).
+
+Verificado por SWD:
+- **Vin = 49455 mV** (~50 V) — validación pasa gracias al piso a 49 V
+- **`P2ST = 0x3e12`** = **DELIVERING + PI_POWERED + POWER_STABLE** (hi/lo)
+- **Vout puerto 2 = 49420 mV** — entrega ~50 V al PDM, caída mínima = sana
+- Sin quema (chip lee limpio; GFLTEV solo UVLO latcheado de arranque)
+
+### ⚠️ La negociación ocurre AL BOOT — hay que arrancar CON los 50 V presentes
+
+El firmware mfs negocia SCCP una sola vez en `probe()` al arrancar. Para
+entregar a 50 V, la placa debe **arrancar con los 50 V ya aplicados** (Vin
+válido al momento de negociar). Consecuencias prácticas:
+- **NO** sirve arrancar a 24 V y luego rampear (la negociación ya pasó con Vin
+  inválido y no se reintenta).
+- Hay que **encender aplicando los 50 V** (boot a 50 V).
+
+**El hot-plug de 50 V es de bajo riesgo AHORA** (era alto en la era de las
+quemas): las quemas fueron 50 V + módulo en corto (C10 perforado dando camino
+DC); con **módulos cribados sin cortos** ese cofactor no existe, y el chip
+sobrevivió múltiples hot-plugs de 50 V sanos. Aun así, cablear en frío y no
+tocar módulos en caliente.
+
+### ⚠️ El firmware con RETRY de hot-plug NO arranca (issue abierto)
+
+Se intentó añadir un retry SCCP en el bucle (como el power switch) para permitir
+el flujo seguro "arrancar a bajo voltaje → rampear a 50 V → entregar sin
+hot-plug". **Esa imagen NO arranca** (queda en ROM tras el POR, a cualquier
+voltaje), pese a: firma criptográficamente VÁLIDA, vectores/jump correctos, y
+que el retry está en el bucle (después de toda la init, no debería impedir el
+arranque). El no-retry (mismo main.c sin ese bloque) arranca perfecto. Es el
+mismo comportamiento errático del secure boot del MAX32690 con ciertas imágenes
+frescas. **Pendiente**: entender por qué esa imagen específica no arranca
+(¿quirk del ROM? ¿algo del layout?) para habilitar el flujo con rampa sin
+hot-plug. Backup del intento: `src/main.c.bak-preretry` en la TPU; el retry
+está descrito en el commit correspondiente.
+
 ## Pendiente conocido (bloqueo para cambios de código en el mfs)
 
 **Las builds frescas del firmware mfs no arrancan** (el secure-boot no las
