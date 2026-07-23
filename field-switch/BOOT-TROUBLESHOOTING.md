@@ -112,6 +112,59 @@ Requisitos de build que si faltan producen firmware que **nunca** arranca:
 
 ---
 
+## Investigación del bloqueo "builds frescas no arrancan" (2026-07-23)
+
+Estado: **parcialmente resuelto, con un factor residual abierto.**
+
+### Factor 1 (CONFIRMADO y corregido): `FLASH_LOAD_OFFSET=0`
+
+Análisis binario byte a byte de 4 builds: el `prj.conf` del sample tenía
+`# CONFIG_FLASH_LOAD_OFFSET is not set`, así que cada build pristine linkeaba en
+`0x10000000` (offset 0). Con el header de secure boot (256 B) el cuerpo baja a
+`0x10000100`, dejando **cada dirección 0x100 por debajo** de su sitio físico →
+el ROM salta 0x100 antes de `__start` → basura → ROM.
+
+- Imágenes que ARRANCAN (mfs_pullup y derivadas): `.bin` con **256 bytes de
+  ceros al inicio**, vectores en file `0x100`, `_vector_table=0x10000200`.
+- Imágenes que NO arrancaban (build_mfs, build_shortcheck): **0 bytes de
+  relleno**, vectores en file `0x0`, `_vector_table=0x10000000`.
+
+**Fix aplicado:** `prj.conf` línea 30 → `CONFIG_FLASH_LOAD_OFFSET=0x100`. Un
+rebuild pristine ya sale con `_vector_table=0x10000200` y el `.bin` con los 256
+ceros. Verificado.
+
+### Factor 2 (ABIERTO): sigue sin arrancar con offset correcto
+
+⚠️ **El offset era necesario pero NO suficiente.** Probado en vivo:
+
+| Imagen | offset | estructura | POR |
+|---|---|---|---|
+| mfs_class11 (cuerpo mfs_pullup, re-firmada hoy) | 0x100 | 256-ceros ✓ | **arranca** ✓ |
+| mfs_short (build fresco, offset corregido, firmada hoy) | 0x100 | 256-ceros ✓, vectores/jump correctos | **ROM** ✗ |
+| mfs_ms (otro build fresco, offset 0x100) | 0x100 | 256-ceros ✓ | **ROM** ✗ |
+
+Descartado con datos:
+- **Placa sana**: mfs_class11 arranca una y otra vez (PC `0x1000xxxx`).
+- **No es fault de runtime**: el PC tras POR es ROM (`0x0000xxxx`) con HFSR/CFSR
+  = 0 → rechazo del secure boot, no arranque-y-cuelgue.
+- **No es `sign_app` intermitente**: firma **determinista** (3 firmas del mismo
+  `.bin` = byte-idénticas). Re-firmar no cambia nada.
+- **Header estructuralmente idéntico** entre la que arranca y la que no
+  (mfs_class11 vs mfs_short): `load=0x10000000`, `imglen=cuerpo+224`, vectores
+  y SP/Reset correctos. Solo difieren `imglen`, `jump` y los 64 B de firma
+  (todo esperable). Firmas bien formadas (sin ceros a la cabeza en r/s).
+
+**Conclusión:** con el mismo `sign_app` + misma CRK, el cuerpo de mfs_pullup
+produce imagen que arranca y un cuerpo **fresco** no, pese a estructura idéntica.
+El secure boot rechaza la FIRMA de los cuerpos frescos. Pendiente: **verificar
+las firmas criptográficamente offline** (extraer la clave/curva/hash que usa
+`sign_app`, verificar mfs_class11 —debe validar— vs mfs_short —se predice que
+no—) para aislar si es un bug de `sign_app` con ciertos cuerpos o un campo del
+header que el ROM chequea y no hemos decodificado. NO son más ciclos de POR: es
+análisis offline.
+
+---
+
 ## ¿Era la CRK el problema? (corrección de una hipótesis previa)
 
 **No, para las placas que YA traen la CRK.** Se creyó que el "no auto-arranque"
