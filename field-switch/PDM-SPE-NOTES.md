@@ -150,6 +150,59 @@ está cableado antes (el mfs negocia UNA vez al arrancar, sin retry hot-plug).
 Presupuesto Clase 11: 3.2 W por enlace (lógica FSW 0.65 W + 2-3 ATTs, sin
 nietos FSW).
 
+## Diagnóstico SCCP Clase 11 — el PSM tira la línea SCCP a bajo (2026-07-23)
+
+> Primer intento de entrega SPoE negociada real (FSW padre Clase 11, PSM en
+> slot Port 4, cable a PDM Clase 11). Síntoma: **silencio total** — sin LED,
+> sin actividad, 0 V en el par. Diagnóstico completo por SWD **sin consola y
+> sin recompilar**, manejando el SPI0 y el GPIO2 del MAX32690 a registro
+> pelado desde openocd (scripts `ltc_dump.tcl`/`sccp_*.tcl` de la sesión).
+
+**Traza del fallo (verificada registro a registro):**
+
+1. `probe()` → Vin GADC = **23.7 V** ✓ (ventana Clase 11 20-30 V pasa)
+2. Prebias escrito ✓ (`PxCFG1=0x0108`), clasificación habilitada ✓
+   (`PxCFG0=0x2041`), puerto entra en **SEARCHING inmediatamente** ✓
+   (la ventana de 4 ms del driver NO es el problema)
+3. `sccp_reset_pulse()`: **la línea SCCP debe reposar ALTA** (protocolo tipo
+   1-Wire) → **lee BAJA** → `ADI_LTC_SCCP_PD_LINE_NOT_HIGH` → `port_disable`
+   silencioso. Fin.
+
+**A/B concluyente (línea sccpi por puerto, en clasificación):**
+
+| Slot | Línea SCCP |
+|---|---|
+| Vacío (puerto 3, y puerto 2 tras sacar el PSM) | **1 = alta** ✓ |
+| Con PSM (solo, sin cable) | **0** ✗ |
+| Con PSM + cable + PDM | **0** ✗ |
+
+→ **El módulo PSM tira/carga la línea SCCP a bajo por sí solo.** Placa, slot,
+cable y PDM exonerados. Como los PSM son los mismos del power switch, esto
+explica retroactivamente el viejo "la cadena SCCP no completa" del MPS:
+**ningún PSM ha dejado pasar una clasificación SCCP jamás.** El driver de ADI
+se validó en su demo D2Z, donde el bias de la línea SCCP existe en hardware;
+en el eco-sistema PSM ese reposo-alto no se da.
+
+**Para hardware (Mayker):** nets del slot: `P<n>_SW` / `P<n>_SCCPI` /
+`P<n>_SCCPO` (pines 19/21/23). Revisar en el PSM cómo se acopla la línea SCCP
+al par y dónde está su bias/pull-up. Medible en DC en el pin SCCPI del slot
+con/sin módulo. Nota: `DET_VLOW` en PxST con PSM insertado (la entrada del
+módulo carga la salida del puerto).
+
+**Hallazgos colaterales del mismo diagnóstico:**
+
+- **Brownout por límite de fuente**: con el límite a 200-300 mA, el intento de
+  entrega APL hacia el PDM desplomó el rail → **UVLO_DIGITAL → el LTC4296 se
+  resetea y pierde toda la config** (GCMD vuelve a LOCK 0xA0, CFG0 a default
+  0x0002) → un solo parpadeo y silencio. Para pruebas de entrega a 24 V:
+  **límite ≥1 A** (el ACL del puerto limita ~250 mA con sense 0.24 Ω y el
+  breaker de lado bajo corta a ~0.97 A; a 24 V no existe el mecanismo de las
+  quemas del MPS, que fue transitorio de 50 V).
+- **No insertar/sacar módulos en caliente**: resetea el FSW (glitch de rail).
+- Un PDM suelto (sin carga en POWER_SPE) puede negociar (el LTC9111 clasifica
+  alimentado de línea) pero **no retener** potencia (sin consumo MFVS →
+  dropout cíclico). Para entrega sostenida, PDM en slot Port 1 de un FSW hijo.
+
 ## Pendiente conocido (bloqueo para cambios de código en el mfs)
 
 **Las builds frescas del firmware mfs no arrancan** (el secure-boot no las
