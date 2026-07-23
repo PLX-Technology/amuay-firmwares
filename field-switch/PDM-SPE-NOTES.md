@@ -240,6 +240,29 @@ cambió nada), sig-override (no altera la línea).
   alimentado de línea) pero **no retener** potencia (sin consumo MFVS →
   dropout cíclico). Para entrega sostenida, PDM en slot Port 1 de un FSW hijo.
 
+## Garantía de no-entrega-ciega (verificado en banco 2026-07-23)
+
+Pregunta de Mayker: *"¿el puerto entrega potencia directa o espera negociar?"*
+**Respuesta verificada: JAMÁS entrega sin negociar.** Cadena de compuertas
+(todas obligatorias, cualquier fallo → `port_disable`):
+
+1. `AUTO` bajo (R77 100k pull-down; `GIOST.PAD_AUTO=0` leído en vivo) → modo
+   gestionado: el chip no puede auto-energizar. Doble candado: el default de
+   fábrica `PxCFG0=0x0002` (`HW_EN_MASK`) enmascara el enable por hardware.
+2. Vin en ventana de clase (GADC) → 3. firma de PD válida (4.05-4.55 V bajo
+   sondeo de 1-2.5 mA) → 4. handshake SCCP respondido → 5. clase compatible
+   → solo entonces `set_port_pwr`.
+
+Tras entregar, la supervisión **MFVS sigue armada** (`set_port_pwr` no
+deshabilita timers): si el PD deja de consumir >2.5 mA, el chip retira la
+potencia solo (tMFVDO) y cae a VSLEEP. Además el mfs negocia **solo al boot**
+(sin retry hot-plug) — conectar después del POR no entrega nada.
+
+Verificado tras POR limpio con PSM sano y nada conectado: los 4 `PxCFG0 =
+0x0000` (el firmware deshabilitó todo al no hallar PD), sin sondeo, **LED del
+PSM apagado**. (Un LED fijo con ~5 V en el par = puerto retenido en
+clasificación por el debugger — sondeo de µA del estándar, no entrega.)
+
 ## Pendiente conocido (bloqueo para cambios de código en el mfs)
 
 **Las builds frescas del firmware mfs no arrancan** (el secure-boot no las
