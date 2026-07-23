@@ -263,6 +263,36 @@ Verificado tras POR limpio con PSM sano y nada conectado: los 4 `PxCFG0 =
 PSM apagado**. (Un LED fijo con ~5 V en el par = puerto retenido en
 clasificación por el debugger — sondeo de µA del estándar, no entrega.)
 
+## 🏆 PRIMERA ENTREGA SPoE NEGOCIADA (2026-07-23) — Clase 11 funcionando
+
+**Cadena:** FSW padre (`mfs_class11`, 24 V externo) → PSM sano en slot Port 4
+→ cable SPE → PDM sano re-strapeado a **Clase 11** en slot Port 1 del FSW
+hijo (hijo sin fuente externa). POR del padre → la negociación del boot
+completó TODA la secuencia por primera vez:
+
+| Registro | Valor | Significado |
+|---|---|---|
+| `P2EV` | 0x0200 | `VALID_SIGNATURE` — el LTC9111 del PDM presentó firma (4.05-4.55 V) |
+| `P2ST` | 0x3e12 | estado **DELIVERING** + `PI_POWERED` + `POWER_STABLE` HI/LO |
+| `P2CFG0` | 0x0021 | estado final correcto (`SW_EN\|POWER_AVAILABLE` tras `END_CLASSIFICATION`) |
+| GADC Vout | **23 555 mV estables** | 24 V negociados en el cable |
+
+**El corto no era solo el PSM: el PDM hijo TAMBIÉN estaba perforado.** Tras
+reparar el PSM (C10), la línea volvió a caer con el PDM original conectado
+(cable exonerado con extremo abierto: línea alta). Sustituido por un PDM
+sano + re-strap Clase 11 → entrega. **⚠️ CRIBAR TODOS los módulos PSM/PDM
+con óhmetro (par↔par, ambas polaridades): ~4 Ω = perforado; sanos = decenas
+de kΩ o más.** Hipótesis de causa: transitorios de 50 V/hot-plug de la era
+MPS perforaron el cap de línea (C10 en el PSM; equivalente en el PDM).
+
+**⚠️ PENDIENTE ABIERTO — el FSW hijo no arranca con la potencia entregada:**
+Iout ≈ 6 mA (~0.14 W) cuando la lógica del hijo necesita ~28 mA @ 24 V. Los
+23.5 V llegan al PDM pero el hijo no enciende → revisar el camino
+**`POWER_SPE` (salida del LTC9111) → `PSE_OUT` → rail del hijo** (J13/D10 y
+el OR-ing con la entrada externa en el esquemático MFS). Nota: 6 mA cae en
+la banda gris del MFVS (2.5-10 mA) — la entrega se sostiene de milagro; si
+el chip la considera ausente, irá a settle-sleep (VSLEEP 3.4 V).
+
 ## Pendiente conocido (bloqueo para cambios de código en el mfs)
 
 **Las builds frescas del firmware mfs no arrancan** (el secure-boot no las
