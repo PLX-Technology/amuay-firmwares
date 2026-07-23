@@ -111,3 +111,32 @@ IN** durante la energización:
 4. Firmware: eliminar el bloque residual "(1) Línea SCCP" (higiene) y mantener
    SIEMPRE las protecciones por defecto (nunca reusar el config de banco).
 5. Reponer el próximo LTC4296 solo después del experimento decisivo.
+
+## Forense adicional quema #2 (2026-07-23): Q17 en corto D-S + R92 quemada
+
+Datos nuevos: en la quema #2 también se quemaron **R92** (sense 0.27 Ω) y
+**Q17** (PSMN075-100MSEX, alto lado del puerto 1), que quedó **en corto
+drenador-surtidor**. El puerto tenía un módulo SPE insertado, sin nada
+conectado más allá.
+
+**Cadena de fallo consistente con todas las observaciones:**
+1. Energización de los 50 V → transitorio en PSE_IN.
+2. Q17 **apagado** (puerto deshabilitado: AUTO=GND + firmware solo-disable) →
+   el transitorio completo cae como VDS → FET de **100 V** con pico de
+   hot-plug que puede rozar ~100 V (datasheet: *"maximum rated VDS must exceed
+   the **peak** power-supply voltage"* — margen cero) → **avalancha → corto D-S**.
+3. Con Q17 en corto: 50 V DC → R92 → entrada del módulo SPE (sus caps +
+   front-end LTC9111 son la carga; no hace falta nada conectado más allá) →
+   corriente sostenida.
+4. R92 se quema por I²R; al degradarse/abrirse, el diferencial
+   HSNSP0−HSNSM0 supera el abs max de **±10 V** → mata el sensado del
+   LTC4296 → chip mudo → chip quemado.
+
+**Implicación:** un firmware no puede hacer avalanchar un MOSFET apagado. El
+único rol posible del firmware sobre Q17 sería encender HGATE0 (power-up en
+LTC_PORT0), probado imposible en el firmware seguro (solo escrituras de
+disable en ese puerto; el bloque residual divulgado toca LTC_PORT3, no el
+puerto quemado). Y con las protecciones activas del firmware seguro, un
+encendido controlado limita la corriente (foldback ACL + TLIM) — para quemar
+R92 hace falta que la protección (el chip) ya esté rota: el daño precede al
+flujo de corriente. **La quema #2 es un evento de hardware/energización.**
