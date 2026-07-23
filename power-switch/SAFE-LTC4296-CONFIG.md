@@ -139,15 +139,25 @@ Bloque añadido en `main.c` (tras el monitoreo, antes de VIN/VOUT):
 No fuerza potencia: solo actúa si hubo negociación. Si el HW de la línea de baja
 sigue con fallo, el re-arme se vuelve a disparar y `g_lg_gfltev` bit0 lo delata.
 
+### Reintento en el bucle principal (hot-plug de los 50 V) — añadido 2026-07-22
+La negociación corre en `probe()` (arranque). Para no exigir un segundo POR al
+conectar los 50 V en caliente, el bucle principal **reintenta cada ~5 s**:
+por cada puerto que **aún no entrega** (PxST bits 2:0 ≠ 2) llama a
+`ltc4296_retry_spoe_sccp()` (re-negocia por SCCP con la clase del devicetree);
+los puertos que **ya entregan se saltan** (no se les molesta). Tras negociar,
+re-arma/verifica el lado bajo. Así: **flashear sin 50 V → verificar arranque →
+conectar 50 V + PD → en ≤5 s negocia solo** (sin segundo POR).
+
 ### Globals de verificación por SWD (build actual `build_final`, revalidar con el `.map`)
 | Global | Dirección | Significado |
 |---|---|---|
-| `g_lg_deliver[4]` | `0x20097908` | 1 = puerto entregando (negoció) |
-| `g_lg_any` | `0x20097904` | 1 = al menos un puerto negoció |
-| `g_lg_rearm_rc` | `0x20097900` | retorno de `clear_ckt_breaker` (-1 = no negoció) |
-| `g_lg_gfltev` | `0x2009916c` | GFLTEV tras re-arme (**bit0 = LOW_CKT_BRK_FAULT**) |
-| `g_lg_pxev[4]` | `0x20099164` | PxEV por puerto (bit0 rev, bit1 fwd) |
-| `g_lg_st[4]` | `0x2009915c` | PxST por puerto |
+| `g_lg_deliver[4]` | `0x20097918` | 1 = puerto entregando (negoció) |
+| `g_lg_any` | `0x20097914` | 1 = al menos un puerto negoció |
+| `g_lg_rearm_rc` | `0x20097910` | retorno de `clear_ckt_breaker` (-1 = no negoció) |
+| `g_lg_gfltev` | `0x2009917c` | GFLTEV tras re-arme (**bit0 = LOW_CKT_BRK_FAULT**) |
+| `g_lg_pxev[4]` | `0x20099174` | PxEV por puerto (bit0 rev, bit1 fwd) |
+| `g_lg_st[4]` | `0x2009916c` | PxST por puerto |
+| `g_retry_rc[4]` | `0x20097900` | rc de `retry_spoe_sccp` en el bucle (`ADI_LTC_SCCP_COMPLETE`=éxito) |
 
 **Criterio de éxito:** `g_lg_any=1` (negoció), `g_lg_gfltev` bit0 = **0** (la baja no
 dispara tras re-armar) y `g_lg_pxev[q]` bits 0/1 = **0** en el puerto activo.
