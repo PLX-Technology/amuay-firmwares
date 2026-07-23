@@ -20,3 +20,13 @@ tpu-artifacts/
 
 # Claves del equipo, nunca versionar
 tpu/varec-gateway/secrets.env
+
+# Firmware prebuilt del field switch (entregable con el fix de ERTCO) - SI versionar
+!field-switch/prebuilt/
+!field-switch/prebuilt/*.sbin
+!field-switch/prebuilt/*.bin
+
+# Firmware prebuilt del power switch (config segura LTC4296) - SI versionar
+!power-switch/prebuilt/
+!power-switch/prebuilt/*.sbin
+!power-switch/prebuilt/*.bin
