@@ -71,6 +71,49 @@ la TPU y hacer POR del field switch — la foto del arranque capturará el tráf
 `g_rx[puerto del PDM]` > 0, y `g_tx` de los otros puertos con link mostrando el
 mismo byte count (= el switch conmutó/floodeó los broadcasts). ✓
 
+## Picos de corriente en la fuente del field switch — EXPLICADOS (benigno)
+
+> 2026-07-23. Síntoma: la fuente externa del FSW (24 V) oscila
+> **27 mA ↔ 270 mA ↔ 27 mA** periódicamente. Diagnóstico cerrado por
+> experimento A/B controlado.
+
+**Causa: el PSE propio del field switch.** El FSW lleva su **propio LTC4296**
+(sección "POWER SOURCE (PSE)" del esquemático MFS — el que alimentará los ATT
+aguas abajo). El firmware `mfs` lo configura al arrancar (clase APL con
+overrides del overlay, `port_prebias` + `port_en`), y con los puertos **vacíos**
+el chip entra en su ciclo autónomo de PSE sin PD:
+
+```
+power-up (inrush ≈ cientos de mA) → nadie consume MFVS → tMFVDO expira
+→ settle-sleep → restart → power-up otra vez…
+```
+
+Cada reintento = un pico. **Es benigno**: ese camino corre con todas las
+protecciones del chip (soft-start, foldback, timers de inrush/MFVS) y el ciclo
+**cesa por puerto en cuanto se conecta un PD real** que consuma.
+
+**Experimento que lo probó (A/B):**
+
+| Etapa | Estado | ¿Picos? |
+|---|---|---|
+| Firmware corriendo | LTC configurado por el firmware | Sí |
+| MCU en **halt** (SWD) | LTC configurado, firmware congelado | **Sí** → máquina autónoma del LTC, no actividad del firmware |
+| Chip retenido en **ROM** tras POR | LTC **jamás configurado** (AUTO=GND) | **No** → confirmado |
+
+**Truco para "el MCU jamás arranca" sin línea de reset:** la línea srst del
+Pico **no llega** al MAX32690 en J11 (probado: `adapter assert srst` no resetea).
+Alternativa determinista y reversible: **borrar la página 0 de la flash**
+(`flash erase_address 0x10000000 0x4000`) → el secure-boot rechaza la imagen →
+el chip queda en ROM para siempre tras el POR → el firmware nunca corre.
+Restaurar: re-flashear `prebuilt/mfs_fix.sbin` + POR. (Ojo: tras el POR de
+restauración el ROM tarda ~1-2 s validando la firma — un PC leído en
+`0x0000xxxx` justo tras el POR puede ser el ROM aún validando; releer.)
+
+**Dato útil que dejó el experimento:** el consumo real de la **lógica** del FSW
+es el baseline = **27 mA @ 24 V ≈ 0.65 W** (ADIN6310 + MAX32690 + PHYs, sin
+entregar potencia PSE). Referencia para dimensionar la clase SPoE del enlace
+MPS→FSW.
+
 ## Pendiente conocido (bloqueo para cambios de código en el mfs)
 
 **Las builds frescas del firmware mfs no arrancan** (el secure-boot no las
