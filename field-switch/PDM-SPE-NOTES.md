@@ -189,6 +189,43 @@ al par y dónde está su bias/pull-up. Medible en DC en el pin SCCPI del slot
 con/sin módulo. Nota: `DET_VLOW` en PxST con PSM insertado (la entrada del
 módulo carga la salida del puerto).
 
+### ROOT CAUSE FINAL (mismo día, medido con el GADC del propio LTC4296)
+
+Midiendo la tensión de salida del puerto con el ADC interno del chip
+(`GADCCFG=0x48` = Vout puerto 2, conversión (código−2048)×35 mV):
+
+| Configuración | Vout durante probing de detección |
+|---|---|
+| Slot vacío (puerto 3, control) | **5145 mV** — probing sano, `DET_VHIGH`, sccpi=1 |
+| PSM + cable + PDM | 35-70 mV |
+| PSM sin cable | **70 mV** — igual |
+
+→ **El módulo PSM presenta un CORTO DC a través de su par de potencia por sí
+solo.** La corriente de sondeo (IVALID 1-2.5 mA) muere en el corto → nunca hay
+firma de detección (siempre `DET_VLOW`) → nunca hay tensión de
+clasificación → la línea SCCP nunca reposa alta → el handshake es imposible.
+La cadena de sensado es correcta (el comparador del PSM reporta la verdad).
+
+**Este único defecto explica TODO el histórico:** el "SCCP no completa" del
+MPS, el OVERLOAD a ~1.16 A al forzar entrega (foldback contra el corto), los
+síntomas de snubber/low-side, y el camino de corriente sostenida que quemó
+R92 en la quema #2 (con Q17 en corto, el corto DC del módulo cerró el lazo).
+
+**Localización para Mayker (óhmetro, módulo suelto):** medir
+`PWR_P`↔`PWR_N` / entre los conductores del par: se esperan MΩ, habrá Ω.
+Sospechosos: (1) **U3 (BSS123) + R16 4.99 Ω** — FET de escritura SCCP
+atascado en ON (invertir SCCPO desde el MCU no cambió nada → posible net
+roto carrier→módulo dejando el gate a su default); levantar R16 y re-medir.
+(2) **Red de acople**: center-taps de T1 vía R14/R15=0 Ω + L1 — lazo DC por
+el cobre del devanado si faltan bloqueos DC del lado de línea.
+Verificación del fix: con el corto fuera, el puerto debe mostrar ~4-5 V de
+probing (script `tools/ltc4296-swd/` lo mide en 2 min).
+
+Descartado por experimento en el camino: polaridad de SCCPO (A/B sin
+efecto), ventana de 4 ms del driver (SEARCHING entra inmediato), breaker de
+lado bajo (retorno interno LSNS0→GND 17 Ω siempre activo; limpiar GFLTEV no
+cambió nada), sig-override (no altera la línea).
+
 **Hallazgos colaterales del mismo diagnóstico:**
 
 - **Brownout por límite de fuente**: con el límite a 200-300 mA, el intento de
