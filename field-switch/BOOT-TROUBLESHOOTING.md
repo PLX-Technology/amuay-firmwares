@@ -141,8 +141,33 @@ no tiene interfaz SWD). Distinguir por el PC: **flash `0x1000xxxx` = tiene CRK**
    Luego **POR frío** (quitar y devolver alimentación; un reset caliente no
    dispara el secure-boot). Verificar PC en `0x1000xxxx` moviéndose. Si quedó en
    ROM → **re-firmar** el .sbin y repetir (sign_app intermitente).
-3. Si CRK ausente (`0xff`): aprovisionar la CRK por UART del bootloader
-   (`send_scp -i uart -x writemaximcrk.zip`) antes de flashear.
+3. Si CRK ausente (`0xff`): **aprovisionar por el propio Pico** (VERIFICADO
+   2026-07-23 — ver procedimiento abajo). NO hace falta USB-UART externo.
+
+## Aprovisionar la CRK con SOLO el Pico (procedimiento VERIFICADO)
+
+El conector **uC SWD (J11)** del field switch lleva `LPUART_TX`/`LPUART_RX`
+(pines 6/8) además del SWD — la **misma UART (LPUART0B) que usa el bootloader
+SCP del ROM**, puenteada por la CDC-UART del MAX32625PICO (el COM del Pico).
+Mismo esquema que el power switch. ⚠️ Usar **`tools/sscp/send_scp.py`** (el
+reimplemento Python) — el `send_scp.exe` del SBT da "Connection Failed" en las
+mismas condiciones donde el .py conecta a la primera.
+
+1. Flashear el firmware firmado por SWD (p.ej. `prebuilt/mfs_fix.sbin`).
+2. Lanzar el listener (COM del Pico, p.ej. COM8):
+   ```
+   set MAXIM_SBT_DIR=C:\MaximSDK\Tools\SBT
+   python tools/sscp/send_scp.py -c MAX32690 -s COM8 -i uart ^
+     -x C:\MaximSDK\Tools\SBT\devices\MAX32690\scp_packets\writemaximcrk.zip -t 60 -v
+   ```
+3. **POR frío DURANTE la ventana de escucha** (el handshake del ROM ocurre justo
+   al arrancar). Debe imprimir `Connected !` + el estado (`CRK : Not Exist`) y
+   correr la sesión al 100%.
+4. ⚠️ El final puede decir **"SCP session FAILED"** — ES COSMÉTICO si llegó al
+   100%. **Verificar por el resultado, no por el exit code**: otro POR → la
+   placa debe ARRANCAR el firmware (PC en `0x1000xxxx`) y `0x10801000` mostrar
+   la CRK (`11d47194 …`). Verificado así en la primera placa virgen (USN
+   `a488059220013c70020f06d70b`): CRK grabada y auto-arranque OK.
 
 ## Verificación de link SPE (por SWD, sin consola)
 
