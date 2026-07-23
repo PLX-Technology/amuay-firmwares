@@ -154,14 +154,41 @@ Descartado con datos:
   y SP/Reset correctos. Solo difieren `imglen`, `jump` y los 64 B de firma
   (todo esperable). Firmas bien formadas (sin ceros a la cabeza en r/s).
 
-**Conclusión:** con el mismo `sign_app` + misma CRK, el cuerpo de mfs_pullup
-produce imagen que arranca y un cuerpo **fresco** no, pese a estructura idéntica.
-El secure boot rechaza la FIRMA de los cuerpos frescos. Pendiente: **verificar
-las firmas criptográficamente offline** (extraer la clave/curva/hash que usa
-`sign_app`, verificar mfs_class11 —debe validar— vs mfs_short —se predice que
-no—) para aislar si es un bug de `sign_app` con ciertos cuerpos o un campo del
-header que el ROM chequea y no hemos decodificado. NO son más ciclos de POR: es
-análisis offline.
+### Factor 3 (PROBADO cripto): la firma es VÁLIDA — NO es el secure boot
+
+Verificación criptográfica offline (código fuente de `sign_app` + `cryptography`):
+- Esquema: **ECDSA P-256 + SHA-256**, firma `r||s` big-endian (64 B), sobre el
+  rango `data[0 : len-64]` (header + payload, todo menos la firma).
+- Clave: `maximtestcrk` (`devices/MAX32690/keys/maximtestcrk.key`):
+  X=`a823c8857948dc68…1dcf0142`, Y=`3be124619cbbeb51…f2db8efe`.
+- **Resultado: los 14 `.sbin` verifican TRUE, incluida `mfs_short.sbin` (la que
+  no arranca) y todos los builds frescos.** La firma de los builds frescos es
+  criptográficamente válida contra la misma clave que valida las que arrancan.
+- `imglen` correcto en ambos (`=filesize+224`). Header sano.
+
+⇒ **El ROM ACEPTA la imagen fresca y salta a `jump_address`.** El "no arranca"
+**NO es rechazo del secure boot** — es un **cuelgue/fault DESPUÉS del salto**,
+en el arranque de la app. La nota de memoria "sign_app firma intermitente"
+queda **DESMENTIDA** (firma determinista y válida; re-firmar no cambia nada).
+
+### Estado final del bloqueo (2026-07-23)
+
+- ✅ Offset corregido (`prj.conf` → `0x100`).
+- ✅ Firma probada válida; secure boot descartado como causa.
+- ⚠️ **Causa raíz = fault temprano en el arranque de la app en builds frescos**
+  (boot-loop: app arranca → fault → reset → ROM; por eso el PC tras POR real es
+  `0x0000xxxx` con el ROM activo). El binpatch de `mfs_pullup` arranca porque su
+  código concreto ya pasa ese punto; un build fresco no.
+- El parche de ERTCO en fuente (`sys_me18.c` línea 331, bucle acotado) SÍ está
+  presente en el HAL de la TPU y mi build lo usó — así que el fault **no** es el
+  ERTCO clásico; es otro punto del early-init. Queda por localizar con un POR
+  real instrumentado (la vía `srst`+SWD NO replica el secure boot: cae en código
+  SRAM del ROM, PC `0x2000xxxx` con `BKPT`, engañoso — no perseguir por ahí).
+
+**Próximo enfoque sugerido:** flashear un firmware mínimo "blink+spin" compilado
+fresco (misma toolchain/config) para confirmar si CUALQUIER build fresco arranca;
+si ese mínimo arranca, bisecar hacia el mfs completo; si tampoco, el fallo está
+en el arranque base (clock/HAL/config), no en el código de la app.
 
 ---
 
