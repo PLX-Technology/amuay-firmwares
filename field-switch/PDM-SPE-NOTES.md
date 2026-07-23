@@ -114,6 +114,42 @@ es el baseline = **27 mA @ 24 V ≈ 0.65 W** (ADIN6310 + MAX32690 + PHYs, sin
 entregar potencia PSE). Referencia para dimensionar la clase SPoE del enlace
 MPS→FSW.
 
+## Firmware Clase 11 del FSW (`prebuilt/mfs_class11.sbin`) — patch de DATOS
+
+> 2026-07-23. El PSE propio del field switch pasó de `LTC4296_PSE` (APL con
+> overrides — el modo que cicleaba/blinkeaba) a **`LTC4296_PSE_SCCP_CLASS_11`**
+> en los 4 puertos, para operar a 24 V con entrega negociada. **Flasheado y
+> arrancando** (probado).
+
+Como las builds frescas del mfs no arrancan (bloqueo de secure-boot, ver abajo),
+el cambio se hizo como **binpatch de datos** sobre `mfs_fix.sbin` — la clase de
+cada puerto vive en la struct `ltc4296_config_0` (rodata del devicetree), así
+que cambiarla **no toca ni una instrucción**:
+
+- Entrada por puerto (24 bytes): 16 B de gpio_dt_spec SCCPO/SCCPI +
+  `power_class` (u8 + 3 pad) + `hs_resistor` (u32). Patrón buscable:
+  `01 00 00 00 fa 00 00 00` (clase 1=APL, 250 mΩ) × 4 con stride 24.
+- Patch: `01 → 03` (= `LTC4296_PSE_SCCP_CLASS_11`) en las 4 entradas.
+- Script: `prebuilt/patch-class11.py` (extrae imagen del sbin, verifica patrón
+  y binpatch de ERTCO, escribe `.bin` patcheado). Re-firmar con la receta de
+  siempre (`jump_address=1000662c`).
+- Verificación del sbin final: diff vs `mfs_fix.sbin` = solo los 4 bytes de
+  clase + los 64 B de firma. ✓
+
+**Esta técnica sirve para cualquier cambio de CONFIG/datos del mfs** (clases,
+hs-resistor, etc.) mientras dure el bloqueo de builds — solo código nuevo sigue
+bloqueado.
+
+**Comportamiento tras el cambio (esperado y verificado):** los puertos PSE
+vacíos ya **no ciclean** (adiós picos 27↔270 mA y LEDs de PSM blinkeando — eso
+era el power-up ciego del modo APL). En SCCP solo se entrega tras clasificar un
+**PD real** (LTC9111 del PDM, re-strapeado a Clase 11: `CLASSV=GND,
+CLASSC=FLOAT`). El LTC9111 clasifica **pasivamente** (sin MCU) → una cascada
+FSW padre→PSM→cable→PDM→FSW hijo se enciende sola con el POR del padre si todo
+está cableado antes (el mfs negocia UNA vez al arrancar, sin retry hot-plug).
+Presupuesto Clase 11: 3.2 W por enlace (lógica FSW 0.65 W + 2-3 ATTs, sin
+nietos FSW).
+
 ## Pendiente conocido (bloqueo para cambios de código en el mfs)
 
 **Las builds frescas del firmware mfs no arrancan** (el secure-boot no las
