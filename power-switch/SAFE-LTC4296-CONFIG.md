@@ -172,3 +172,20 @@ específico (GPIO / pin `AUTO` / mod de hardware) que haga el retorno per-puerto
 `prebuilt/pse_safe_class13.sbin` — firmado (rom_version 010203ff, jump 0x100064b8),
 Clase 13 + bloque forzado eliminado + paso de re-arme/verificación del lado bajo.
 **Compilado, NO flasheado.**
+
+## Mejoras post-auditoría (2026-07-23) — aplicadas y compiladas
+
+1. **Eliminado el bloque residual "(1) Línea SCCP"** (hacía prebias +
+   classification en el puerto 3 sin validar Vin — la brecha divulgada en
+   `LTC4296-BURN-AUDIT.md`). Ya no hay NINGUNA escritura al LTC4296 fuera del
+   camino del driver con compuertas.
+2. **Aserción de protecciones al arrancar**: lee `GCFG` y, solo si la lectura
+   es válida (≠0xffff), limpia `TLIM_DISABLE` (bit4) y `MASK_LOWFAULT` (bit5).
+   Garantiza límite térmico activo y línea de baja visible en cada boot, sea
+   cual sea el estado previo del chip. Estado final en `g_gcfg` (SWD).
+
+Artefacto: `prebuilt/pse_safe_class13.sbin`, jump `0x100064f8`. **Compilado y
+firmado, pendiente de flashear cuando se conecte el power switch** (y de
+estrenar con el protocolo de energización + experimento del MCU en reset).
+Direcciones SWD de este build: `g_gcfg=0x20099178`, `g_lg_any=0x20097914`,
+`g_lg_gfltev=0x20099170`, `g_retry_rc=0x20097900`.
