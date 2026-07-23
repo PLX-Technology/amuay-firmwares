@@ -97,16 +97,20 @@ tiene esos 4 nodos. Para cubrirlo también:
    ruteados (los otros usan `gpio2.14..22`).
 4. Subir `MFS_PSE_PORTS` a `5` en `mfs_short_detect.inc.c`.
 
-## Estado
+## ✅ Estado: EN VIVO Y FUNCIONANDO (2026-07-23)
 
-- ✅ **Código escrito y COMPILA limpio** contra la API real (build validado en
-  la TPU, `build_shortcheck`: FLASH 617 692 B, símbolos `mfs_scan_shorts` /
-  `mfs_blink_shorts` / `g_short_mask` linkeados). Aplicado al `main.c` de la
-  TPU con backup (`main.c.bak-preshort-20260723`).
-- ⚠️ **NO flasheado aún** — bloqueado por el problema de builds frescas del mfs
-  que no arrancan (secure boot; ver [`../PDM-SPE-NOTES.md`](../PDM-SPE-NOTES.md)).
-  Se compila y flashea en cuanto se resuelva. Timings y umbral son tuneables
-  tras la primera prueba real.
+Flasheado y **probado en placa** en el firmware definitivo
+`../prebuilt/mfs_clean_class11.sbin`:
+- Arranca (build fresco, secure boot OK) — ver [`../BOOT-TROUBLESHOOTING.md`](../BOOT-TROUBLESHOOTING.md).
+- La detección corre al arrancar: `g_short_mask=0` (sin cortos), sondeo de
+  `5178 mV` por puerto (abierto). LED apagado. ✓
+- Modo **Clase 11** en el overlay (seguro: sin entrega ciega).
+- Fuente de referencia completa: [`main.c.reference`](main.c.reference) (init
+  limpia del switch SPE + este módulo, SIN el bloque RJ45 que crasheaba).
+
+El bloqueo de "builds frescos no arrancan" **quedó resuelto**: era el bloque de
+sondeo RJ45 del `macPort5` (hardware inexistente en el field switch), no el
+secure boot. El firmware es libremente modificable.
 
 ### ⚠️ Al compilar desde fuente (cuando el bloqueo se resuelva)
 

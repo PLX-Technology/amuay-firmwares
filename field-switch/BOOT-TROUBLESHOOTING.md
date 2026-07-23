@@ -171,24 +171,38 @@ Verificación criptográfica offline (código fuente de `sign_app` + `cryptograp
 en el arranque de la app. La nota de memoria "sign_app firma intermitente"
 queda **DESMENTIDA** (firma determinista y válida; re-firmar no cambia nada).
 
-### Estado final del bloqueo (2026-07-23)
+### ✅ RESUELTO (2026-07-23): el bloqueo NUNCA fue de arranque — era código tóxico
 
-- ✅ Offset corregido (`prj.conf` → `0x100`).
-- ✅ Firma probada válida; secure boot descartado como causa.
-- ⚠️ **Causa raíz = fault temprano en el arranque de la app en builds frescos**
-  (boot-loop: app arranca → fault → reset → ROM; por eso el PC tras POR real es
-  `0x0000xxxx` con el ROM activo). El binpatch de `mfs_pullup` arranca porque su
-  código concreto ya pasa ese punto; un build fresco no.
-- El parche de ERTCO en fuente (`sys_me18.c` línea 331, bucle acotado) SÍ está
-  presente en el HAL de la TPU y mi build lo usó — así que el fault **no** es el
-  ERTCO clásico; es otro punto del early-init. Queda por localizar con un POR
-  real instrumentado (la vía `srst`+SWD NO replica el secure boot: cae en código
-  SRAM del ROM, PC `0x2000xxxx` con `BKPT`, engañoso — no perseguir por ahí).
+**Los builds frescos SÍ arrancan.** Todo lo de "fresh builds no arrancan" era un
+diagnóstico equivocado. Cadena de descubrimientos:
 
-**Próximo enfoque sugerido:** flashear un firmware mínimo "blink+spin" compilado
-fresco (misma toolchain/config) para confirmar si CUALQUIER build fresco arranca;
-si ese mínimo arranca, bisecar hacia el mfs completo; si tampoco, el fallo está
-en el arranque base (clock/HAL/config), no en el código de la app.
+1. Offset corregido (`prj.conf` → `0x100`) — necesario.
+2. Firma probada VÁLIDA (cripto) — secure boot descartado.
+3. **Firmware mínimo "blink+spin" compilado fresco → ARRANCA** (PC flash,
+   moviéndose). Prueba definitiva: secure boot, offset, firma y arranque base
+   están PERFECTOS para builds frescos.
+4. **Bisección con `while(1)` spin + lectura de PC** (fiable; la vía `srst`+SWD
+   es engañosa, no replica secure boot): el spin tras `SES_MX_InitializePorts`
+   se alcanza → toda la init del switch (LTC + SES + 6 puertos) funciona en
+   fresco. El fault estaba DESPUÉS.
+5. **Root cause: el bloque de sondeo RJ45/ADIN1300 del `macPort5`** en `main.c`
+   (tras "Configuration done"): reconfigura `macPort5` como `SES_phyADIN1300`,
+   hace `rj_mmd_rd/wr`, fuerza RMII, reinicia autoneg... sobre un **PHY RJ45 que
+   NO EXISTE en el field switch** (es todo SPE; el RJ45 es del power switch). Su
+   propio comentario avisaba: *"dejarlo mal-configurado CRASHEA la app"*.
+   Crashea → hard-fault → reset → ROM (por eso parecía "no arranca").
+
+**FIX:** eliminar ese bloque (inútil y dañino aquí). Firmware definitivo:
+`prebuilt/mfs_clean_class11.sbin` = init limpia del switch SPE + overlay
+**Clase 11** (seguro, sin entrega ciega) + feature de detección de cortos
+(`mfs-short-detect/`). **Compila, arranca y la feature corre** (probado:
+`g_short_mask=0`, sondeo 5178 mV/puerto). Fuente de referencia:
+`mfs-short-detect/main.c.reference`.
+
+**Lección:** un build fresco del mfs se compila, firma (jump = su `__start`) y
+flashea con la receta de siempre y ARRANCA. El firmware es libremente
+modificable como el del power switch. Para depurar arranque: firmware mínimo +
+bisección con spin+PC, NO asumir secure boot ni perseguir `srst`.
 
 ---
 
