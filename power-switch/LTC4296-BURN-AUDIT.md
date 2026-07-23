@@ -140,3 +140,25 @@ puerto quemado). Y con las protecciones activas del firmware seguro, un
 encendido controlado limita la corriente (foldback ACL + TLIM) — para quemar
 R92 hace falta que la protección (el chip) ya esté rota: el daño precede al
 flujo de corriente. **La quema #2 es un evento de hardware/energización.**
+
+## Protocolo de energización de los 50 V (adoptar como estándar)
+
+**Regla de oro: la tensión se sube con la perilla, nunca con el conector.**
+
+1. Fuente en 0 V / salida OFF. **Conectar el cable ANTES de energizar** —
+   nunca acercar un conector con la fuente viva (hot-plug prohibido).
+2. **Límite de corriente 200–300 mA** para pruebas sin carga; subirlo solo con
+   entrega PoDL real (Clase 13 ≈ 231 mA/puerto + margen).
+3. **Rampear 0 → 50 V** (1–2 s). Lo letal es el escalón, no la velocidad.
+4. Verificar corriente en reposo (mA bajos). Si entra en límite → apagar:
+   hay un corto (p. ej. FET dañado).
+5. Para apagar: **0 V / salida OFF primero**, luego desconectar. No
+   desconectar bajo carga (flyback del cable).
+6. Fase root-cause: osciloscopio en IN (single-shot, trigger ~60 V) en cada
+   energización; primera energización de placa reparada con el **MAX32690 en
+   reset/halt por SWD**.
+
+*Física:* escalón de fuente viva sobre inductancia de cable + cerámicos =
+ring LC hasta ~2× (~100 V con 50 V) → margen cero vs el rating de 100 V de los
+PSMN075 y fuerza el clamp del TVS cerca/encima de los 80 V abs max del chip.
+Una rampa no tiene escalón → no hay ring.
