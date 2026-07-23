@@ -698,7 +698,7 @@ int main(void)
 	/* Deteccion de cortos PSM/PDM + LED (feature Mayker). Sustituye al bloque
 	 * de sondeo RJ45/ADIN1300 del macPort5 (hardware inexistente en el field
 	 * switch, todo SPE) que crasheaba la app. */
-	struct gpio_dt_spec fault_led = GPIO_DT_SPEC_GET(DT_ALIAS(led1), gpios);
+	struct gpio_dt_spec fault_led = GPIO_DT_SPEC_GET(DT_NODELABEL(mfs_fault_led), gpios);
 	gpio_pin_configure_dt(&fault_led, GPIO_OUTPUT_INACTIVE);
 	mfs_scan_shorts(ltc4296_dev);
 

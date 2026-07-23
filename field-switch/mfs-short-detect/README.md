@@ -70,19 +70,31 @@ Globales de diagnóstico:
 Contrastar con los scripts de [`../../tools/ltc4296-swd/`](../../tools/ltc4296-swd/):
 el mismo Vout que miden a mano debe coincidir con `g_short_vout[]`.
 
-## Elección del LED (confirmar con Mayker)
+## LED de fallo = P0.13 (CONFIRMADO en placa)
 
-Hay 3 LEDs controlables por el MAX32690 (activos en alto):
+⚠️ Los alias de LED del board dts estándar (`led0/1/2` → gpio2.1/gpio0.11/
+gpio0.12) **NO están poblados/visibles en la placa MFS** (probado: ninguno
+enciende al forzarlos por SWD). El LED de usuario real del field switch está en
+**P0.13** (dato de Mayker, verificado forzando `gpio0.13` alto → enciende).
 
-| Serigrafía | Color | GPIO | Alias DTS |
-|---|---|---|---|
-| LED1 | azul  | gpio2.1  | led0 |
-| **LED2** | **verde** | **gpio0.11** | **led1** |
-| LED3 | rojo  | gpio0.12 | led2 |
+Por eso el `app.overlay` define un nodo propio y la feature lo usa:
+```
+/ {
+	mfsleds {
+		compatible = "gpio-leds";
+		mfs_fault_led: mfs_fault_led {
+			gpios = <&gpio0 13 0>;   /* P0.13, activo alto */
+			label = "FAULT_P013";
+		};
+	};
+};
+```
+En `main.c`: `GPIO_DT_SPEC_GET(DT_NODELABEL(mfs_fault_led), gpios)`.
+Overlay de referencia: [`app.overlay.reference`](app.overlay.reference).
 
-Mayker dijo "LED2" → por defecto uso el **verde (silk LED2, alias `led1`)**.
-Si prefiere **rojo** como color de fallo, cambiar a `DT_ALIAS(led2)` en el
-punto 2. (Ojo con la confusión: el alias DTS `led2` es el LED ROJO/silk LED3.)
+**Verificado en placa (2026-07-23):** PSM en corto en slot Port 4 → el LED P0.13
+**parpadea 4 veces** (= nº de slot), pausa, repite. `g_short_mask=0x04`,
+`g_short_vout[2]=70 mV`. ✓
 
 ## Puerto 6 (5º puerto PSE, LTC_PORT4)
 
