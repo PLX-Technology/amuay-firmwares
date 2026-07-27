@@ -126,7 +126,26 @@ es la **ventana de muestreo del pulso de presencia**.
 
 ---
 
-# Enlace de DATOS con la ATT — ABIERTO (2026-07-27)
+# Enlace de DATOS con la ATT — ✅ RESUELTO (2026-07-27)
+
+**El enlace 10BASE-T1L entrena: la ATT reporta `carrier=1 up=1` estable en
+`iface 1 (port_0)`.** Se consiguió con la combinacion de: **strap MDIO del PSM
+= 5** (el macPort de datos del slot Port 4, ver `MAPA-SLOTS.md`), el cable en el
+conector correcto de la ATT, y **regrabar el firmware de la ATT con el rol
+SLAVE** sobre esa configuracion ya corregida.
+
+Nota sobre master/slave: el driver `phy_adin2111.c` fuerza SLAVE en la ATT
+(`val &= ~MDIO_AN_T1_ADV_M_MST`). Se probo tambien MASTER y **no** enlaza, asi
+que el rol correcto para la ATT es **SLAVE** (el PSM/switch hace de master por
+su default de hardware).
+
+Pendiente al cerrar: la TPU perdio el carrier en su `spe0` (revisar su modulo/
+cable) y **no hay servidor DHCP corriendo en la TPU**, por lo que la ATT no
+obtiene IP todavia. Para la prueba de trafico end-to-end hace falta reponer el
+enlace de la TPU y levantar un DHCP (o asignar IP estatica).
+
+## Historial del diagnostico (referencia)
+
 
 Con la potencia ya resuelta, el siguiente escalón es el enlace 10BASE-T1L.
 **Estado: no entrena.** Ambos extremos coinciden en cero portadora.
