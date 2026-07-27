@@ -1,10 +1,37 @@
-# ATT alimentada por SPE (PoDL) — diagnóstico COMPLETO
+# ATT alimentada por SPE (PoDL) — ✅ RESUELTO
 
-> 2026-07-23. Síntoma: el field switch entrega bien a un **PDM** (verificado a
-> 24 V Clase 11 y a 50 V Clase 13), pero con la **ATT** al otro extremo del
-> mismo PSM y cable, **la negociación SCCP no completa y la ATT no enciende**.
+> 2026-07-23. Síntoma: el field switch entregaba bien a un **PDM** pero con la
+> **ATT** al otro extremo la negociación SCCP no completaba y la ATT no encendía.
+> **RESUELTO: el condensador C5 de la ATT (~4.4 uF) asfixiaba la línea SCCP.**
 
-## ✅ CAUSA RAÍZ: la línea SCCP de la ATT es demasiado LENTA (RC excesivo)
+## ✅ SOLUCIÓN: quitar C5 de la ATT
+
+| Capacitancia entre los pines del conector SPE | Valor |
+|---|---|
+| **ATT original** | **4.46 uF** ← 8.6x el módulo que funciona |
+| **PDM** (funciona) | 0.52 uF |
+| **ATT tras quitar C5** | **0.05 uF** ✓ |
+
+**Resultado tras quitar C5**, con el firmware de producción
+`prebuilt/mfs_clean_class13.sbin` **sin ningún parche** (driver de ADI intacto):
+
+```
+P2ST = 0x3e12  -> DELIVERING + PI_POWERED + POWER_STABLE
+Vin  = 49420 mV
+Vout = 49385 mV   (caida de 35 mV)
+```
+
+**La ATT enciende alimentada por SPE, con negociación SCCP completa a 50 V.**
+
+C5 puenteaba los dos conductores DC en el nodo de toma (antes de R14/R37),
+cargando directamente la línea SCCP. El PDM funciona con 0.52 uF totales, así
+que ese nivel basta para el filtrado de entrada; si se quiere conservar algo de
+capacitancia por EMI, mantener el total **<= 0.5 uF**.
+
+---
+
+## Por qué fallaba (mecanismo, ya solo como referencia)
+
 
 **Medido por SWD** (traza de la línea, 64 muestras cada 50 µs, grabada por el
 propio firmware):
