@@ -372,7 +372,8 @@ class HttpOut:
                     if webui.check_auth(self.headers, outer.full_cfg):
                         return self._html(b"", 302, location="/")
                     err = "err=1" in self.path
-                    return self._html(webui.login_page(err))
+                    return self._html(webui.login_page(
+                        err, webui.site_name(outer.full_cfg)))
                 if p == "/logout":
                     webui.drop_session(webui.session_of(self.headers))
                     return self._html(

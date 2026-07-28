@@ -95,7 +95,7 @@ def check_auth(headers, cfg) -> bool:
 LOGIN_PAGE = """<!doctype html>
 <html lang="es"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Pasarela Varec</title>
+<title>__SITE__</title>
 <style>
  *{box-sizing:border-box} body{margin:0;min-height:100vh;display:flex;
   align-items:center;justify-content:center;background:#0f1720;
@@ -115,7 +115,7 @@ LOGIN_PAGE = """<!doctype html>
   border:1px solid #6b2a33;color:#ffb4bd;font-size:13px}
 </style></head><body>
 <form method="POST" action="/login">
-  <h1>Pasarela Varec</h1>
+  <h1>__SITE__</h1>
   <p class="sub">Monitoreo de niveles de tanque</p>
   <label for="u">Usuario</label>
   <input id="u" name="user" autocomplete="username" autofocus required>
@@ -126,15 +126,22 @@ LOGIN_PAGE = """<!doctype html>
 </form></body></html>"""
 
 
-def login_page(error: str = "") -> bytes:
+def login_page(error: str = "", name: str = "Pasarela Varec") -> bytes:
     msg = ('<div class="err">Usuario o clave incorrectos</div>' if error else '')
-    return LOGIN_PAGE.replace("__ERROR__", msg).encode()
+    return (LOGIN_PAGE.replace("__ERROR__", msg)
+                      .replace("__SITE__", html_escape(name))).encode()
+
+
+def html_escape(t: str) -> str:
+    return (t.replace("&", "&amp;").replace("<", "&lt;")
+             .replace(">", "&gt;").replace('"', "&quot;"))
 
 
 # ------------------------------------------------------------------ config
 # Solo estas claves son editables desde la UI. Lo demas (rutas, ingesta) se
 # toca por SSH a proposito: un error ahi deja el equipo sin recoger datos.
 EDITABLE = {
+    "site": ["name"],
     "mqtt": ["enabled", "host", "port", "username", "topic_prefix", "qos", "retain"],
     "modbus_tcp": ["enabled", "bind", "port", "unit_id"],
     "modbus_rtu": ["enabled", "device", "baud", "parity", "unit_id"],
@@ -146,6 +153,12 @@ _VALID = {
     "parity": ["N", "E", "O"],
     "baud": [9600, 19200, 38400, 115200],
 }
+
+
+def site_name(cfg: dict) -> str:
+    """Como se llama ESTA pasarela. Con varias TPU desplegadas, un titulo
+    generico no dice donde estas mirando."""
+    return ((cfg.get("site", {}) or {}).get("name") or "").strip() or "Pasarela Varec"
 
 
 def public_config(cfg: dict) -> dict:
@@ -287,18 +300,19 @@ PAGE = r"""<!doctype html>
  .hd h2{margin:0}
 </style></head><body>
 <header>
-  <h1>Pasarela Varec</h1>
+  <h1 id="site">Pasarela Varec</h1>
   <div class="tabs">
     <div class="tab on" data-t="dash">Tanques</div>
     <div class="tab" data-t="cfg">Salidas</div>
   </div>
   <div class="sp"></div>
   <span class="mut" id="hdr">—</span>
+  <a href="/logout" title="Cerrar sesión" style="margin-left:14px;padding:6px 12px;border:1px solid #2b3846;border-radius:7px;color:#8b98a5;text-decoration:none;font-size:13px">Cerrar sesión</a>
 </header>
 <main>
   <div id="dash">
     <div class="card">
-      <h2>Tanques <a href="/logout" style="float:right;font-size:13px;font-weight:normal;color:#8b98a5">Salir</a></h2>
+      <h2>Tanques</h2>
       <table><thead><tr><th>ID</th><th>Nombre</th><th>MAC</th><th>Valor</th><th>Pulsos</th><th>Errores</th>
         <th>Última conexión</th><th>Estado</th><th></th></tr></thead><tbody id="tb">
         <tr><td colspan="9" class="mut">cargando…</td></tr></tbody></table>
@@ -319,6 +333,8 @@ PAGE = r"""<!doctype html>
 </main>
 <script>
 const SECS = {
+  site:       {t:"Identificación", nosw:1,
+               f:[["name","Nombre de esta TPU","text"]]},
   mqtt:       {t:"MQTT", f:[["host","Broker","text"],["port","Puerto","number"],
                             ["username","Usuario","text"],["topic_prefix","Prefijo","text"],
                             ["qos","QoS","sel",[0,1,2]],["retain","Retain","bool"]]},
@@ -408,10 +424,11 @@ async function tanks(){
 
 function render(){
   $('#secs').innerHTML = Object.entries(SECS).map(([k,s])=>{
-    const c=CFG[k]||{}, on=!!c.enabled;
-    return `<div class="card"><div class="hd">
-      <label class="sw"><input type="checkbox" data-k="${k}" data-f="enabled"
-        ${on?'checked':''}><span class="sl"></span></label>
+    const c=CFG[k]||{}, on = s.nosw ? true : !!c.enabled;
+    // Identificacion no se apaga: no tiene interruptor.
+    const sw = s.nosw ? '' : `<label class="sw"><input type="checkbox" data-k="${k}"
+        data-f="enabled" ${on?'checked':''}><span class="sl"></span></label>`;
+    return `<div class="card"><div class="hd">${sw}
       <h2 style="text-transform:none;font-size:15px;color:var(--fg)">${s.t}</h2></div>
       ${s.f.map(([f,lab,ty,opts])=>{
         const v=c[f]??'';
@@ -435,6 +452,8 @@ async function load(){
   if(r.status==401){ $('#m').className='msg err';
     $('#m').textContent='Credenciales incorrectas.'; return; }
   CFG=await r.json(); render();
+  const nm = (CFG.site&&CFG.site.name||'').trim();
+  if(nm){ $('#site').textContent = nm; document.title = nm; }
 }
 
 $('#save').onclick=async()=>{
