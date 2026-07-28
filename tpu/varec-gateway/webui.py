@@ -102,8 +102,8 @@ LOGIN_PAGE = """<!doctype html>
   font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#e6edf3}
  form{background:#161f2b;padding:32px;border-radius:12px;width:min(92vw,340px);
   border:1px solid #26313f;box-shadow:0 8px 32px #0006}
- h1{margin:0 0 4px;font-size:19px}
- p.sub{margin:0 0 22px;color:#8b98a5;font-size:13px}
+ h1{margin:0 0 4px;font-size:19px;text-align:center}
+ p.sub{margin:0 0 22px;color:#8b98a5;font-size:13px;text-align:center}
  label{display:block;margin:14px 0 5px;font-size:13px;color:#8b98a5}
  input{width:100%;padding:10px 12px;border-radius:7px;border:1px solid #2b3846;
   background:#0f1720;color:#e6edf3;font-size:15px}
@@ -303,7 +303,7 @@ PAGE = r"""<!doctype html>
   <h1 id="site">Pasarela Varec</h1>
   <div class="tabs">
     <div class="tab on" data-t="dash">Tanques</div>
-    <div class="tab" data-t="cfg">Salidas</div>
+    <div class="tab" data-t="cfg">Settings</div>
   </div>
   <div class="sp"></div>
   <span class="mut" id="hdr">—</span>
