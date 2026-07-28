@@ -72,13 +72,26 @@
 
 &flash0 {
 	partitions {
+		compatible = "fixed-partitions";
 		#address-cells = <1>;
 		#size-cells = <1>;
-		ranges;
 
-		slot0_partition: partition@0 {
+		/* OTA (MCUboot swap): la app ocupa ~123 KB de las 896 de cada ranura.
+		 * La configuracion NO vive aqui: esta en la EEPROM I2C externa (0x50),
+		 * asi que una actualizacion no puede perder la identidad del sensor. */
+		boot_partition: partition@0 {
+			label = "mcuboot";
+			reg = <0x00000000 DT_SIZE_K(64)>;
+		};
+
+		slot0_partition: partition@10000 {
 			label = "image-0";
-			reg = <0x00000000 DT_SIZE_K(2048)>;
+			reg = <0x00010000 DT_SIZE_K(896)>;
+		};
+
+		slot1_partition: partition@f0000 {
+			label = "image-1";
+			reg = <0x000f0000 DT_SIZE_K(896)>;
 		};
 	};
 };
@@ -102,7 +115,7 @@
 		adin2111: adin2111@0 {
 			compatible = "adi,adin2111";
 			reg = <0x0>;
-			spi-max-frequency = <4000000>;
+			spi-max-frequency = <1000000>;
 			int-gpios = <&gpioa 10 GPIO_ACTIVE_LOW>;   /* ADIN_INT1 */
 			reset-gpios = <&gpioc 5 GPIO_ACTIVE_LOW>;  /* ADIN_RESET */
 			status = "okay";
@@ -117,8 +130,12 @@
 				#address-cells = <1>;
 				#size-cells = <0>;
 				status = "okay";
-				attphy1: ethernet-phy@1 { reg = <0x1>; compatible = "adi,adin2111-phy"; status = "okay"; };
-				attphy2: ethernet-phy@2 { reg = <0x2>; compatible = "adi,adin2111-phy"; status = "okay"; };
+				/* led0-en: LED6/LED7 (actividad SPE) cuelgan de P1_LED_0/P2_LED_0.
+				 * Sin esta propiedad el driver los DESACTIVA explicitamente.
+				 * led1-en NO se pone: el pin P2_LED_1 solo lleva R66 a masa
+				 * como strap, no hay LED. */
+				attphy1: ethernet-phy@1 { reg = <0x1>; compatible = "adi,adin2111-phy"; status = "okay"; led0-en; };
+				attphy2: ethernet-phy@2 { reg = <0x2>; compatible = "adi,adin2111-phy"; status = "okay"; led0-en; };
 			};
 		};
 	};
@@ -172,6 +189,13 @@
 	pinctrl-names = "default";
 	clock-frequency = <I2C_BITRATE_STANDARD>;
 	status = "okay";
+
+	/* IC13 = ADT75ARMZ (A0/A1/A2 a GND -> 0x48). Es compatible a nivel de
+	 * registros con el LM75, asi que vale el driver generico de Zephyr. */
+	adt75: lm75@48 {
+		compatible = "lm75";
+		reg = <0x48>;
+	};
 
 	eeprom0: eeprom@50 {
 		compatible = "atmel,at24";

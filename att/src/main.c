@@ -34,6 +34,8 @@
 #include <zephyr/net/net_event.h>
 #include <zephyr/modbus/modbus.h>
 #include <zephyr/drivers/eeprom.h>
+#include <zephyr/dfu/mcuboot.h>
+#include <zephyr/drivers/sensor.h>
 #include <zephyr/sys/crc.h>
 #include <errno.h>
 #include <zephyr/net/phy.h>
@@ -42,7 +44,7 @@ LOG_MODULE_REGISTER(att, LOG_LEVEL_INF);
 
 /* Build de BANCO: SPE/ADIN2111 desactivado (OA-SPI roto cuelga el arranque).
  * Se conserva TODO el codigo SPE; solo se salta en tiempo de compilacion. */
-// #define BENCH_NO_SPE 1   /* descomentar para build de BANCO sin SPE (workaround OA-SPI) */
+// #define BENCH_NO_SPE 1  (SPE activado para probar bit-bang 1MHz)
 static const struct device *const adin = DEVICE_DT_GET(DT_NODELABEL(adin2111));
 static const struct device *const gpa  = DEVICE_DT_GET(DT_NODELABEL(gpioa));
 static const struct device *const gpd  = DEVICE_DT_GET(DT_NODELABEL(gpiod));
@@ -68,6 +70,11 @@ static const int8_t QTAB[16] = {
 	+1,  2,  0, -1,
 	 2, -1, +1,  0,
 };
+
+/* ---------------- LEDs de usuario: espejo de los canales A y B ---------------- */
+/* led1 = canal A (A out = PA7 = ENC_B_PIN);  led2 = canal B (B out = PA0 = ENC_A_PIN) */
+static const struct gpio_dt_spec led_a = GPIO_DT_SPEC_GET(DT_ALIAS(led1), gpios);
+static const struct gpio_dt_spec led_b = GPIO_DT_SPEC_GET(DT_ALIAS(led2), gpios);
 
 /* ---------------- RS-485 (USART2, PA12=TX PA11=RX) ---------------- */
 static volatile uint32_t r485_rx_bytes;
@@ -229,6 +236,10 @@ static int cfg_save(void)
 #define MB_UNIT_ID   1
 #define MB_TCP_PORT  502
 
+/* definidas mas abajo, junto al bloque de ambiente */
+static int16_t att_temp_c10(void);
+static int16_t att_humi_rh10(void);
+
 static int mb_input_reg_rd(uint16_t addr, uint16_t *reg)
 {
 	uint32_t v;
@@ -243,6 +254,8 @@ static int mb_input_reg_rd(uint16_t addr, uint16_t *reg)
 	case 7: *reg = (uint16_t)((uint32_t)att_level_mm() >> 16); break;   /* nivel mm hi */
 	case 8: *reg = (uint16_t)((uint32_t)att_level_mm() & 0xFFFF); break; /* nivel mm lo */
 	case 9: *reg = att_calibrated() ? 1 : 0; break;
+	case 10: *reg = (uint16_t)att_temp_c10(); break;   /* 0.1 C, 0x8000 = sin dato */
+	case 11: *reg = (uint16_t)att_humi_rh10(); break;  /* 0.1 %, 0x8000 = sin sensor */
 	case 6:
 		v = 0;
 		if (net_if_is_carrier_ok(net_if_get_by_index(1))) { v |= BIT(0); }
@@ -477,6 +490,8 @@ static void enc_isr(const struct device *dev, struct gpio_callback *cb, uint32_t
 	uint8_t a = gpio_pin_get(gpa, ENC_A_PIN) ? 1 : 0;
 	uint8_t b = gpio_pin_get(gpa, ENC_B_PIN) ? 1 : 0;
 	uint8_t cur = (a << 1) | b;
+	gpio_pin_set_dt(&led_a, b);   /* canal A = PA7 (ENC_B_PIN) */
+	gpio_pin_set_dt(&led_b, a);   /* canal B = PA0 (ENC_A_PIN) */
 	if (a != enc_pa) { enc_ea++; enc_pa = a; }
 	if (b != enc_pb) { enc_eb++; enc_pb = b; }
 	int8_t d = QTAB[(enc_prev << 2) | cur];
@@ -514,7 +529,51 @@ static int enc_init(void)
 
 	enc_prev = (gpio_pin_get(gpa, ENC_A_PIN) ? 2 : 0) | (gpio_pin_get(gpa, ENC_B_PIN) ? 1 : 0);
 	LOG_INF("Encoder listo: PA0/PA1 por software (x4), estado inicial AB=%u", enc_prev);
+
+	/* LEDs espejo de canal: led1 = A (PA7), led2 = B (PA0) */
+	if (gpio_is_ready_dt(&led_a)) {
+		gpio_pin_configure_dt(&led_a, GPIO_OUTPUT_INACTIVE);
+	}
+	if (gpio_is_ready_dt(&led_b)) {
+		gpio_pin_configure_dt(&led_b, GPIO_OUTPUT_INACTIVE);
+	}
+	gpio_pin_set_dt(&led_a, gpio_pin_get(gpa, ENC_B_PIN));
+	gpio_pin_set_dt(&led_b, gpio_pin_get(gpa, ENC_A_PIN));
+	LOG_INF("LEDs de canal listos: led1=canal A (PA7) led2=canal B (PA0)");
 	return 0;
+}
+
+/* ---------------- ambiente: temperatura y humedad ---------------- */
+/* Centinela de "dato no disponible". Se envia tal cual en la trama para que
+ * el consumidor distinga "0 grados" de "no hay sensor". */
+#define ATT_NA ((int16_t)0x8000)
+
+static const struct device *const tsens = DEVICE_DT_GET_OR_NULL(DT_NODELABEL(adt75));
+
+/* Temperatura ambiente en decimas de grado C (IC13 = ADT75, I2C1 0x48). */
+static int16_t att_temp_c10(void)
+{
+	struct sensor_value v;
+
+	if (tsens == NULL || !device_is_ready(tsens)) {
+		return ATT_NA;
+	}
+	if (sensor_sample_fetch(tsens) < 0) {
+		return ATT_NA;
+	}
+	if (sensor_channel_get(tsens, SENSOR_CHAN_AMBIENT_TEMP, &v) < 0) {
+		return ATT_NA;
+	}
+	return (int16_t)(v.val1 * 10 + v.val2 / 100000);
+}
+
+/* Humedad relativa en decimas de %. LA ATT NO LLEVA SENSOR DE HUMEDAD: el
+ * campo queda RESERVADO en el formato y se envia ATT_NA. Cuando exista uno
+ * (el conector de expansion SV10 ya saca I2C1), solo hay que rellenarlo
+ * aqui: la trama y el mapa Modbus NO cambian. */
+static int16_t att_humi_rh10(void)
+{
+	return ATT_NA;
 }
 
 /* ---------------- trama SPE con la medida del encoder ---------------- */
@@ -533,6 +592,8 @@ struct att_frame {
 	uint32_t edges;      /* flancos totales */
 	uint32_t errors;     /* transiciones ilegales */
 	uint32_t uptime_ms;
+	int16_t  temp_c10;   /* v3: temperatura ambiente en 0.1 C  (ATT_NA = sin dato) */
+	int16_t  humi_rh10;  /* v3: humedad relativa en 0.1 %      (ATT_NA = sin sensor) */
 } __packed;
 
 static int tx_sock = -1;
@@ -576,7 +637,7 @@ static int spe_tx(struct net_if *iface, uint32_t seq)
 	memcpy(f.eth.src.addr, ll->addr, 6);
 	f.eth.type      = htons(ATT_ETHERTYPE);
 	f.magic         = htonl(ATT_MAGIC);
-	f.version       = htons(2);   /* v2: anade level_mm tras count */
+	f.version       = htons(3);   /* v3: anade temp_c10 y humi_rh10 al final */
 	f.tank_id       = htons(cfg.tank_id);
 	f.seq           = htonl(seq);
 	f.count         = (int32_t)htonl((uint32_t)enc_count);
@@ -584,12 +645,51 @@ static int spe_tx(struct net_if *iface, uint32_t seq)
 	f.edges         = htonl(enc_edges);
 	f.errors        = htonl(enc_errors);
 	f.uptime_ms     = htonl(k_uptime_get_32());
+	f.temp_c10      = (int16_t)htons((uint16_t)att_temp_c10());
+	f.humi_rh10     = (int16_t)htons((uint16_t)att_humi_rh10());
 
 	tx_dst.sll_ifindex = net_if_get_by_iface(iface);
 	return zsock_sendto(tx_sock, &f, sizeof(f), 0, (struct sockaddr *)&tx_dst, sizeof(tx_dst));
 }
 
 /* ---------------- main ---------------- */
+/* --- OTA: confirmacion condicionada al enlace SPE ---------------------
+ * Numero de envios SPE correctos SEGUIDOS que exigimos antes de confirmar
+ * la imagen. Con push=500ms son ~2 s de enlace demostrado.
+ */
+#define OTA_CONFIRM_TX_STREAK 4
+
+#ifdef CONFIG_MCUBOOT_IMG_MANAGER
+static void ota_confirm_check(bool tx_ok)
+{
+	static uint8_t streak;
+	static bool done;
+	int r;
+
+	if (done) {
+		return;
+	}
+	if (!tx_ok) {
+		streak = 0;   /* un fallo rompe la racha: hay que probarlo de nuevo */
+		return;
+	}
+	if (++streak < OTA_CONFIRM_TX_STREAK) {
+		return;
+	}
+	if (boot_is_img_confirmed()) {
+		done = true;
+		return;
+	}
+	r = boot_write_img_confirmed();
+	LOG_INF("OTA: imagen CONFIRMADA tras %u envios SPE correctos (ret=%d)",
+		streak, r);
+	done = true;
+}
+#else
+#define ota_confirm_check(ok) ((void)(ok))
+#endif
+
+
 int main(void)
 {
 	struct net_if *iface;
@@ -597,6 +697,11 @@ int main(void)
 
 	k_msleep(1500);
 	LOG_INF("=== ATT Varec2500 — encoder -> SPE ===");
+#ifdef CONFIG_MCUBOOT_IMG_MANAGER
+	LOG_INF("OTA: imagen %s",
+		boot_is_img_confirmed() ? "confirmada" :
+		"A PRUEBA (revertira si el SPE no transmite)");
+#endif
 	LOG_INF("ADIN2111 ready=%d", device_is_ready(adin) ? 1 : 0);
 
 	/* 1) sacar el bypass: mete el ADIN2111 en la linea SPE */
@@ -703,6 +808,8 @@ int main(void)
 			if ((cfg.flags & CFG_F_PUSH) && tx_sock >= 0 && o != NULL) {
 				int r = spe_tx(o, ++seq);
 				if (r > 0) { sent++; } else { failed++; }
+				/* solo confirmamos la imagen si el SPE transmite de verdad */
+				ota_confirm_check(r > 0);
 			}
 		}
 #else

@@ -31,12 +31,55 @@ from collections import defaultdict
 ETHERTYPE = 0x88B5
 MAGIC = 0x56415245                      # "VARE"
 
-# Trama de la ATT (28 bytes, big-endian). El `version` importa: sin el,
-# cualquier cambio futuro del formato rompe a los consumidores en silencio.
-#            magic  ver  tank  seq  count edges errors uptime
-FRAME_FMT = "!I     H    H     I    i     I     I      I".replace(" ", "")
-FRAME_LEN = struct.calcsize(FRAME_FMT)
-FRAME_VERSION = 1
+# Trama de la ATT, big-endian. Cada version ANADE campos al final, nunca
+# reordena, asi que se puede parsear por version y aceptar varias a la vez.
+# Con OTA la flota estara a medio actualizar: rechazar por version seria
+# tirar datos buenos.
+#   v1: magic ver tank seq count edges errors uptime
+#   v2: + level_mm (calibrado en la ATT) tras count
+#   v3: + temp_c10 + humi_rh10 al final
+FRAME_FMT_BY_VER = {
+    1: "!IHHIiIII",
+    2: "!IHHIiiIII",
+    3: "!IHHIiiIIIhh",
+}
+FRAME_LEN_BY_VER = {v: struct.calcsize(f) for v, f in FRAME_FMT_BY_VER.items()}
+FRAME_MIN_LEN = min(FRAME_LEN_BY_VER.values())
+ATT_NA = -32768          # centinela de la ATT: "sin sensor / sin dato"
+
+
+def parse_att_frame(payload: bytes):
+    """Decodifica el payload (sin cabecera Ethernet).
+
+    Devuelve un dict, o el entero de la version si no la conocemos, o None
+    si no es una trama nuestra.
+    """
+    if len(payload) < 6:
+        return None
+    magic, ver = struct.unpack("!IH", payload[:6])
+    if magic != MAGIC:
+        return None
+    fmt = FRAME_FMT_BY_VER.get(ver)
+    if fmt is None:
+        return ver
+    n = FRAME_LEN_BY_VER[ver]
+    if len(payload) < n:
+        return None
+    f = struct.unpack(fmt, payload[:n])
+    level = temp = humi = None
+    if ver == 1:
+        _, _, tank, seq, count, edges, errors, uptime = f
+    elif ver == 2:
+        _, _, tank, seq, count, level, edges, errors, uptime = f
+    else:
+        _, _, tank, seq, count, level, edges, errors, uptime, temp, humi = f
+        # La ATT no lleva sensor de humedad: manda el centinela. Guardar
+        # None y no 0.0, para no inventar una lectura que no existe.
+        temp = None if temp == ATT_NA else temp / 10.0
+        humi = None if humi == ATT_NA else humi / 10.0
+    return {"ver": ver, "tank_id": tank, "seq": seq, "count": count,
+            "level_mm": level, "edges": edges, "errors": errors,
+            "uptime": uptime, "temp_c": temp, "humi_rh": humi}
 
 STOP = threading.Event()
 
@@ -88,6 +131,13 @@ class Store:
             sql = f.read()
         c = self._conn()
         c.executescript(sql)
+        # La base ya desplegada no tiene las columnas de ambiente: anadirlas
+        # aqui. ALTER TABLE ... ADD COLUMN es barato y no toca los datos.
+        for col, typ in (("temp_c", "REAL"), ("humi_rh", "REAL")):
+            try:
+                c.execute(f"ALTER TABLE samples_raw ADD COLUMN {col} {typ}")
+            except Exception:
+                pass   # ya existia
         c.commit()
         c.close()
 
@@ -114,10 +164,12 @@ class Store:
                 try:
                     c.executemany(
                         "INSERT OR REPLACE INTO samples_raw"
-                        "(ts,tank_id,count,value,edges,errors,uptime_s)"
-                        " VALUES(?,?,?,?,?,?,?)",
+                        "(ts,tank_id,count,value,edges,errors,uptime_s,"
+                        "temp_c,humi_rh)"
+                        " VALUES(?,?,?,?,?,?,?,?,?)",
                         [(r["ts"], r["tank_id"], r["count"], r["value"],
-                          r["edges"], r["errors"], r["uptime_s"]) for r in pend],
+                          r["edges"], r["errors"], r["uptime_s"],
+                          r.get("temp_c"), r.get("humi_rh")) for r in pend],
                     )
                     c.commit()
                 except Exception as e:
@@ -256,24 +308,24 @@ def ingest(cfg: dict, store: Store, live: Live, outs: list):
             time.sleep(1)
             continue
 
-        if len(pkt) < 14 + FRAME_LEN:
+        if len(pkt) < 14 + FRAME_MIN_LEN:
             continue
         mac = ":".join(f"{b:02x}" for b in pkt[6:12])
-        try:
-            magic, ver, tank_id, seq, count, edges, errors, uptime = struct.unpack(
-                FRAME_FMT, pkt[14:14 + FRAME_LEN])
-        except struct.error:
+        fr = parse_att_frame(pkt[14:])
+        if fr is None:
             continue
-        if magic != MAGIC:
-            continue
-        if ver != FRAME_VERSION:
+        if isinstance(fr, int):
+            ver = fr
             # Una ATT con firmware distinto: mejor decirlo que interpretar mal
             # sus bytes. Se avisa una vez por MAC, no en cada trama.
             if mac not in _warned_ver:
                 _warned_ver.add(mac)
-                print(f"[spe] {mac} habla version {ver}, esperaba {FRAME_VERSION}"
+                print(f"[spe] {mac} habla version {ver}, no soportada"
                       f" -- ignorada", file=sys.stderr)
             continue
+        ver, tank_id, seq = fr["ver"], fr["tank_id"], fr["seq"]
+        count, edges, errors = fr["count"], fr["edges"], fr["errors"]
+        uptime = fr["uptime"]
         if tank_id == 0:
             # 0 = sin asignar. Es un error de puesta en marcha, no un dato.
             if mac not in _warned_id:
@@ -301,6 +353,12 @@ def ingest(cfg: dict, store: Store, live: Live, outs: list):
             "value": count * (c.get("scale") or 1.0) + (c.get("offset") or 0.0),
             "unit": c.get("unit") or "mm",
             "name": c.get("name") or f"tank{tank_id}",
+            # Ambiente (v3). None = la placa no lo reporta.
+            "temp_c": fr["temp_c"],
+            "humi_rh": fr["humi_rh"],
+            # Nivel que calcula la propia ATT (v2+). La calibracion BUENA es
+            # la de la TPU (scale/offset); esto queda como referencia.
+            "att_level_mm": fr["level_mm"],
         }
         live.update(rec)
         store.put(rec)

@@ -11,8 +11,8 @@ un bug de firmware.
 """
 import serial, sys, time
 
-PORT = 'COM6'
 BINF = sys.argv[1] if len(sys.argv) > 1 else 'att_blinky.bin'
+PORT = sys.argv[2] if len(sys.argv) > 2 else 'COM6'   # el puerto cambia al reenchufar
 ADDR = 0x08000000
 
 
