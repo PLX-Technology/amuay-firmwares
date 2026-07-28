@@ -203,7 +203,7 @@ PAGE = r"""<!doctype html>
     <div class="card">
       <h2>Tanques</h2>
       <table><thead><tr><th>ID</th><th>Nombre</th><th>MAC</th><th>Valor</th><th>Pulsos</th><th>Errores</th>
-        <th>Últ. dato</th><th>Estado</th><th></th></tr></thead><tbody id="tb">
+        <th>Última conexión</th><th>Estado</th><th></th></tr></thead><tbody id="tb">
         <tr><td colspan="9" class="mut">cargando…</td></tr></tbody></table>
       <p class="mut" style="margin:10px 0 0">El <b>tank_id</b> vive en la EEPROM de cada
         sensor y viaja en cada trama: al cambiarlo aquí se escribe <b>en el sensor</b> por
@@ -263,6 +263,23 @@ Se escribe en la EEPROM del `+
   }catch(e){ alert('Error: '+e); btn.textContent='Guardar'; btn.disabled=false; }
 }
 
+// Marca de tiempo legible. Un sensor caido necesita CUANDO fue la ultima
+// conexion, no cuantos segundos han pasado: "hace 86400s" no ayuda a nadie.
+function fechaHora(ts){
+  if(!ts) return '—';
+  const d = new Date(ts*1000);
+  const p = n => String(n).padStart(2,'0');
+  return `${p(d.getDate())}/${p(d.getMonth()+1)}/${d.getFullYear()} `
+       + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+function hace(s){
+  if(s==null) return '';
+  if(s < 60)    return s+' s';
+  if(s < 3600)  return Math.floor(s/60)+' min';
+  if(s < 86400) return Math.floor(s/3600)+' h';
+  return Math.floor(s/86400)+' d';
+}
+
 async function tanks(){
   // No repintar mientras se edita: borraria lo que el usuario esta escribiendo.
   if(document.querySelector('.tid:focus')) return;
@@ -276,7 +293,7 @@ async function tanks(){
       <td class="mut" style="font-family:ui-monospace,monospace;font-size:12px">${t.mac||'—'}</td>
       <td><b>${t.value!=null? t.value.toFixed(2) : '—'}</b> <span class="mut">${t.unit||''}</span></td>
       <td>${t.count??0}</td>
-      <td>${t.errors??0}</td><td>${t.age_s!=null? t.age_s+'s' : '—'}</td>
+      <td>${t.errors??0}</td><td>${fechaHora(t.ts)}<br><span class="mut" style="font-size:11px">${t.age_s!=null? 'hace '+hace(t.age_s) : ''}</span></td>
       <td><span class="dot ${t.online?'up':'down'}"></span>${t.online?'en línea':'sin señal'}</td>
       <td><button class="sid" data-id="${t.tank_id}" style="padding:5px 10px;font-size:13px"
            disabled>Guardar</button></td>
