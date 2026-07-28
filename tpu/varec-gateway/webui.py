@@ -313,9 +313,9 @@ PAGE = r"""<!doctype html>
   <div id="dash">
     <div class="card">
       <h2>Tanques</h2>
-      <table><thead><tr><th>ID</th><th>Nombre</th><th>MAC</th><th>Valor</th><th>Pulsos</th><th>Errores</th><th>Envío</th>
+      <table><thead><tr><th>ID</th><th>Nombre</th><th>MAC</th><th>Valor</th><th>Pulsos</th><th>Temp.</th><th>Errores</th><th>Envío</th>
         <th>Última conexión</th><th>Estado</th><th></th></tr></thead><tbody id="tb">
-        <tr><td colspan="10" class="mut">cargando…</td></tr></tbody></table>
+        <tr><td colspan="11" class="mut">cargando…</td></tr></tbody></table>
       <p class="mut" style="margin:10px 0 0">El <b>tank_id</b> vive en la EEPROM de cada
         sensor y viaja en cada trama: al cambiarlo aquí se escribe <b>en el sensor</b> por
         Modbus, no en la pasarela. Así, si sustituyes una ATT averiada, le pones su id y
@@ -398,6 +398,15 @@ function hace(s){
 const PERIODOS = [[1000,"1 s"],[2000,"2 s"],[5000,"5 s"],[10000,"10 s"],
                   [15000,"15 s"],[30000,"30 s"],[60000,"1 min"]];
 
+// La ATT no lleva sensor de humedad: el firmware manda el centinela y la
+// pasarela lo guarda como null. Se reserva la MISMA celda para cuando lo
+// haya, en vez de anadir ahora una columna siempre vacia.
+function ambiente(t){
+  if(t.temp_c==null) return '<span class="mut">—</span>';
+  const h = (t.humi_rh!=null) ? ` <span class="mut">/ ${t.humi_rh.toFixed(0)} %</span>` : '';
+  return `${t.temp_c.toFixed(1)} <span class="mut">°C</span>${h}`;
+}
+
 function selPeriodo(t){
   const obs = t.period_s;
   const sel = PERIODOS.map(([ms,lab])=>
@@ -435,6 +444,7 @@ async function tanks(){
       <td class="mut" style="font-family:ui-monospace,monospace;font-size:12px">${t.mac||'—'}</td>
       <td><b>${t.value!=null? t.value.toFixed(2) : '—'}</b> <span class="mut">${t.unit||''}</span></td>
       <td>${t.count??0}</td>
+      <td>${ambiente(t)}</td>
       <td>${t.errors??0}</td>
       <td>${selPeriodo(t)}</td>
       <td>${fechaHora(t.ts)}<br><span class="mut" style="font-size:11px">${t.age_s!=null? 'hace '+hace(t.age_s) : ''}</span></td>
@@ -442,7 +452,7 @@ async function tanks(){
       <td><button class="sid" data-id="${t.tank_id}" style="padding:5px 10px;font-size:13px"
            disabled>Guardar</button></td>
       </tr>`).join('') :
-      '<tr><td colspan="10" class="mut">ningún tanque dado de alta todavía</td></tr>';
+      '<tr><td colspan="11" class="mut">ningún tanque dado de alta todavía</td></tr>';
     // El boton solo se activa si el valor cambio: evita escrituras accidentales
     // a la EEPROM del sensor.
     document.querySelectorAll('.tid').forEach(x=>x.oninput=()=>{
