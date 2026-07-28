@@ -249,18 +249,55 @@ class HttpOut:
                 self.end_headers()
                 self.wfile.write(b)
 
-            def _auth(self) -> bool:
-                """La UI puede reconfigurar el equipo: sin clave valida, nada."""
+            def _auth(self, html: bool = False) -> bool:
+                """La UI puede reconfigurar el equipo: sin credenciales, nada.
+
+                En rutas de navegador se redirige al formulario; en las de API
+                se responde 401, que es lo que espera un script.
+                """
                 if webui.check_auth(self.headers, outer.full_cfg):
                     return True
+                if html:
+                    self.send_response(302)
+                    self.send_header("Location", "/login")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return False
                 self.send_response(401)
                 self.send_header("WWW-Authenticate", 'Basic realm="Pasarela Varec"')
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return False
 
+            def _html(self, body: bytes, code=200, cookie=None, location=None):
+                self.send_response(code)
+                if cookie is not None:
+                    # HttpOnly: fuera del alcance de cualquier JS. SameSite:
+                    # el navegador no la envia desde otro sitio (anti-CSRF).
+                    self.send_header("Set-Cookie", cookie)
+                if location:
+                    self.send_header("Location", location)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
             def do_POST(self):
                 p = self.path.rstrip("/")
+                if p == "/login":
+                    import urllib.parse
+                    n = int(self.headers.get("Content-Length", 0) or 0)
+                    f = urllib.parse.parse_qs(self.rfile.read(n).decode("utf-8", "replace"))
+                    u = (f.get("user") or [""])[0]
+                    pw = (f.get("pass") or [""])[0]
+                    if not webui.check_login(u, pw, outer.full_cfg):
+                        return self._html(b"", 302, location="/login?err=1")
+                    tok = webui.new_session()
+                    return self._html(
+                        b"", 302,
+                        cookie=f"{webui.COOKIE}={tok}; Path=/; Max-Age={webui.SESSION_TTL}"
+                               "; HttpOnly; SameSite=Strict",
+                        location="/")
                 if p.startswith("/api/tank/"):
                     return self._tank_post(p)
                 if p != "/api/config":
@@ -331,8 +368,19 @@ class HttpOut:
             def do_GET(self):
                 p = self.path.split("?")[0].rstrip("/")
                 snap = outer.live.snapshot()
+                if p == "/login":
+                    if webui.check_auth(self.headers, outer.full_cfg):
+                        return self._html(b"", 302, location="/")
+                    err = "err=1" in self.path
+                    return self._html(webui.login_page(err))
+                if p == "/logout":
+                    webui.drop_session(webui.session_of(self.headers))
+                    return self._html(
+                        b"", 302,
+                        cookie=f"{webui.COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict",
+                        location="/login")
                 if p in ("", "/ui", "/index.html"):
-                    if not self._auth():
+                    if not self._auth(html=True):
                         return
                     b = webui.PAGE.encode()
                     self.send_response(200)

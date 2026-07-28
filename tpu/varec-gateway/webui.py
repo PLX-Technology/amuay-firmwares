@@ -15,14 +15,73 @@ import json
 import os
 import shutil
 import threading
+import secrets
 import time
 
 # --------------------------------------------------------------------- auth
+# Sesiones en MEMORIA: un reinicio de la pasarela cierra todas. Es lo
+# deseable -- tras tocar la configuracion conviene volver a identificarse.
+_SESSIONS = {}                 # token -> epoch de caducidad
+SESSION_TTL = 12 * 3600
+COOKIE = "varec_sid"
+
+
+def ui_user(cfg) -> str:
+    return (os.environ.get("VAREC_UI_USER")
+            or cfg.get("ui", {}).get("user") or "admin")
+
+
+def ui_pass(cfg) -> str:
+    return (os.environ.get("VAREC_UI_PASS")
+            or cfg.get("ui", {}).get("password") or "")
+
+
+def _purge():
+    t = time.time()
+    for k in [k for k, v in _SESSIONS.items() if v < t]:
+        del _SESSIONS[k]
+
+
+def check_login(user: str, pw: str, cfg) -> bool:
+    """Valida usuario Y clave. compare_digest en ambos: sin cortocircuito,
+    para no filtrar por tiempo cual de los dos fallo."""
+    want_p = ui_pass(cfg)
+    if not want_p:
+        return True                       # sin clave configurada = abierto
+    ok_u = hmac.compare_digest(user or "", ui_user(cfg))
+    ok_p = hmac.compare_digest(pw or "", want_p)
+    return ok_u and ok_p
+
+
+def new_session() -> str:
+    _purge()
+    tok = secrets.token_urlsafe(32)
+    _SESSIONS[tok] = time.time() + SESSION_TTL
+    return tok
+
+
+def drop_session(tok: str):
+    _SESSIONS.pop(tok or "", None)
+
+
+def session_of(headers) -> str:
+    for part in (headers.get("Cookie") or "").split(";"):
+        k, _, v = part.strip().partition("=")
+        if k == COOKIE:
+            return v
+    return ""
+
+
 def check_auth(headers, cfg) -> bool:
-    """True si la peticion trae credenciales validas (o si no hay clave puesta)."""
-    want = os.environ.get("VAREC_UI_PASS") or cfg.get("ui", {}).get("password") or ""
+    """True si la peticion trae sesion valida, o Basic con usuario y clave."""
+    want = ui_pass(cfg)
     if not want:
         return True                       # sin clave configurada = abierto
+    _purge()
+    tok = session_of(headers)
+    if tok and tok in _SESSIONS:
+        return True
+    # Basic se mantiene para scripts y curl
     got = headers.get("Authorization", "")
     if not got.startswith("Basic "):
         return False
@@ -30,8 +89,46 @@ def check_auth(headers, cfg) -> bool:
         user, _, pw = base64.b64decode(got[6:]).decode().partition(":")
     except Exception:
         return False
-    # compare_digest: evita filtrar la clave por el tiempo de comparacion
-    return hmac.compare_digest(pw, want)
+    return check_login(user, pw, cfg)
+
+
+LOGIN_PAGE = """<!doctype html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pasarela Varec</title>
+<style>
+ *{box-sizing:border-box} body{margin:0;min-height:100vh;display:flex;
+  align-items:center;justify-content:center;background:#0f1720;
+  font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#e6edf3}
+ form{background:#161f2b;padding:32px;border-radius:12px;width:min(92vw,340px);
+  border:1px solid #26313f;box-shadow:0 8px 32px #0006}
+ h1{margin:0 0 4px;font-size:19px}
+ p.sub{margin:0 0 22px;color:#8b98a5;font-size:13px}
+ label{display:block;margin:14px 0 5px;font-size:13px;color:#8b98a5}
+ input{width:100%;padding:10px 12px;border-radius:7px;border:1px solid #2b3846;
+  background:#0f1720;color:#e6edf3;font-size:15px}
+ input:focus{outline:none;border-color:#3d8bfd}
+ button{width:100%;margin-top:22px;padding:11px;border:0;border-radius:7px;
+  background:#3d8bfd;color:#fff;font-size:15px;font-weight:600;cursor:pointer}
+ button:hover{background:#2f7ae8}
+ .err{margin-top:16px;padding:9px 12px;border-radius:7px;background:#3b1d22;
+  border:1px solid #6b2a33;color:#ffb4bd;font-size:13px}
+</style></head><body>
+<form method="POST" action="/login">
+  <h1>Pasarela Varec</h1>
+  <p class="sub">Monitoreo de niveles de tanque</p>
+  <label for="u">Usuario</label>
+  <input id="u" name="user" autocomplete="username" autofocus required>
+  <label for="p">Clave</label>
+  <input id="p" name="pass" type="password" autocomplete="current-password" required>
+  <button type="submit">Entrar</button>
+  __ERROR__
+</form></body></html>"""
+
+
+def login_page(error: str = "") -> bytes:
+    msg = ('<div class="err">Usuario o clave incorrectos</div>' if error else '')
+    return LOGIN_PAGE.replace("__ERROR__", msg).encode()
 
 
 # ------------------------------------------------------------------ config
@@ -201,7 +298,7 @@ PAGE = r"""<!doctype html>
 <main>
   <div id="dash">
     <div class="card">
-      <h2>Tanques</h2>
+      <h2>Tanques <a href="/logout" style="float:right;font-size:13px;font-weight:normal;color:#8b98a5">Salir</a></h2>
       <table><thead><tr><th>ID</th><th>Nombre</th><th>MAC</th><th>Valor</th><th>Pulsos</th><th>Errores</th>
         <th>Última conexión</th><th>Estado</th><th></th></tr></thead><tbody id="tb">
         <tr><td colspan="9" class="mut">cargando…</td></tr></tbody></table>
