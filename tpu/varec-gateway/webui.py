@@ -274,14 +274,14 @@ async function tanks(){
            style="width:80px"></td>
       <td>${t.name||''}</td>
       <td class="mut" style="font-family:ui-monospace,monospace;font-size:12px">${t.mac||'—'}</td>
-      <td><b>${(t.value??0).toFixed(2)}</b> <span class="mut">${t.unit||''}</span></td>
+      <td><b>${t.value!=null? t.value.toFixed(2) : '—'}</b> <span class="mut">${t.unit||''}</span></td>
       <td>${t.count??0}</td>
-      <td>${t.errors??0}</td><td>${t.age_s}s</td>
+      <td>${t.errors??0}</td><td>${t.age_s!=null? t.age_s+'s' : '—'}</td>
       <td><span class="dot ${t.online?'up':'down'}"></span>${t.online?'en línea':'sin señal'}</td>
       <td><button class="sid" data-id="${t.tank_id}" style="padding:5px 10px;font-size:13px"
            disabled>Guardar</button></td>
       </tr>`).join('') :
-      '<tr><td colspan="9" class="mut">ningún tanque reportando todavía</td></tr>';
+      '<tr><td colspan="9" class="mut">ningún tanque dado de alta todavía</td></tr>';
     // El boton solo se activa si el valor cambio: evita escrituras accidentales
     // a la EEPROM del sensor.
     document.querySelectorAll('.tid').forEach(x=>x.oninput=()=>{

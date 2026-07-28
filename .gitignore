@@ -30,3 +30,8 @@ tpu/varec-gateway/secrets.env
 !power-switch/prebuilt/
 !power-switch/prebuilt/*.sbin
 !power-switch/prebuilt/*.bin
+
+# Copias de seguridad de parches en caliente
+*.bak-*
+__pycache__/
+*.pyc

@@ -345,8 +345,11 @@ class HttpOut:
                         return
                     self._send(webui.public_config(outer.full_cfg))
                 elif p in ("/api", "/api/tanks"):
-                    self._send({"tanks": list(snap.values()),
-                                "n": len(snap), "ts": int(time.time())})
+                    # Del registro persistente, no solo de lo vivo: un sensor
+                    # caido debe seguir listado (marcado sin senal).
+                    rost = outer.store.roster(snap)
+                    self._send({"tanks": rost, "n": len(rost),
+                                "ts": int(time.time())})
                 elif p.startswith("/api/tank/"):
                     parts = p.split("/")
                     try:

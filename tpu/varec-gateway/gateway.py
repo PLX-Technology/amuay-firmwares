@@ -242,6 +242,47 @@ class Store:
         c.commit()
         c.close()
 
+    def roster(self, live: dict) -> list:
+        """Todos los tanques CONOCIDOS, no solo los que reportan ahora.
+
+        Un sensor que deja de responder es informacion operativa y tiene
+        que seguir en la lista, marcado como caido. Si solo se listara lo
+        vivo, un reinicio de la pasarela borraria de la vista justo los
+        sensores que hay que ir a revisar.
+        """
+        c = self._conn()
+        out, seen = [], set()
+        t_now = now()
+        for tid, name, mac, unit, last_seen in c.execute(
+                "SELECT tank_id,name,mac,unit,last_seen FROM tanks ORDER BY tank_id"):
+            seen.add(tid)
+            if tid in live:
+                out.append(live[tid])
+                continue
+            # No reporta: reconstruir su ultima medida conocida del historico
+            row = c.execute(
+                "SELECT ts,count,value,errors,temp_c,humi_rh FROM samples_raw"
+                " WHERE tank_id=? ORDER BY ts DESC LIMIT 1", (tid,)).fetchone()
+            ts = (row[0] if row else last_seen) or 0
+            out.append({
+                "tank_id": tid, "name": name or f"tank{tid}", "mac": mac,
+                "unit": unit or "mm",
+                "count": row[1] if row else None,
+                "value": row[2] if row else None,
+                "errors": row[3] if row else None,
+                "temp_c": row[4] if row else None,
+                "humi_rh": row[5] if row else None,
+                "ts": ts, "age_s": (t_now - ts) if ts else None,
+                "online": False,
+            })
+        # Vivos que aun no estan en la tabla (alta en curso)
+        for tid, r in live.items():
+            if tid not in seen:
+                out.append(r)
+        c.close()
+        out.sort(key=lambda t: t["tank_id"])
+        return out
+
     def tank_cfg(self) -> dict:
         c = self._conn()
         out = {r[0]: {"name": r[1], "scale": r[2], "offset": r[3], "unit": r[4]}
