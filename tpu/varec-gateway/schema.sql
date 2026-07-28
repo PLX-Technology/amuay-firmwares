@@ -49,6 +49,8 @@ CREATE TABLE IF NOT EXISTS samples_raw (
     edges     INTEGER,
     errors    INTEGER,
     uptime_s  INTEGER,
+    temp_c    REAL,                    -- ambiente en la placa (ADT75), v3
+    humi_rh   REAL,                    -- humedad relativa, v3 (reservado)
     rssi_ok   INTEGER DEFAULT 1,
     PRIMARY KEY (tank_id, ts)
 ) WITHOUT ROWID;
