@@ -202,9 +202,9 @@ PAGE = r"""<!doctype html>
   <div id="dash">
     <div class="card">
       <h2>Tanques</h2>
-      <table><thead><tr><th>ID</th><th>Nombre</th><th>Valor</th><th>Errores</th>
+      <table><thead><tr><th>ID</th><th>Nombre</th><th>Valor</th><th>Pulsos</th><th>Errores</th>
         <th>Últ. dato</th><th>Estado</th><th></th></tr></thead><tbody id="tb">
-        <tr><td colspan="7" class="mut">cargando…</td></tr></tbody></table>
+        <tr><td colspan="8" class="mut">cargando…</td></tr></tbody></table>
       <p class="mut" style="margin:10px 0 0">El <b>tank_id</b> vive en la EEPROM de cada
         sensor y viaja en cada trama: al cambiarlo aquí se escribe <b>en el sensor</b> por
         Modbus, no en la pasarela. Así, si sustituyes una ATT averiada, le pones su id y
@@ -274,12 +274,13 @@ async function tanks(){
            style="width:80px"></td>
       <td>${t.name||''}</td>
       <td><b>${(t.value??0).toFixed(2)}</b> <span class="mut">${t.unit||''}</span></td>
+      <td>${t.count??0}</td>
       <td>${t.errors??0}</td><td>${t.age_s}s</td>
       <td><span class="dot ${t.online?'up':'down'}"></span>${t.online?'en línea':'sin señal'}</td>
       <td><button class="sid" data-id="${t.tank_id}" style="padding:5px 10px;font-size:13px"
            disabled>Guardar</button></td>
       </tr>`).join('') :
-      '<tr><td colspan="7" class="mut">ningún tanque reportando todavía</td></tr>';
+      '<tr><td colspan="8" class="mut">ningún tanque reportando todavía</td></tr>';
     // El boton solo se activa si el valor cambio: evita escrituras accidentales
     // a la EEPROM del sensor.
     document.querySelectorAll('.tid').forEach(x=>x.oninput=()=>{
