@@ -256,8 +256,18 @@ class Store:
         for tid, name, mac, unit, last_seen in c.execute(
                 "SELECT tank_id,name,mac,unit,last_seen FROM tanks ORDER BY tank_id"):
             seen.add(tid)
+            # Periodo OBSERVADO entre las dos ultimas muestras. Es la prueba
+            # de que un cambio de periodo llego de verdad al sensor.
+            # OJO: samples_raw tiene PK (tank_id, ts) con ts en SEGUNDOS, asi
+            # que por debajo de 1 s las tramas se solapan en la misma fila y
+            # esto no puede bajar de 1. Para el rango util (1 s - 1 min) vale.
+            per = c.execute("SELECT ts FROM samples_raw WHERE tank_id=?"
+                            " ORDER BY ts DESC LIMIT 2", (tid,)).fetchall()
+            period = (per[0][0] - per[1][0]) if len(per) == 2 else None
             if tid in live:
-                out.append(live[tid])
+                r = dict(live[tid])
+                r["period_s"] = period
+                out.append(r)
                 continue
             # No reporta: reconstruir su ultima medida conocida del historico
             row = c.execute(
@@ -273,7 +283,7 @@ class Store:
                 "temp_c": row[4] if row else None,
                 "humi_rh": row[5] if row else None,
                 "ts": ts, "age_s": (t_now - ts) if ts else None,
-                "online": False,
+                "period_s": period, "online": False,
             })
         # Vivos que aun no estan en la tabla (alta en curso)
         for tid, r in live.items():

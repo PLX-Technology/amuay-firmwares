@@ -313,9 +313,9 @@ PAGE = r"""<!doctype html>
   <div id="dash">
     <div class="card">
       <h2>Tanques</h2>
-      <table><thead><tr><th>ID</th><th>Nombre</th><th>MAC</th><th>Valor</th><th>Pulsos</th><th>Errores</th>
+      <table><thead><tr><th>ID</th><th>Nombre</th><th>MAC</th><th>Valor</th><th>Pulsos</th><th>Errores</th><th>Envío</th>
         <th>Última conexión</th><th>Estado</th><th></th></tr></thead><tbody id="tb">
-        <tr><td colspan="9" class="mut">cargando…</td></tr></tbody></table>
+        <tr><td colspan="10" class="mut">cargando…</td></tr></tbody></table>
       <p class="mut" style="margin:10px 0 0">El <b>tank_id</b> vive en la EEPROM de cada
         sensor y viaja en cada trama: al cambiarlo aquí se escribe <b>en el sensor</b> por
         Modbus, no en la pasarela. Así, si sustituyes una ATT averiada, le pones su id y
@@ -393,9 +393,38 @@ function hace(s){
   return Math.floor(s/86400)+' d';
 }
 
+// Un Varec mide nivel de liquido: se mueve en minutos, no en
+// milisegundos. Por debajo de 1 s no se gana dato, solo se gasta enlace.
+const PERIODOS = [[1000,"1 s"],[2000,"2 s"],[5000,"5 s"],[10000,"10 s"],
+                  [15000,"15 s"],[30000,"30 s"],[60000,"1 min"]];
+
+function selPeriodo(t){
+  const obs = t.period_s;
+  const sel = PERIODOS.map(([ms,lab])=>
+      `<option value="${ms}" ${obs && Math.abs(ms/1000-obs)<0.6?'selected':''}>${lab}</option>`
+    ).join('');
+  return `<select class="pms" data-id="${t.tank_id}"
+            ${t.online?'':'disabled title="el sensor no responde"'}>
+      <option value="">—</option>${sel}</select>`;
+}
+
+async function setPeriodo(sel){
+  const id = sel.dataset.id, ms = sel.value;
+  if(!ms) return;
+  sel.disabled = true;
+  try{
+    const r = await fetch(`/api/tank/${id}/config`,{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({push_ms:parseInt(ms,10)})});
+    const d = await r.json();
+    if(!r.ok) alert('No se pudo cambiar: '+(d.error||'error'));
+  }catch(e){ alert('No se pudo cambiar: '+e); }
+  sel.disabled = false;
+}
+
 async function tanks(){
   // No repintar mientras se edita: borraria lo que el usuario esta escribiendo.
-  if(document.querySelector('.tid:focus')) return;
+  if(document.querySelector('.tid:focus, .pms:focus')) return;
   try{
     const r=await fetch('/api/tanks'); const d=await r.json();
     $('#hdr').textContent = d.n+' tanque'+(d.n==1?'':'s');
@@ -406,12 +435,14 @@ async function tanks(){
       <td class="mut" style="font-family:ui-monospace,monospace;font-size:12px">${t.mac||'—'}</td>
       <td><b>${t.value!=null? t.value.toFixed(2) : '—'}</b> <span class="mut">${t.unit||''}</span></td>
       <td>${t.count??0}</td>
-      <td>${t.errors??0}</td><td>${fechaHora(t.ts)}<br><span class="mut" style="font-size:11px">${t.age_s!=null? 'hace '+hace(t.age_s) : ''}</span></td>
+      <td>${t.errors??0}</td>
+      <td>${selPeriodo(t)}</td>
+      <td>${fechaHora(t.ts)}<br><span class="mut" style="font-size:11px">${t.age_s!=null? 'hace '+hace(t.age_s) : ''}</span></td>
       <td><span class="dot ${t.online?'up':'down'}"></span>${t.online?'en línea':'sin señal'}</td>
       <td><button class="sid" data-id="${t.tank_id}" style="padding:5px 10px;font-size:13px"
            disabled>Guardar</button></td>
       </tr>`).join('') :
-      '<tr><td colspan="9" class="mut">ningún tanque dado de alta todavía</td></tr>';
+      '<tr><td colspan="10" class="mut">ningún tanque dado de alta todavía</td></tr>';
     // El boton solo se activa si el valor cambio: evita escrituras accidentales
     // a la EEPROM del sensor.
     document.querySelectorAll('.tid').forEach(x=>x.oninput=()=>{
@@ -419,6 +450,7 @@ async function tanks(){
       b.disabled = (x.value==x.dataset.old || !x.value);
     });
     document.querySelectorAll('.sid').forEach(b=>b.onclick=()=>saveId(b));
+    document.querySelectorAll('.pms').forEach(x=>x.onchange=()=>setPeriodo(x));
   }catch(e){ $('#hdr').textContent='sin conexión'; }
 }
 
