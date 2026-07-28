@@ -36,6 +36,8 @@
 #include <zephyr/drivers/eeprom.h>
 #include <zephyr/dfu/mcuboot.h>
 #include <zephyr/drivers/sensor.h>
+#include <zephyr/drivers/hwinfo.h>
+#include <zephyr/net/ethernet_mgmt.h>
 #include <zephyr/sys/crc.h>
 #include <errno.h>
 #include <zephyr/net/phy.h>
@@ -576,6 +578,59 @@ static int16_t att_humi_rh10(void)
 	return ATT_NA;
 }
 
+/* ---------------- MAC unica por placa ---------------- */
+/* El devicetree da la MISMA MAC a todas las ATT. Con varias en la misma
+ * red L2 el switch ve una direccion saltando entre puertos y las sesiones
+ * unicast (DHCP, Modbus TCP, mcumgr) se vuelven poco fiables. Se sustituye
+ * por una derivada del identificador unico del silicio.
+ *
+ * OJO: net_mgmt rechaza el cambio con -EACCES si la interfaz esta arriba,
+ * asi que hay que bajarla antes; el main la levanta despues.
+ */
+static void att_set_unique_mac(void)
+{
+	uint8_t uid[16], mac[6];
+	ssize_t n = hwinfo_get_device_id(uid, sizeof(uid));
+
+	if (n < 8) {
+		LOG_WRN("UID no disponible (%d): conservo la MAC del devicetree",
+			(int)n);
+		return;
+	}
+
+	/* Mezclar, no truncar: los bytes altos del UID son comunes a todo un
+	 * lote de obleas, asi que quedarse con los primeros podria colisionar
+	 * justo entre placas fabricadas juntas -- que es nuestro caso. */
+	mac[0] = 0x02;   /* localmente administrada (bit 1), unicast (bit 0 = 0) */
+	mac[1] = 0x00;
+	for (int i = 0; i < 4; i++) {
+		mac[2 + i] = uid[i] ^ uid[(i + n / 2) % n];
+	}
+
+	for (int i = 1; i <= 2; i++) {
+		struct net_if *f = net_if_get_by_index(i);
+		struct ethernet_req_params p;
+		int r;
+
+		if (f == NULL) {
+			continue;
+		}
+		memset(&p, 0, sizeof(p));
+		memcpy(p.mac_address.addr, mac, sizeof(mac));
+		/* el puerto 2 va uno por encima, como en el devicetree */
+		p.mac_address.addr[5] = (uint8_t)(mac[5] + (i - 1));
+
+		net_if_down(f);   /* obligatorio: si no, -EACCES */
+		r = net_mgmt(NET_REQUEST_ETHERNET_SET_MAC_ADDRESS, f, &p, sizeof(p));
+		if (r < 0) {
+			LOG_WRN("iface %d: no pude fijar la MAC (%d)", i, r);
+		}
+	}
+
+	LOG_INF("MAC derivada del UID: %02x:%02x:%02x:%02x:%02x:%02x (+1 en el puerto 2)",
+		mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+}
+
 /* ---------------- trama SPE con la medida del encoder ---------------- */
 #define ATT_ETHERTYPE 0x88B5      /* IEEE 802 local experimental 1 */
 #define ATT_MAGIC     0x56415245  /* "VARE" */
@@ -755,7 +810,11 @@ int main(void)
 
 
 #ifndef BENCH_NO_SPE
-	/* 3) levantar interfaces */
+	/* 3) levantar interfaces. La MAC se fija ANTES: net_mgmt la rechaza
+	 *    con -EACCES si la interfaz ya esta arriba, y el DHCP tiene que
+	 *    salir con la definitiva o pedira concesion con la vieja. */
+	att_set_unique_mac();
+
 	iface = net_if_get_default();
 	for (int i = 1; i <= 2; i++) {
 		struct net_if *f = net_if_get_by_index(i);
