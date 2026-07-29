@@ -29,6 +29,11 @@ LOG_MODULE_REGISTER(eth_adin6310, CONFIG_LOG_DEFAULT_LEVEL);
 #define ADIN6310_SPI_RD_HEADER	0x80
 
 static struct k_sem semaphores[50];
+
+/* Lecturas fallidas acumuladas del enlace con el ADIN6310. Visible por SWD:
+ * si crece, hay un problema en el enlace SPI que antes quedaba oculto
+ * porque el hilo lector moria en silencio al primero. */
+volatile unsigned g_rd_err_n;
 K_THREAD_STACK_DEFINE(stack_area, 2000);
 K_SEM_DEFINE(reader_thread_sem, 0, 1);
 K_MUTEX_DEFINE(spi_mutex);
@@ -274,8 +279,12 @@ void adin6310_msg_recv(void *p1, void *p2, void *p3)
 	while (1) {
 		k_sem_take(&reader_thread_sem, K_FOREVER);
 		ret = adin6310_read_message(0);
+		/* El hilo NO se suicida: antes un `return` aqui mataba la
+		 * comunicacion con el switch para siempre ante un unico error
+		 * de lectura. El semaforo bloquea, asi que no hay bucle
+		 * caliente; se cuenta el fallo y se sigue. */
 		if (ret)
-			return;
+			g_rd_err_n++;
 	};
 }
 
@@ -590,19 +599,9 @@ int main(void)
         k_busy_wait(1000);
         k_busy_wait(1000);
 
-	k_tid_t spi_read_tid = k_thread_create(&thread_data, stack_area,
-					       K_THREAD_STACK_SIZEOF(stack_area),
-					       adin6310_msg_recv, NULL, NULL, NULL,
-					       K_PRIO_PREEMPT(0), 0, K_FOREVER);
-
-	k_thread_name_set(spi_read_tid, "ADIN6310 SPI reader");
-	/* The SPI is not initialized, so we may start the thread. */
-	k_thread_start(spi_read_tid);
-	gpio_init_callback(&cb_data, adin6310_int_rdy, BIT(irq_gpio.pin));
-	gpio_add_callback(irq_gpio.port, &cb_data);
-	ret = gpio_pin_interrupt_configure_dt(&irq_gpio, GPIO_INT_EDGE_TO_ACTIVE);
-	if (ret)
-		return ret;
+	/* El arranque del lector se ha movido tras SES_AddHwInterface: aqui
+	 * llegaba cientos de ms antes de SES_Init y los mensajes de esa ventana
+	 * se perdian (SES_ReceiveMessage los rechaza sin libreria inicializada). */
 
 	k_sleep(K_MSEC(1));
 	srand(k_cycle_get_32());
@@ -626,6 +625,27 @@ int main(void)
 		printf("SES_AddHwInterface() error\n");
 		return ret;
 	}
+
+	/* Ahora si: SES esta inicializado y puede aceptar mensajes. */
+	k_tid_t spi_read_tid = k_thread_create(&thread_data, stack_area,
+					       K_THREAD_STACK_SIZEOF(stack_area),
+					       adin6310_msg_recv, NULL, NULL, NULL,
+					       K_PRIO_PREEMPT(0), 0, K_FOREVER);
+
+	k_thread_name_set(spi_read_tid, "ADIN6310 SPI reader");
+	/* The SPI is not initialized, so we may start the thread. */
+	k_thread_start(spi_read_tid);
+	gpio_init_callback(&cb_data, adin6310_int_rdy, BIT(irq_gpio.pin));
+	gpio_add_callback(irq_gpio.port, &cb_data);
+	ret = gpio_pin_interrupt_configure_dt(&irq_gpio, GPIO_INT_EDGE_TO_ACTIVE);
+	if (ret)
+		return ret;
+
+	/* La interrupcion es POR FLANCO: si el switch ya la tenia activa antes de
+	 * armarla, ese flanco no existe y el mensaje pendiente no se leeria nunca.
+	 * Se fuerza una lectura para drenarlo. */
+	k_sem_give(&reader_thread_sem);
+	k_sleep(K_MSEC(10));
 
 	ret = SES_AddDevice(iface, mac_addr, &dev_id);
 	if (ret) {
