@@ -201,7 +201,7 @@ recompila):
 ```bash
 cd ~/zephyr && source .venv/bin/activate
 export ZEPHYR_TOOLCHAIN_VARIANT=gnuarmemb GNUARMEMB_TOOLCHAIN_PATH=/usr
-west build -p always -b adin6310t1l/max32690/m4 \
+west build -p always -b mps04p/max32690/m4 \
   samples/application_development/adin6310 -d build_final -- \
   -DLIB_ADIN6310_PATH=/home/tpu01/ADIN6310SWDR-Rel5.1.0
 ```

@@ -36,7 +36,7 @@ cp tools/provision.env.example tools/provision.env
 ### Compilar y flashear
 
 ```bash
-west build -b adin6310t1l/max32690/m4 power-switch
+west build -b mps04p/max32690/m4 power-switch
 ```
 
 El MAX32690 usa **secure boot**: hay que **firmar** el binario y flashear el `.sbin`.

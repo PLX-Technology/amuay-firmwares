@@ -115,7 +115,7 @@ Build the sample application like this:
 
 .. code-block:: console
 
-   west build -b adin6310t1l/max32690/m4 samples/application_development/adin6310 -DLIB_ADIN6310_PATH=... -p auto
+   west build -b mps04p/max32690/m4 samples/application_development/adin6310 -DLIB_ADIN6310_PATH=... -p auto
 
 Programming
 ***********

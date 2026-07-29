@@ -4,6 +4,25 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+/*
+ * MPS-04P — power switch. MAX32690 + ADIN6310.
+ *
+ * NO es la misma placa que el field switch (MFS), aunque el hardware se
+ * parezca y ambas lleven MAX32690 + ADIN6310. Diferencias que importan aqui:
+ *
+ *   |                | MPS-04P (esta)        | MFS                    |
+ *   |----------------|-----------------------|------------------------|
+ *   | Slots SPE      | 4  (J3-J6 = Port 1-4) | 6                      |
+ *   | RJ45           | si (Port 5, ADIN1300) | no                     |
+ *   | Uplink a la TPU| LAN7431 -> PCIe       | PDM en el slot Port 1  |
+ *   | Puertos PSE    | 4  (LTC port0-3)      | 5 (slots Port 2-6)     |
+ *
+ * Las dos compartian esta definicion de placa bajo el nombre `adin6310t1l`,
+ * con un solo directorio en el arbol de Zephyr: quien lo editaba ultimo
+ * mandaba para ambas compilaciones. Asi acabo el `port4` del MFS metido en
+ * el arbol desde el que se compila el MPS. Separadas el 2026-07-29.
+ */
+
 /dts-v1/;
 
 #include <adi/max32/max32690.dtsi>
@@ -174,6 +193,11 @@
 			&spi0b_mosi_p2_28 &spi0b_sck_p2_29>;
 	pinctrl-names = "default";
 	status = "okay";
+	/*
+	 * PSE: 4 puertos, uno por slot SPE (J3-J6). Esta placa NO tiene un
+	 * quinto: el `port4` que aparece en el arbol del MFS es para su slot
+	 * Port 6 y aqui no corresponde a nada.
+	 */
 	ltc4296: ltc4296@1 {
 		compatible = "adi,ltc4296";
 		zephyr,deferred-init;

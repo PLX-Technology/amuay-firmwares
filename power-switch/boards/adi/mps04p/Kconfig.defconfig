@@ -1,12 +1,12 @@
-# EVAL_ADIN6310T1L_EBZ board configuration
+# MPS-04P (power switch) board configuration
 
 # Copyright (c) 2024 Analog Devices, Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-if BOARD_ADIN6310T1L
+if BOARD_MPS04P
 
 config BOARD
-	default "ADIN6310T1L"
+	default "MPS04P"
 
 if NETWORKING
 
@@ -15,4 +15,4 @@ config NET_L2_ETHERNET
 
 endif # NETWORKING
 
-endif # BOARD_ADIN6310T1L
+endif # BOARD_MPS04P
