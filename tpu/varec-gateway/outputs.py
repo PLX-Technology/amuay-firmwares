@@ -333,6 +333,20 @@ class HttpOut:
                 except Exception as e:
                     return self._send({"error": f"json invalido: {e}"}, 400)
 
+                # Calibracion: vive en la TPU, NO hace falta hablar con el
+                # sensor. Se resuelve antes de exigir su IP, para poder
+                # calibrar un tanque que ahora mismo esta sin senal.
+                if "scale" in body or "offset" in body:
+                    try:
+                        sc = float(body.get("scale", 1.0))
+                        of = float(body.get("offset", 0.0))
+                    except (TypeError, ValueError):
+                        return self._send({"error": "scale/offset no numericos"}, 400)
+                    if sc == 0:
+                        return self._send({"error": "scale no puede ser 0"}, 400)
+                    outer.store.set_cal(tid, sc, of, body.get("unit"))
+                    return self._send({"ok": True, "scale": sc, "offset": of})
+
                 snap = outer.live.snapshot()
                 rec = snap.get(tid)
                 if not rec:

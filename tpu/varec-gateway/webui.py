@@ -316,6 +316,33 @@ PAGE = r"""<!doctype html>
       <table><thead><tr><th>ID</th><th>Nombre</th><th>MAC</th><th>Valor</th><th>Pulsos</th><th>Temp.</th><th>Errores</th><th>Envío</th>
         <th>Última conexión</th><th>Estado</th><th></th></tr></thead><tbody id="tb">
         <tr><td colspan="11" class="mut">cargando…</td></tr></tbody></table>
+    </div>
+
+    <div class="card" id="cal">
+      <h2>Calibración</h2>
+      <p class="mut" style="margin:0 0 12px">Dos puntos bastan: la cinta perforada
+        avanza sobre un piñón, así que los milímetros por pulso son constantes y la
+        relación es una recta. <b>Tómalos lo más separados que puedas</b> — dos puntos
+        próximos disparan el error de la pendiente. Un tercer punto sirve para
+        <i>comprobar</i>, no para afinar: si se desvía, revisa la mecánica.</p>
+      <div class="row"><label>Tanque</label><select id="calt"></select></div>
+      <div class="row"><label>Punto A — pulsos</label>
+        <input type="number" id="ca_c"><button id="ca_now"
+          style="margin-left:8px;padding:6px 10px;font-size:13px">Leer ahora</button></div>
+      <div class="row"><label>Punto A — nivel real</label>
+        <input type="number" id="ca_l" placeholder="mm"></div>
+      <div class="row"><label>Punto B — pulsos</label>
+        <input type="number" id="cb_c"><button id="cb_now"
+          style="margin-left:8px;padding:6px 10px;font-size:13px">Leer ahora</button></div>
+      <div class="row"><label>Punto B — nivel real</label>
+        <input type="number" id="cb_l" placeholder="mm"></div>
+      <div class="row"><label>Unidad</label><input type="text" id="c_u" value="mm"></div>
+      <p id="calc" class="mut" style="margin:8px 0"></p>
+      <button id="calsave">Guardar calibración</button>
+      <p id="calm" class="mut" style="margin:8px 0 0"></p>
+    </div>
+
+    <div class="card">
       <p class="mut" style="margin:10px 0 0">El <b>tank_id</b> vive en la EEPROM de cada
         sensor y viaja en cada trama: al cambiarlo aquí se escribe <b>en el sensor</b> por
         Modbus, no en la pasarela. Así, si sustituyes una ATT averiada, le pones su id y
@@ -460,9 +487,53 @@ async function tanks(){
       b.disabled = (x.value==x.dataset.old || !x.value);
     });
     document.querySelectorAll('.sid').forEach(b=>b.onclick=()=>saveId(b));
+    calRefresh(d.tanks);
     document.querySelectorAll('.pms').forEach(x=>x.onchange=()=>setPeriodo(x));
   }catch(e){ $('#hdr').textContent='sin conexión'; }
 }
+
+let CALT = [];
+function calRefresh(t){
+  CALT = t;
+  const sel = $('#calt'), prev = sel.value;
+  sel.innerHTML = t.map(x=>`<option value="${x.tank_id}">${x.tank_id} — ${x.name||''}</option>`).join('');
+  if(prev) sel.value = prev;
+  calCalc();
+}
+function calCalc(){
+  const ac=+$('#ca_c').value, al=+$('#ca_l').value;
+  const bc=+$('#cb_c').value, bl=+$('#cb_l').value;
+  const el=$('#calc');
+  if($('#ca_c').value===''||$('#cb_c').value===''||$('#ca_l').value===''||$('#cb_l').value===''){
+    el.textContent='Introduce los dos puntos.'; return null; }
+  if(ac===bc){ el.textContent='⚠ Los dos puntos tienen los mismos pulsos: no definen una recta.'; return null; }
+  const scale=(bl-al)/(bc-ac), offset=al-scale*ac;
+  const sep=Math.abs(bc-ac);
+  el.innerHTML = `escala = <b>${scale.toFixed(6)}</b> ${$('#c_u').value}/pulso &nbsp;·&nbsp; `
+    + `offset = <b>${offset.toFixed(2)}</b>`
+    + (sep<50 ? ' &nbsp;<span style="color:#ffb4bd">⚠ puntos muy próximos: la pendiente será imprecisa</span>' : '');
+  return {scale, offset};
+}
+['ca_c','ca_l','cb_c','cb_l','c_u'].forEach(id=>{
+  const e=$('#'+id); if(e) e.oninput=calCalc;
+});
+function calNow(campo){
+  const id=+$('#calt').value, t=CALT.find(x=>x.tank_id===id);
+  if(!t || t.count==null){ $('#calm').textContent='Ese tanque no está reportando pulsos ahora.'; return; }
+  $('#'+campo).value = t.count; calCalc();
+}
+if($('#ca_now')) $('#ca_now').onclick=()=>calNow('ca_c');
+if($('#cb_now')) $('#cb_now').onclick=()=>calNow('cb_c');
+if($('#calsave')) $('#calsave').onclick=async()=>{
+  const r=calCalc(); if(!r) return;
+  const id=$('#calt').value;
+  const res=await fetch(`/api/tank/${id}/config`,{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({scale:r.scale, offset:r.offset, unit:$('#c_u').value})});
+  const d=await res.json();
+  $('#calm').textContent = res.ok ? 'Guardada. Se aplica a las medidas siguientes.'
+                                  : ('No se guardó: '+(d.error||'error'));
+};
 
 function render(){
   $('#secs').innerHTML = Object.entries(SECS).map(([k,s])=>{

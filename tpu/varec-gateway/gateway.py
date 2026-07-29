@@ -242,6 +242,26 @@ class Store:
         c.commit()
         c.close()
 
+    def set_cal(self, tank_id: int, scale: float, offset: float,
+                unit: str = None):
+        """Guarda la recta de calibracion de un tanque.
+
+        Vive en la TPU, no en el sensor: la ATT manda la cuenta cruda y el
+        escalado se aplica aqui. Asi, sustituir una placa averiada no
+        obliga a recalibrar -- basta con ponerle su tank_id.
+        """
+        c = self._conn()
+        c.execute("INSERT OR IGNORE INTO tanks(tank_id,first_seen,last_seen)"
+                  " VALUES(?,?,?)", (tank_id, now(), now()))
+        if unit:
+            c.execute("UPDATE tanks SET scale=?,offset=?,unit=? WHERE tank_id=?",
+                      (scale, offset, unit, tank_id))
+        else:
+            c.execute("UPDATE tanks SET scale=?,offset=? WHERE tank_id=?",
+                      (scale, offset, tank_id))
+        c.commit()
+        c.close()
+
     def roster(self, live: dict) -> list:
         """Todos los tanques CONOCIDOS, no solo los que reportan ahora.
 
