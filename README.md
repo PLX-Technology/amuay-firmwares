@@ -1,4 +1,10 @@
-# pacific-firmware
+# pacific-firmware — rama `mps`
+
+> Rama curada del **power switch (MPS-04P)**: el firmware que se está usando, el
+> código exacto con el que se compiló, y el procedimiento completo de grabado y
+> de aprovisionamiento de CRK en
+> **[`power-switch/FLASHEO.md`](power-switch/FLASHEO.md)**.
+> El firmware del field switch vive en la rama `mfs`.
 
 Firmware de los dos equipos del sistema de monitoreo de tanques:
 

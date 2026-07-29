@@ -34,6 +34,102 @@ K_SEM_DEFINE(reader_thread_sem, 0, 1);
 K_MUTEX_DEFINE(spi_mutex);
 /* Estado de enlace por puerto, para inspeccion por SWD (no hay consola). */
 volatile int g_link[6];
+/* Diagnostico PSE (temporal, no commitear). */
+volatile unsigned int g_pse_initret;
+volatile unsigned short g_pse_gcmd, g_pse_gflt;
+volatile unsigned short g_pse_stat[4], g_pse_evt[4];
+volatile int g_pse_iout[4];
+volatile unsigned short g_pse2_gflt;
+volatile unsigned short g_pse2_stat[4], g_pse2_evt[4];
+volatile int g_pse2_iout[4];
+volatile int g_pse2_try[4];
+volatile int g_vin_pre;      /* VIN antes de energizar, mV */
+volatile int g_vin_post;     /* VIN despues, mV */
+volatile int g_vout_mv[4];   /* VOUT por puerto, mV */
+volatile int g_vrc[4];
+volatile unsigned short g_cfg0[4], g_cfg1[4];
+volatile int g_sccp_rc[4];    /* retorno de do_spoe_sccp por puerto */
+volatile int g_pd_present[4]; /* pd_present del pulso SCCP */
+volatile int g_rst_rc[4];     /* retorno de sccp_reset_pulse */
+volatile int g_vi_vin[4], g_vi_vout[4];
+volatile unsigned short g_gcap, g_gcfg, g_giost;
+volatile unsigned short g_gflt_pre, g_gflt_post;
+volatile unsigned short g_cfgA[4];              /* CFG0 tras prebias */
+volatile unsigned short g_cfgB[4], g_stB[4];    /* inmediato tras enable */
+volatile unsigned short g_cfgC[4], g_stC[4];    /* +4 ms  */
+volatile unsigned short g_cfgD[4], g_stD[4];    /* +100 ms */
+/* medida de la linea SCCP del puerto 3 (el cableado al field switch) */
+volatile int g_gpio_ok;
+volatile int g_raw_drive_hi;   /* sccpi leido con sccpo fisicamente ALTO */
+volatile int g_raw_drive_lo;   /* sccpi leido con sccpo fisicamente BAJO */
+volatile int g_log_release;    /* sccpi tras RELEASE_LINE (logico 1) */
+volatile int g_log_pulldown;   /* sccpi tras PULL_DOWN_LINE (logico 0) */
+volatile int g_idle_hiz;       /* sccpi con sccpo en alta impedancia */
+/* linea SCCP medida con el puerto en SEARCHING */
+volatile unsigned short g_srch_st;
+volatile int g_srch_hiz, g_srch_hi, g_srch_lo;
+/* entrega forzada */
+volatile unsigned short g_f_st[4], g_f_ev[4];
+volatile int g_f_vout[4], g_f_iout[4];
+volatile unsigned short g_f_gflt;
+volatile unsigned short g_gcap2;
+volatile unsigned short g_s1[4], g_s2[4], g_s3[4], g_s4[4];  /* STAT por paso */
+volatile unsigned short g_e4[4];                              /* EVT final */
+volatile int g_v4[4], g_i4[4];                                /* VOUT/IOUT final */
+/* entrega sostenida, sin port_pwr_available */
+volatile unsigned short g_h_st[4][3];   /* STAT a 100ms / 1s / 3s */
+volatile int g_h_vout[4][3];            /* VOUT en los mismos instantes */
+volatile int g_h_iout[4][3];
+volatile unsigned short g_h_cfg0[4], g_h_ev[4];
+/* A = sin clasificacion; B = ademas con SW_INRUSH */
+volatile unsigned short g_A_st[4][2], g_B_st[4][2];
+volatile int g_A_vout[4][2], g_B_vout[4][2];
+volatile unsigned short g_A_cfg[4], g_B_cfg[4], g_A_ev[4], g_B_ev[4];
+/* pasadas: 0 = GCFG tal cual, 1 = +MASK_LOWFAULT, 2 = +MASK_LOWFAULT|TLIM_DISABLE */
+volatile unsigned short g_m_gcfg[3];      /* GCFG leido de vuelta */
+volatile unsigned short g_m_st[3][4];     /* PXST por pasada y puerto */
+volatile unsigned short g_m_ev[3][4];
+volatile int g_m_vout[3][4];
+volatile unsigned short g_m_gflt[3];
+/* combinacion: mascara + secuencia que alcanzo DELIVERING */
+volatile unsigned short g_c_gcfg;
+volatile unsigned short g_c_st[4][4];   /* PXST a 50ms/300ms/1s/3s */
+volatile int g_c_vout[4][4];
+volatile unsigned short g_c_ev[4], g_c_cfg0[4];
+volatile int g_c_iout[4];
+/* A = solo el puerto 3 encendido; B = los 4 a la vez (control) */
+volatile unsigned short g_solo_st[8], g_todos_st[8];   /* PXST en 8 instantes */
+volatile int g_solo_vout[8], g_todos_vout[8];
+volatile unsigned short g_solo_ev, g_todos_ev;
+/* configuracion segun datasheet */
+volatile unsigned short g_ds_cfg0[4], g_ds_cfg1[4], g_ds_adccfg[4], g_ds_gcfg;
+volatile unsigned short g_ds_st[4][6];   /* PXST a 5/20/100/500/1500/3000 ms */
+volatile int g_ds_vout[4][6];
+volatile unsigned short g_ds_ev[4];
+volatile int g_ds_iout[4];
+/* confirmacion: 4 puertos a la vez, ADC con asentamiento correcto */
+volatile unsigned short g_ok_st[4][3];
+volatile int g_ok_vout[4][3], g_ok_iout[4][3];
+volatile unsigned short g_ok_ev[4];
+/* diagnostico linea de baja, SIN MASK_LOWFAULT */
+volatile unsigned short g_ls_gfltev_pre, g_ls_gfltev_post, g_ls_gcfg;
+volatile unsigned short g_ls_st[4], g_ls_ev[4];   /* PxEV bit0=LSNS_REV bit1=LSNS_FWD */
+volatile int g_ls_vout[4], g_ls_iout[4];
+/* SOLUCION: soft-start y foldback activos, sin mask de baja */
+volatile unsigned short g_fx_gcfg, g_fx_gfltev;
+volatile unsigned short g_fx_st[4][3], g_fx_ev[4];
+volatile int g_fx_vout[4][3], g_fx_iout[4][3];
+volatile int g_rc2[4];                          /* rc de do_spoe_sccp ya con faults limpios */
+volatile unsigned short g_fcfg0[4], g_fst[4], g_fev[4];
+volatile int g_fvout[4], g_fiout[4];
+/* Paso lado bajo (Mayker): re-arme/verificacion del LGATE tras negociar */
+volatile int g_lg_deliver[4];         /* 1 = puerto entregando (negocio OK) */
+volatile int g_lg_any;                /* 1 = al menos un puerto negocio */
+volatile int g_lg_rearm_rc;           /* retorno de clear_ckt_breaker (-1 = no negocio) */
+volatile unsigned short g_lg_gfltev;  /* GFLTEV tras re-arme (bit0 = LOW_CKT_BRK_FAULT) */
+volatile unsigned short g_lg_pxev[4]; /* PxEV por puerto (bit0 LSNS_REV, bit1 LSNS_FWD) */
+volatile unsigned short g_lg_st[4];   /* PxST por puerto */
+volatile int g_retry_rc[4];           /* rc de retry_spoe_sccp en el bucle (hot-plug) */       /* codigos de retorno de la medida */
 
 void* SES_PORT_CreateSemaphore(int initCount, int maxCount)
 {
@@ -477,8 +573,168 @@ int main(void)
 	mac_addr[5] = rand();
 
 	ret = adin6310_enable_pse(ltc4296_dev, switch_op);
+	g_pse_initret = (unsigned int)ret;
+	{
+		/* GCMD = 0x08, UNLOCK_KEY = 0x05. Si el SPI habla, la relectura
+		 * de GCMD devuelve 0x05. Si devuelve 0xffff, el chip sigue mudo. */
+		uint16_t v = 0;
+		int io = 0;
+
+		ltc4296_unlock(ltc4296_dev);
+		ltc4296_reg_read(ltc4296_dev, 0x08, &v);
+		g_pse_gcmd = v;
+
+		v = 0;
+		ltc4296_read_global_faults(ltc4296_dev, &v);
+		g_pse_gflt = v;
+
+		for (int p = 0; p < 4; p++) {
+			uint16_t st = 0, ev = 0;
+
+			io = 0;
+			ltc4296_read_port_status(ltc4296_dev, (enum ltc4296_port)p, &st);
+			ltc4296_read_port_events(ltc4296_dev, (enum ltc4296_port)p, &ev);
+			ltc4296_read_port_adc(ltc4296_dev, (enum ltc4296_port)p, &io);
+			g_pse_stat[p] = st;
+			g_pse_evt[p] = ev;
+			g_pse_iout[p] = io;
+		}
+	}
 	if (ret){
 		printf("Could not initialize %s\n", ltc4296_dev->name);
+	}
+
+	/* Registros globales, nunca mirados hasta ahora, y estado del UVLO. */
+	{
+		uint16_t v = 0;
+
+		ltc4296_reg_read(ltc4296_dev, 0x06, &v); g_gcap = v;
+		ltc4296_reg_read(ltc4296_dev, 0x09, &v); g_gcfg = v;
+		ltc4296_reg_read(ltc4296_dev, 0x07, &v); g_giost = v;
+		ltc4296_read_global_faults(ltc4296_dev, &v); g_gflt_pre = v;
+
+		/* GFLT bit4 = UVLO_DIGITAL. Si esta latcheado del arranque se
+		 * limpia; si vuelve a aparecer es que esta activo de verdad. */
+		ltc4296_clear_global_faults(ltc4296_dev);
+		ltc4296_clear_ckt_breaker(ltc4296_dev);
+		k_msleep(50);
+		ltc4296_read_global_faults(ltc4296_dev, &v); g_gflt_post = v;
+	}
+
+	/* ASERCION DE PROTECCIONES (auditoria 2026-07-23): garantizar TLIM
+	 * (limite termico) ACTIVO y linea de baja NO enmascarada, sea cual sea el
+	 * estado previo del chip. Guard: solo RMW si la lectura es valida (nunca
+	 * escribir a partir de 0xffff con SPI degradado). */
+	{
+		uint16_t v = 0;
+
+		ltc4296_reg_read(ltc4296_dev, 0x09, &v);
+		if (v != 0xffff && (v & 0x0030) != 0) {
+			/* limpiar TLIM_DISABLE (bit4) y MASK_LOWFAULT (bit5) */
+			ltc4296_reg_write(ltc4296_dev, 0x09, (uint16_t)(v & ~0x0030));
+		}
+		ltc4296_reg_read(ltc4296_dev, 0x09, &g_gcfg); /* estado final, visible por SWD */
+	}
+
+	/* BLOQUE (2) FORZADO ELIMINADO (config segura Clase 13). El encendido
+	 * lo hace ltc4296_probe() por do_spoe_sccp(): deteccion+clasificacion
+	 * SCCP y potencia SOLO si negocia un PD valido, con TODAS las
+	 * protecciones por defecto (TLIM activo, foldback, soft-start,
+	 * TINRUSH=56.2ms). NO se fuerza salida ni se desactiva TLIM. */
+
+	/* Sin intervencion manual: con la clase SPoE correcta, ltc4296_probe()
+	 * ya ejecuta do_spoe_sccp() (deteccion + clasificacion + encendido).
+	 * Aqui solo se observa el resultado. */
+	{
+		static const enum ltc4296_port pp[4] = {
+			LTC_PORT0, LTC_PORT1, LTC_PORT2, LTC_PORT3 };
+		uint16_t v = 0;
+
+		k_msleep(2000);   /* dar tiempo a que SCCP termine */
+
+		for (int q = 0; q < 4; q++) {
+			uint16_t st = 0, ev = 0, c0 = 0, c1 = 0;
+			int io = 0;
+
+			ltc4296_read_port_status(ltc4296_dev, pp[q], &st);
+			ltc4296_read_port_events(ltc4296_dev, pp[q], &ev);
+			ltc4296_read_port_adc(ltc4296_dev, pp[q], &io);
+			/* leer de vuelta la config REAL del puerto, sin suponerla */
+			ltc4296_reg_read(ltc4296_dev, (uint8_t)(0x13 + q * 0x10), &c0);
+			ltc4296_reg_read(ltc4296_dev, (uint8_t)(0x14 + q * 0x10), &c1);
+			g_pse2_stat[q] = st;
+			g_pse2_evt[q] = ev;
+			g_pse2_iout[q] = io;
+			g_cfg0[q] = c0;
+			g_cfg1[q] = c1;
+			g_pse2_try[q] = 0;
+		}
+		ltc4296_read_global_faults(ltc4296_dev, &v);
+		g_pse2_gflt = v;
+	}
+
+	/* PASO LADO BAJO (peticion Mayker): tras una negociacion exitosa, activar el
+	 * retorno (LGATE/Q18). En el LTC4296-1 el LGATE es COMPARTIDO (un unico FET de
+	 * retorno) y engancha al entrar en power-up; no hay bit de firmware para
+	 * "encender LGATE". Aqui: si algun puerto ya NEGOCIO y entrega (PxST bits 2:0
+	 * = 2 = DELIVERING), se RE-ARMA el disyuntor de baja (sin enmascararlo) para
+	 * que Q18 enganche, y se VERIFICA que la baja no dispara. NO fuerza potencia. */
+	{
+		static const enum ltc4296_port pp[4] = {
+			LTC_PORT0, LTC_PORT1, LTC_PORT2, LTC_PORT3 };
+		uint16_t st = 0, ev = 0, v = 0;
+		int any = 0;
+
+		/* 1) que puertos negociaron: PxST field (bits 2:0) == 2 (DELIVERING) */
+		for (int q = 0; q < 4; q++) {
+			ltc4296_read_port_status(ltc4296_dev, pp[q], &st);
+			g_lg_st[q] = st;
+			g_lg_deliver[q] = ((st & 0x0007) == 0x0002) ? 1 : 0;
+			if (g_lg_deliver[q])
+				any = 1;
+		}
+		g_lg_any = any;
+
+		/* 2) si hubo negociacion, RE-ARMAR el disyuntor de baja (LGATE/Q18).
+		 * NO se toca MASK_LOWFAULT: la baja queda visible y protegiendo. */
+		if (any) {
+			g_lg_rearm_rc = ltc4296_clear_ckt_breaker(ltc4296_dev);
+			k_msleep(50);
+		} else {
+			g_lg_rearm_rc = -1;   /* nadie nego -> no se re-arma (correcto) */
+		}
+
+		/* 3) VERIFICAR: LOW_CKT_BRK_FAULT (GFLTEV=0x02, bit0) y PxEV por puerto
+		 * (bit0 LSNS_REVERSE, bit1 LSNS_FORWARD). Baja sin disparar = LGATE ok. */
+		ltc4296_reg_read(ltc4296_dev, 0x02, &v);
+		g_lg_gfltev = v;
+		for (int q = 0; q < 4; q++) {
+			ltc4296_read_port_events(ltc4296_dev, pp[q], &ev);
+			g_lg_pxev[q] = ev;
+		}
+	}
+
+	/* VIN y VOUT DESPUES. VOUT ~0 en todos = no sale tension del PSE;
+	 * VOUT alto solo en el puerto con carga = el problema es la carga. */
+	{
+		static const enum ltc4296_port qq[4] = {
+			LTC_PORT0, LTC_PORT1, LTC_PORT2, LTC_PORT3 };
+		int mv = 0;
+
+		g_vrc[2] = ltc4296_set_gadc_vin(ltc4296_dev);
+		k_msleep(50);
+		g_vrc[3] = ltc4296_read_gadc(ltc4296_dev, &mv);
+		g_vin_post = mv;
+		ltc4296_disable_gadc(ltc4296_dev);
+
+		for (int q = 0; q < 4; q++) {
+			mv = 0;
+			ltc4296_set_gadc_vout(ltc4296_dev, qq[q]);
+			k_msleep(50);
+			ltc4296_read_gadc(ltc4296_dev, &mv);
+			g_vout_mv[q] = mv;
+			ltc4296_disable_gadc(ltc4296_dev);
+		}
 	}
 
 	ltc4296_config = ltc4296_dev->config;
@@ -583,6 +839,8 @@ int main(void)
 		SES_WritePhyReg(SES_macPort5, 0x0000, v | 0x1200);
 		k_msleep(2000);
 	}
+	unsigned int lg_tick = 0;
+
 	while (1) {
 		k_sleep(K_MSEC(1000));
 		g_link[0] = SES_GetLinkState(SES_macPort0);
@@ -591,6 +849,48 @@ int main(void)
 		g_link[3] = SES_GetLinkState(SES_macPort3);
 		g_link[4] = SES_GetLinkState(SES_macPort4);
 		g_link[5] = SES_GetLinkState(SES_macPort5);
+
+		/* Reintento SPoE (hot-plug): si un puerto PSE aun NO entrega (p.ej. los
+		 * 50V/PD se conectaron despues del arranque), re-negociar por SCCP y,
+		 * tras negociar, re-armar/verificar el lado bajo (LGATE). Cada ~5 s.
+		 * Los puertos que YA entregan se saltan (no se les molesta). */
+		if (++lg_tick >= 5) {
+			static const enum ltc4296_port pp[4] = {
+				LTC_PORT0, LTC_PORT1, LTC_PORT2, LTC_PORT3 };
+			struct ltc4296_vi vi;
+			uint16_t st = 0, ev = 0, v = 0;
+			int any = 0;
+
+			lg_tick = 0;
+
+			/* re-negociar SOLO los puertos que aun no entregan (DELIVERING=2) */
+			for (int q = 0; q < 4; q++) {
+				ltc4296_read_port_status(ltc4296_dev, pp[q], &st);
+				if ((st & 0x0007) != 0x0002)
+					g_retry_rc[q] =
+						ltc4296_retry_spoe_sccp(ltc4296_dev, pp[q], &vi);
+			}
+
+			/* deteccion de entrega + re-arme/verificacion del lado bajo */
+			for (int q = 0; q < 4; q++) {
+				ltc4296_read_port_status(ltc4296_dev, pp[q], &st);
+				g_lg_st[q] = st;
+				g_lg_deliver[q] = ((st & 0x0007) == 0x0002) ? 1 : 0;
+				if (g_lg_deliver[q])
+					any = 1;
+			}
+			g_lg_any = any;
+			if (any) {
+				g_lg_rearm_rc = ltc4296_clear_ckt_breaker(ltc4296_dev);
+				k_msleep(50);
+			}
+			ltc4296_reg_read(ltc4296_dev, 0x02, &v);
+			g_lg_gfltev = v;
+			for (int q = 0; q < 4; q++) {
+				ltc4296_read_port_events(ltc4296_dev, pp[q], &ev);
+				g_lg_pxev[q] = ev;
+			}
+		}
 	}
 
 	return 0;
