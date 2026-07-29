@@ -200,6 +200,20 @@
 			&spi0b_mosi_p2_28 &spi0b_sck_p2_29>;
 	pinctrl-names = "default";
 	status = "okay";
+	/*
+	 * ⚠️ TODOS los puertos van con `adi,power-class = <LTC4296_PSE_DISABLED>`
+	 * A PROPOSITO. El probe() del driver bifurca segun la clase:
+	 *
+	 *   LTC4296_PSE                 -> prebias APL + port_en = ENERGIZA
+	 *                                  SIN NEGOCIAR
+	 *   LTC4296_PSE_SCCP_CLASS_1x   -> do_spoe_sccp = NEGOCIA
+	 *
+	 * Antes el dts ponia `LTC4296_PSE` y era el `app.overlay` quien los
+	 * subia a clase 13. Funcionaba, pero un build sin ese overlay habria
+	 * energizado los cuatro slots directamente. Con DISABLED por defecto,
+	 * quien decide entregar es siempre la aplicacion. El overlay sigue
+	 * poniendo la clase 13: el devicetree resuelto no cambia.
+	 */
 	ltc4296: ltc4296@1 {
 		compatible = "adi,ltc4296";
 		zephyr,deferred-init;
@@ -209,28 +223,28 @@
 		port0 {
 			sccpi-gpios = <&gpio2 14 (GPIO_ACTIVE_HIGH | GPIO_PULL_UP | MAX32_GPIO_VSEL_VDDIOH)>;
 			sccpo-gpios = <&gpio2 15 (GPIO_ACTIVE_LOW | GPIO_PULL_UP | MAX32_GPIO_VSEL_VDDIOH)>;
-			adi,power-class = <LTC4296_PSE>;
+			adi,power-class = <LTC4296_PSE_DISABLED>;
 			adi,hs-resistor = <250>;
 		};
 
 		port1 {
 			sccpi-gpios = <&gpio2 16 (GPIO_ACTIVE_HIGH | GPIO_PULL_UP | MAX32_GPIO_VSEL_VDDIOH)>;
 			sccpo-gpios = <&gpio2 17 (GPIO_ACTIVE_LOW | GPIO_PULL_UP | MAX32_GPIO_VSEL_VDDIOH)>;
-			adi,power-class = <LTC4296_PSE>;
+			adi,power-class = <LTC4296_PSE_DISABLED>;
 			adi,hs-resistor = <250>;
 		};
 
 		port2 {
 			sccpi-gpios = <&gpio2 18 (GPIO_ACTIVE_HIGH | GPIO_PULL_UP | MAX32_GPIO_VSEL_VDDIOH)>;
 			sccpo-gpios = <&gpio2 20 (GPIO_ACTIVE_LOW | GPIO_PULL_UP | MAX32_GPIO_VSEL_VDDIOH)>;
-			adi,power-class = <LTC4296_PSE>;
+			adi,power-class = <LTC4296_PSE_DISABLED>;
 			adi,hs-resistor = <250>;
 		};
 
 		port3 {
 			sccpi-gpios = <&gpio2 21 (GPIO_ACTIVE_HIGH | GPIO_PULL_UP | MAX32_GPIO_VSEL_VDDIOH)>;
 			sccpo-gpios = <&gpio2 22 (GPIO_ACTIVE_LOW | GPIO_PULL_UP | MAX32_GPIO_VSEL_VDDIOH)>;
-			adi,power-class = <LTC4296_PSE>;
+			adi,power-class = <LTC4296_PSE_DISABLED>;
 			adi,hs-resistor = <250>;
 		};
 
