@@ -113,7 +113,11 @@ LOGIN_PAGE = """<!doctype html>
  button:hover{background:#2f7ae8}
  .err{margin-top:16px;padding:9px 12px;border-radius:7px;background:#3b1d22;
   border:1px solid #6b2a33;color:#ffb4bd;font-size:13px}
- .mini{margin-left:8px;padding:6px 10px;font-size:13px}
+ .calpt{border:1px solid #2b3846;border-radius:8px;padding:4px 12px 10px;margin:14px 0}
+ .calpt h3{margin:10px 0 4px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#8b98a5}
+ .calin{display:flex;gap:8px;flex:1;align-items:center}
+ .calin input{flex:1;min-width:0}
+ .mini{margin-left:0;padding:6px 12px;font-size:13px;white-space:nowrap}
 </style></head><body>
 <form method="POST" action="/login">
   <h1>__SITE__</h1>
@@ -343,14 +347,22 @@ PAGE = r"""<!doctype html>
       avanza sobre un pi&ntilde;&oacute;n, as&iacute; que los mm por pulso son constantes.
       <b>Sep&aacute;ralos todo lo que puedas.</b> Un tercer punto sirve para
       <i>comprobar</i>, no para afinar: si se desv&iacute;a, revisa la mec&aacute;nica.</p>
-    <div class="row"><label>Punto A &mdash; pulsos</label>
-      <input type="number" id="ca_c"><button id="ca_now" class="mini">Leer</button></div>
-    <div class="row"><label>Punto A &mdash; nivel real</label>
-      <input type="number" id="ca_l" placeholder="mm"></div>
-    <div class="row"><label>Punto B &mdash; pulsos</label>
-      <input type="number" id="cb_c"><button id="cb_now" class="mini">Leer</button></div>
-    <div class="row"><label>Punto B &mdash; nivel real</label>
-      <input type="number" id="cb_l" placeholder="mm"></div>
+    <div class="calpt">
+      <h3>Punto A</h3>
+      <div class="row"><label>Pulsos</label>
+        <span class="calin"><input type="number" id="ca_c">
+        <button id="ca_now" class="mini">Leer</button></span></div>
+      <div class="row"><label>Nivel real</label>
+        <span class="calin"><input type="number" id="ca_l" placeholder="mm"></span></div>
+    </div>
+    <div class="calpt">
+      <h3>Punto B</h3>
+      <div class="row"><label>Pulsos</label>
+        <span class="calin"><input type="number" id="cb_c">
+        <button id="cb_now" class="mini">Leer</button></span></div>
+      <div class="row"><label>Nivel real</label>
+        <span class="calin"><input type="number" id="cb_l" placeholder="mm"></span></div>
+    </div>
     <div class="row"><label>Unidad</label><input type="text" id="c_u" value="mm"></div>
     <p id="calc" class="mut" style="margin:10px 0"></p>
     <div style="display:flex;gap:8px;margin-top:6px">
