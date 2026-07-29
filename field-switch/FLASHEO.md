@@ -174,6 +174,31 @@ west build -p always -b mfs06/max32690/m4 \
 
 Sin `-DLIB_ADIN6310_PATH` el CMake falla en `zephyr_library_sources`.
 
+### Procedencia de este árbol (verificado 2026-07-29)
+
+El fuente commiteado **no era** el que compiló el `.sbin`: el `app.overlay`
+seguía en `LTC4296_PSE` cuando la imagen que corre es **Clase 13**, y el
+`main.c` tampoco coincidía. Recuperado de la TPU y fijado así:
+
+| Fichero | Cómo se verificó |
+|---|---|
+| build de referencia | `build_class13nr`, localizado por el `__start` de la cabecera del `.sbin` (`0x10005fd4`) y confirmado extrayendo el payload: **`.sbin` = 256 B de cabecera + payload + 64 B de firma** |
+| `app.overlay` | `app.overlay.bak-preport4` — coincide con el devicetree resuelto de referencia (`power-class = 0x5`, port0–3, sin port4) |
+| `src/main.c` | `main.c.bak-preretry`, **idéntico** a `main.c.bak-precomm` ⇒ sin cambios entre el 23-jul 21:32 y el 27-jul 19:26, intervalo que **contiene** el build (22:20) |
+| `prj.conf` | idéntico entre el 22-jul y el 27-jul; el `CONFIG_LOG` de la TPU es posterior |
+| `boards/adi/mfs06/` | el DTS de esta rama, confirmado por el devicetree de referencia |
+
+**Comprobación final:** compilando este árbol con la placa `mfs06`, el
+devicetree resuelto sale **idéntico** al de `build_class13nr`, y en el
+`.config` las únicas diferencias son `CONFIG_BOARD`, `CONFIG_BOARD_TARGET` y
+los dos símbolos `BOARD_*`.
+
+> ⚠️ **El árbol de la TPU está por delante de lo que hay grabado.** Su
+> `app.overlay` tiene un quinto puerto (`port4`) y su `prj.conf` tiene
+> `CONFIG_LOG=y`: son los experimentos del Port 6 y de la consola serie,
+> **posteriores** a la imagen que corre. No están en esta rama a propósito —
+> aquí se documenta lo que está grabado, no lo que se estaba probando.
+
 ---
 
 ## 6. Cosas probadas que NO funcionaron

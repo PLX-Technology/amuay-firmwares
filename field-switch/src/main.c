@@ -392,6 +392,133 @@ int adin6310_enable_pse(struct device *ltc4296, uint8_t switch_op)
 	return device_init(ltc4296);
 }
 
+/* ===================================================================
+ * DETECCION DE CORTOS EN MODULOS PSM/PDM + INDICACION POR LED
+ * ===================================================================
+ * Feature solicitada por Mayker (2026-07-23). Diagnostico STANDALONE
+ * en campo, sin debugger: al arrancar (y refrescado periodicamente) se
+ * prueba cada puerto PSE en modo clasificacion y se clasifica el par
+ * como CORTO / ABIERTO / PD-presente. Un corto se senala parpadeando
+ * un LED: N parpadeos = numero de SLOT en la SERIGRAFIA, pausa larga,
+ * siguiente slot en corto, y asi. Sin cortos = LED apagado.
+ *
+ * Base fisica (medido por SWD el 2026-07-23, ver
+ * ../PDM-SPE-NOTES.md y ../tools/ltc4296-swd/):
+ *   - Puerto VACIO   -> sondeo Vout ~5100 mV (contra abierto)
+ *   - PD sano        -> firma 4050-4550 mV, luego DELIVERING
+ *   - Modulo en CORTO -> Vout ~70 mV, DET_VLOW perpetuo
+ * El umbral de 2000 mV separa "corto" de todo lo demas con margen.
+ *
+ * Mapeo slot(serigrafia) <-> puerto LTC (confirmado con el PSM medido
+ * en slot Port 4 = LTC_PORT2):
+ *   Slot Port 1 = UPLINK (el PDM recibe PoDL; NO es salida PSE)
+ *   Slot Port 2 = LTC_PORT0     Slot Port 4 = LTC_PORT2
+ *   Slot Port 3 = LTC_PORT1     Slot Port 5 = LTC_PORT3
+ *   Slot Port 6 = LTC_PORT4  (requiere habilitar el 5o puerto: ver README)
+ *   => slot = LTC_port + 2
+ *
+ * Toda la API usada es publica (include/zephyr/drivers/sensor/ltc4296.h)
+ * y NUNCA entrega potencia: solo prebias + clasificacion (uA) + disable.
+ * =================================================================== */
+
+/* --- Bits de PxST (replicados del driver privado ltc4296.h) --- */
+#define MFS_PXST_PSE_STATUS_MSK   0x0007u
+#define MFS_PXST_DET_VLOW_MSK     (1u << 12)
+#define MFS_PXST_DET_VHIGH_MSK    (1u << 13)
+
+/* --- Parametros ajustables --- */
+#define MFS_SHORT_VOUT_MV   2000    /* Vout < esto en clasificacion = corto */
+#define MFS_PSE_PORTS       4       /* puertos PSE configurados (LTC0..3).
+                                     * Subir a 5 si se habilita LTC_PORT4
+                                     * (slot Port 6): ver README. */
+#define MFS_LTCPORT_TO_SLOT(p)  ((p) + 2)   /* serigrafia del slot */
+
+/* Timings del patron de parpadeo (ms) */
+#define MFS_BLINK_ON_MS     250
+#define MFS_BLINK_OFF_MS    250
+#define MFS_GAP_PORT_MS     1500    /* pausa larga entre slots en corto */
+#define MFS_GAP_CYCLE_MS    3000    /* pausa entre ciclos completos */
+
+/* Re-escaneo periodico (en iteraciones del bucle principal de 1s).
+ * Detecta modulos cambiados/insertados sin necesidad de un POR. */
+#define MFS_RESCAN_EVERY    30
+
+/* --- Diagnostico visible por SWD --- */
+volatile uint16_t g_short_mask;              /* bit p = LTC_PORTp en corto */
+volatile int      g_short_vout[MFS_PSE_PORTS];
+
+/* Prueba un puerto en modo clasificacion y devuelve el Vout de sondeo.
+ * Deja el puerto DESHABILITADO al salir (jamas entrega potencia).
+ * Devuelve el Vout en mV (puede ser negativo/absurdo si el ADC del chip
+ * no dio dato valido: el llamante lo filtra). */
+static int mfs_probe_port_vout(const struct device *dev, enum ltc4296_port p)
+{
+	int vout_mv = 0;
+
+	ltc4296_port_prebias(dev, p, LTC_CFG_SCCP_MODE);   /* PxCFG1 = 0x0108 */
+	ltc4296_port_en_and_classification(dev, p);        /* PxCFG0 = 0x2041 */
+	k_sleep(K_MSEC(30));                               /* asentar sondeo   */
+	ltc4296_set_gadc_vout(dev, p);
+	k_sleep(K_MSEC(10));
+	ltc4296_read_gadc(dev, &vout_mv);
+	ltc4296_port_disable(dev, p);                      /* PxCFG0 = 0x0000  */
+
+	return vout_mv;
+}
+
+/* Recorre los puertos PSE y marca cuales estan en corto.
+ * SALTA los puertos que estan DELIVERING (PD real alimentandose): no se
+ * deben sondear para no interrumpir la entrega, y obviamente no son corto.
+ * Actualiza g_short_mask / g_short_vout y devuelve la mascara. */
+static uint16_t mfs_scan_shorts(const struct device *dev)
+{
+	uint16_t mask = 0;
+
+	for (int p = 0; p < MFS_PSE_PORTS; p++) {
+		enum ltc4296_pse_status pwr = LTC_PSE_STATUS_UNKNOWN;
+
+		/* no molestar a un puerto entregando a un PD real */
+		if (ltc4296_is_port_deliver_pwr(dev, (enum ltc4296_port)p, &pwr) == 0 &&
+		    pwr == LTC_PSE_STATUS_DELIVERING) {
+			g_short_vout[p] = -1;   /* marca "entregando", no sondeado */
+			continue;
+		}
+
+		int v = mfs_probe_port_vout(dev, (enum ltc4296_port)p);
+		g_short_vout[p] = v;
+
+		/* corto = Vout bajo Y positivo. Un valor <0 o muy grande
+		 * (p.ej. +/-71000 con SPI/ADC mudo) NO es corto: se ignora
+		 * para evitar falsos positivos. */
+		if (v >= 0 && v < MFS_SHORT_VOUT_MV)
+			mask |= (1u << p);
+	}
+
+	g_short_mask = mask;
+	return mask;
+}
+
+/* Emite UN ciclo del patron: por cada puerto en corto, (slot) parpadeos
+ * + pausa larga. El LED es activo-alto (GPIO -> FET -> LED). */
+static void mfs_blink_shorts(const struct gpio_dt_spec *led, uint16_t mask)
+{
+	for (int p = 0; p < MFS_PSE_PORTS; p++) {
+		if (!(mask & (1u << p)))
+			continue;
+
+		int slot = MFS_LTCPORT_TO_SLOT(p);   /* numero de serigrafia */
+		for (int b = 0; b < slot; b++) {
+			gpio_pin_set_dt(led, 1);
+			k_sleep(K_MSEC(MFS_BLINK_ON_MS));
+			gpio_pin_set_dt(led, 0);
+			k_sleep(K_MSEC(MFS_BLINK_OFF_MS));
+		}
+		k_sleep(K_MSEC(MFS_GAP_PORT_MS));    /* pausa larga entre slots */
+	}
+	if (mask)
+		k_sleep(K_MSEC(MFS_GAP_CYCLE_MS));   /* pausa entre ciclos */
+}
+
 int main(void)
 {
 	int32_t ret;
@@ -406,22 +533,6 @@ int main(void)
 	uint8_t mac_addr[6] = {0x00, 0x18, 0x80, 0x03, 0x25, 0x60};
 
 	const struct device *const ltc4296_dev = DEVICE_DT_GET(DT_NODELABEL(ltc4296));
-	/* phyConfig = {autoNegEnable, phyPullupCtrl, phyAddr, speed, duplex, crossover}
-	 *
-	 * phyPullupCtrl DEBE ser 1. Con 0 el SES no llega a identificar el PHY
-	 * (PHYID lee 0x0000 en vez de 0x0283/0xBC81), no lo configura, y la
-	 * autonegociacion queda deshabilitada (BMCR 0x0100, bit12=0): el puerto
-	 * nunca enlaza y el LED del modulo no enciende.
-	 *
-	 * Diagnosticado y verificado en banco en el power switch (mismo SDK y
-	 * mismo sintoma). Fuente del valor: configuracion de referencia de ADI
-	 * para el field switch, portConfigurationFieldSwitch[] en
-	 * example/src/SES_example_config.c de
-	 * github.com/analogdevicesinc/windows-project-for-adinx310, que pone
-	 * phyPullupCtrl=1 en los seis puertos.
-	 *
-	 * NO volver a ponerlo en 0. Sintoma: puerto SPE presente que nunca linkea.
-	 */
 	const SES_portInit_t initializePorts_p[] = {
 		/* FIELD SWITCH (MFS): los 6 puertos son SPE (ADIN1100 en RMII).
 		 * No hay uplink RGMII ni RJ45: es un switch SPE puro.
@@ -432,12 +543,12 @@ int main(void)
 		 * phyAddr: PROVISIONAL. La fija el DIP de cada modulo y aqui no la
 		 * conocemos: el escaneo MDIO del arranque (g_map) dira las reales.
 		 */
-		{ 1, SES_rmiiMode, { 0, 0, 0 }, 1, SES_phyADIN1100, {true, 1, 0, SES_phySpeed10, SES_phyDuplexModeFull, SES_autoMdix}},
-		{ 1, SES_rmiiMode, { 0, 0, 0 }, 1, SES_phyADIN1100, {true, 1, 1, SES_phySpeed10, SES_phyDuplexModeFull, SES_autoMdix}},
-		{ 1, SES_rmiiMode, { 0, 0, 0 }, 1, SES_phyADIN1100, {true, 1, 2, SES_phySpeed10, SES_phyDuplexModeFull, SES_autoMdix}},
-		{ 1, SES_rmiiMode, { 0, 0, 0 }, 1, SES_phyADIN1100, {true, 1, 3, SES_phySpeed10, SES_phyDuplexModeFull, SES_autoMdix}},
-		{ 1, SES_rmiiMode, { 0, 0, 0 }, 1, SES_phyADIN1100, {true, 1, 4, SES_phySpeed10, SES_phyDuplexModeFull, SES_autoMdix}},
-		{ 1, SES_rmiiMode, { 0, 0, 0 }, 1, SES_phyADIN1100, {true, 1, 5, SES_phySpeed10, SES_phyDuplexModeFull, SES_autoMdix}}
+		{ 1, SES_rmiiMode, { 0, 0, 0 }, 1, SES_phyADIN1100, {true, 0, 0, SES_phySpeed10, SES_phyDuplexModeFull, SES_autoMdix}},
+		{ 1, SES_rmiiMode, { 0, 0, 0 }, 1, SES_phyADIN1100, {true, 0, 1, SES_phySpeed10, SES_phyDuplexModeFull, SES_autoMdix}},
+		{ 1, SES_rmiiMode, { 0, 0, 0 }, 1, SES_phyADIN1100, {true, 0, 2, SES_phySpeed10, SES_phyDuplexModeFull, SES_autoMdix}},
+		{ 1, SES_rmiiMode, { 0, 0, 0 }, 1, SES_phyADIN1100, {true, 0, 3, SES_phySpeed10, SES_phyDuplexModeFull, SES_autoMdix}},
+		{ 1, SES_rmiiMode, { 0, 0, 0 }, 1, SES_phyADIN1100, {true, 0, 4, SES_phySpeed10, SES_phyDuplexModeFull, SES_autoMdix}},
+		{ 1, SES_rmiiMode, { 0, 0, 0 }, 1, SES_phyADIN1100, {true, 0, 5, SES_phySpeed10, SES_phyDuplexModeFull, SES_autoMdix}}
 	};
 
 	SES_driverFunctions_t comm_callbacks = {
@@ -459,8 +570,11 @@ int main(void)
 	if (ret)
 		return ret;
 
-	/* TEST-NORESET: P1.8 no se toca (diagnostico reset loop field switch) */
-	(void)reset_gpio;
+	ret = gpio_pin_configure_dt(&reset_gpio, GPIO_OUTPUT_INACTIVE);
+        if (ret) {
+        	LOG_ERR("Failed to configure reset GPIO, %d", ret);
+		return ret;
+        }
 
 	for (int i = 0; i < ARRAY_SIZE(config_gpio); i++) {
 		ret = gpio_pin_configure_dt(&config_gpio[i], GPIO_INPUT);
@@ -581,102 +695,13 @@ int main(void)
 
 	printf("Configuration done\n");
 
-	{
-		SES_mac_t spe[4] = { SES_macPort1, SES_macPort2, SES_macPort3, SES_macPort4 };
-		uint16_t v;
-		for (int k = 0; k < 4; k++) {
-			g_phyret[k] = SES_ReadPhyReg(spe[k], 0x0002, &v); g_phyid1[k] = v;
-			SES_ReadPhyReg(spe[k], 0x0003, &v); g_phyid2[k] = v;
-			SES_ReadPhyReg(spe[k], 0x1E8C82, &v); g_ledctrl[k] = v;
-		}
-		SES_ReadPhyReg(SES_macPort5, 0x0002, &v); g_ethid1 = v;
-		SES_ReadPhyReg(SES_macPort5, 0x0003, &v); g_ethid2 = v;
-	}
-	{
-		static SES_portInit_t kp[6];
-		uint16_t id1, led;
-		for (int i = 0; i < 6; i++) kp[i] = initializePorts_p[i];
-		for (int a = 0; a < 32; a++) {
-			kp[5].phyConfig.phyAddr = a;
-			SES_MX_InitializePorts(dev_id, 6, kp);
-			k_msleep(15);
-			SES_ReadPhyReg(SES_macPort5, 0x010002, &id1);
-			SES_ReadPhyReg(SES_macPort5, 0x1E8C82, &led);
-			g_scan[a*2] = id1; g_scan[a*2+1] = led;
-		}
-		SES_MX_InitializePorts(dev_id, 6, initializePorts_p);
-	}
-	{
-		uint16_t v;
-		/* --- ANTES: estado del ADIN1300 --- */
-		SES_ReadPhyReg(SES_macPort5, 0x0000, &v); g_rj[0] = v;  /* BMCR */
-		SES_ReadPhyReg(SES_macPort5, 0x0001, &v); g_rj[1] = v;  /* BMSR */
-		SES_ReadPhyReg(SES_macPort5, 0x0004, &v); g_rj[2] = v;  /* ANAR  */
-		SES_ReadPhyReg(SES_macPort5, 0x0005, &v); g_rj[3] = v;  /* ANLPAR */
-		g_rj[4] = rj_mmd_rd(0x1E, 0xFF24);   /* GE_RMII_CFG  bit0=RMII_EN */
-		g_rj[5] = rj_mmd_rd(0x1E, 0xFF23);   /* GE_RGMII_CFG */
+	/* Deteccion de cortos PSM/PDM + LED (feature Mayker). Sustituye al bloque
+	 * de sondeo RJ45/ADIN1300 del macPort5 (hardware inexistente en el field
+	 * switch, todo SPE) que crasheaba la app. */
+	struct gpio_dt_spec fault_led = GPIO_DT_SPEC_GET(DT_NODELABEL(mfs_fault_led), gpios);
+	gpio_pin_configure_dt(&fault_led, GPIO_OUTPUT_INACTIVE);
+	mfs_scan_shorts(ltc4296_dev);
 
-		/* --- FIX: forzar RMII. Via 1: codificacion C45 de SES (0xDDRRRR) --- */
-		SES_ReadPhyReg(SES_macPort5, 0x1EFF24, &v); g_rj[13] = v;
-		g_rj[14] = (unsigned short)SES_WritePhyReg(SES_macPort5, 0x1EFF24, v | 0x0001);
-		k_msleep(50);
-		SES_ReadPhyReg(SES_macPort5, 0x1EFF24, &v); g_rj[15] = v;
-		/* --- Via 2: indirecto manual 0x0D/0x0E --- */
-		rj_mmd_wr(0x1E, 0xFF24, g_rj[4] | 0x0001);
-		k_msleep(50);
-		g_rj[6] = rj_mmd_rd(0x1E, 0xFF24);   /* releer: bit0 debe quedar en 1 */
-
-		/* --- reiniciar autoneg (BMCR: AN_EN|AN_RESTART) --- */
-		SES_ReadPhyReg(SES_macPort5, 0x0000, &v);
-		SES_WritePhyReg(SES_macPort5, 0x0000, v | 0x1200);
-		k_msleep(2000);
-		SES_ReadPhyReg(SES_macPort5, 0x0000, &v); g_rj[7] = v;  /* BMCR despues */
-		SES_ReadPhyReg(SES_macPort5, 0x0001, &v); g_rj[8] = v;  /* BMSR despues */
-		SES_ReadPhyReg(SES_macPort5, 0x0005, &v); g_rj[9] = v;  /* ANLPAR despues */
-	}
-	{
-		static SES_portInit_t kp5[6];
-		uint8_t addrs[2] = { 2, 4 };
-		uint16_t v;
-		int idx = 0;
-
-		for (int i = 0; i < 6; i++) { kp5[i] = initializePorts_p[i]; }
-		for (int a = 0; a < 2; a++) {
-			kp5[5].phyConfig.phyAddr = addrs[a];
-			SES_MX_InitializePorts(dev_id, 6, kp5);
-			k_msleep(30);
-			SES_ReadPhyReg(SES_macPort5, 0x010002, &v); g_p4[idx++] = v;  /* PHYID1 */
-			SES_ReadPhyReg(SES_macPort5, 0x010003, &v); g_p4[idx++] = v;  /* PHYID2 */
-			SES_ReadPhyReg(SES_macPort5, 0x0108F7, &v); g_p4[idx++] = v;  /* B10L_STAT bit0=LINK */
-			SES_ReadPhyReg(SES_macPort5, 0x070201, &v); g_p4[idx++] = v;  /* AN_STAT bit5=AN ok */
-			SES_ReadPhyReg(SES_macPort5, 0x010834, &v); g_p4[idx++] = v;  /* PMA_CTRL */
-			SES_ReadPhyReg(SES_macPort5, 0x1E8C82, &v); g_p4[idx++] = v;  /* LEDCTRL */
-		}
-		/* RESTAURAR port5: dejarlo mal-configurado CRASHEA la app */
-		SES_MX_InitializePorts(dev_id, 6, initializePorts_p);
-	}
-	{
-		static SES_portInit_t km[6];
-		uint16_t v;
-
-		for (int i = 0; i < 6; i++) { km[i] = initializePorts_p[i]; }
-		/* port5 como ADIN1300 SOLO para escanear: leer via un puerto
-		 * ADIN1100 da 0x0000. Se restaura al final. */
-		km[5].phyType = SES_phyADIN1300;
-		for (int a = 0; a < 32; a++) {
-			km[5].phyConfig.phyAddr = a;
-			SES_MX_InitializePorts(dev_id, 6, km);
-			k_msleep(20);
-			/* clause 45: MMD1 regs 2/3 -> ADIN1100 (modulos SPE) */
-			v = 0; SES_ReadPhyReg(SES_macPort5, 0x010002, &v); g_map[a*4+0] = v;
-			v = 0; SES_ReadPhyReg(SES_macPort5, 0x010003, &v); g_map[a*4+1] = v;
-			/* clause 22: regs 2/3 -> ADIN1300 (RJ45) */
-			v = 0; SES_ReadPhyReg(SES_macPort5, 0x0002, &v);   g_map[a*4+2] = v;
-			v = 0; SES_ReadPhyReg(SES_macPort5, 0x0003, &v);   g_map[a*4+3] = v;
-		}
-		/* RESTAURAR port5: dejarlo mal-configurado CRASHEA la app */
-		SES_MX_InitializePorts(dev_id, 6, initializePorts_p);
-	}
 	while (1) {
 		k_sleep(K_MSEC(1000));
 		g_link[0] = SES_GetLinkState(SES_macPort0);
@@ -685,48 +710,14 @@ int main(void)
 		g_link[3] = SES_GetLinkState(SES_macPort3);
 		g_link[4] = SES_GetLinkState(SES_macPort4);
 		g_link[5] = SES_GetLinkState(SES_macPort5);
+
 		{
-			uint16_t v;
-			SES_ReadPhyReg(SES_macPort5, 0x0001, &v); g_rj[10] = v;  /* BMSR vivo */
-			SES_ReadPhyReg(SES_macPort5, 0x0005, &v); g_rj[11] = v;  /* ANLPAR vivo */
-			g_rj[12] = rj_mmd_rd(0x1E, 0xFF24);
-		}
-		{
-			SES_statistic_t s0, s5, s3;
-			SES_GetStatistics(SES_macPort0, &s0, sizeof(s0));
-			SES_GetStatistics(SES_macPort5, &s5, sizeof(s5));
-			SES_GetStatistics(SES_macPort3, &s3, sizeof(s3));
-			g_st[0]=s0.rxByte; g_st[1]=s0.rxBroadcast; g_st[2]=s0.rxFcsError; g_st[3]=s0.txByte; g_st[4]=s0.txBroadcast;
-			g_st[5]=s5.rxByte; g_st[6]=s5.rxBroadcast; g_st[7]=s5.rxFcsError; g_st[8]=s5.txByte; g_st[9]=s5.txBroadcast;
-			g_st3[0]=s3.rxByte; g_st3[1]=s3.rxBroadcast; g_st3[2]=s3.rxFcsError; g_st3[3]=s3.txByte; g_st3[4]=s3.txBroadcast;
-		}
-		{
-			SES_statistic_t sp;
-			SES_mac_t pl[4] = { SES_macPort1, SES_macPort2, SES_macPort3, SES_macPort4 };
-			for (int q = 0; q < 4; q++) {
-				SES_GetStatistics(pl[q], &sp, sizeof(sp));
-				g_rx[q] = sp.rxByte;
-				g_tx[q] = sp.txByte;
-			}
-		}
-		{
-			SES_mac_t pa[4] = { SES_macPort1, SES_macPort2, SES_macPort3, SES_macPort4 };
-			/* devad<<16 | reg  --  ADIN1100 clause 45 */
-			uint32_t rg[6] = { 0x070200, 0x070201, 0x010834, 0x0108F7, 0x030001, 0x010001 };
-			uint16_t rv;
-			for (int q = 0; q < 4; q++)
-				for (int w = 0; w < 6; w++) {
-					rv = 0;
-					SES_ReadPhyReg(pa[q], rg[w], &rv);
-					g_an[q][w] = rv;
-				}
-		}
-		{
-			uint8_t lp;
-			g_probe[0] = SES_GetLinkPartnerAutoNegStatus(SES_macPort1, &lp); g_probe[1]=lp;
-			g_probe[2] = SES_GetLinkPartnerAutoNegStatus(SES_macPort2, &lp); g_probe[3]=lp;
-			g_probe[4] = SES_GetLinkPartnerAutoNegStatus(SES_macPort3, &lp); g_probe[5]=lp;
-			g_probe[6] = SES_GetLinkPartnerAutoNegStatus(SES_macPort4, &lp); g_probe[7]=lp;
+			static int mfs_rescan = 0;
+			if (++mfs_rescan >= MFS_RESCAN_EVERY) { mfs_rescan = 0; mfs_scan_shorts(ltc4296_dev); }
+			if (g_short_mask)
+				mfs_blink_shorts(&fault_led, g_short_mask);
+			else
+				gpio_pin_set_dt(&fault_led, 0);
 		}
 	}
 
