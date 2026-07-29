@@ -428,9 +428,10 @@ int adin6310_enable_pse(struct device *ltc4296, uint8_t switch_op)
 
 /* --- Parametros ajustables --- */
 #define MFS_SHORT_VOUT_MV   2000    /* Vout < esto en clasificacion = corto */
-#define MFS_PSE_PORTS       4       /* puertos PSE configurados (LTC0..3).
-                                     * Subir a 5 si se habilita LTC_PORT4
-                                     * (slot Port 6): ver README. */
+#define MFS_PSE_PORTS       5       /* puertos PSE configurados (LTC0..4).
+                                     * El 5o (LTC_PORT4 = slot Port 6) se
+                                     * habilito el 2026-07-29: hizo falta
+                                     * tocar el DRIVER, no solo el dts. */
 #define MFS_LTCPORT_TO_SLOT(p)  ((p) + 2)   /* serigrafia del slot */
 
 /* Timings del patron de parpadeo (ms) */

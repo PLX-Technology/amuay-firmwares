@@ -233,6 +233,21 @@
 			adi,power-class = <LTC4296_PSE>;
 			adi,hs-resistor = <250>;
 		};
+
+		/* Quinto puerto PSE = slot Port 6. Lineas SCCP P2.23/P2.24 (nets
+		 * P4_SCCPI/P4_SCCPO, R57/R58 de 0 ohm en el esquematico MFS).
+		 *
+		 * ⚠️ Clase DESHABILITADA a proposito. El probe() del driver hace
+		 * `LTC4296_PSE` => prebias APL + port_en = ENERGIZA SIN NEGOCIAR.
+		 * Quien decide entregar es el app.overlay, poniendo una clase
+		 * SCCP; asi un build sin overlay no puede energizar este slot
+		 * por descuido. */
+		port4 {
+			sccpi-gpios = <&gpio2 23 (GPIO_ACTIVE_HIGH | GPIO_PULL_UP | MAX32_GPIO_VSEL_VDDIOH)>;
+			sccpo-gpios = <&gpio2 24 (GPIO_ACTIVE_LOW | GPIO_PULL_UP | MAX32_GPIO_VSEL_VDDIOH)>;
+			adi,power-class = <LTC4296_PSE_DISABLED>;
+			adi,hs-resistor = <250>;
+		};
 	};
 };
 

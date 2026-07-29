@@ -18,6 +18,14 @@
                 adi,power-class = <LTC4296_PSE_SCCP_CLASS_13>;
                 adi,hs-resistor = <250>;
         };
+
+        /* Slot Port 6. El board dts lo deja en LTC4296_PSE_DISABLED; aqui se
+         * le da clase SCCP, que es el camino que NEGOCIA (do_spoe_sccp) en
+         * vez de energizar directo. */
+        port4 {
+                adi,power-class = <LTC4296_PSE_SCCP_CLASS_13>;
+                adi,hs-resistor = <250>;
+        };
 };
 / {
 	mfsleds {

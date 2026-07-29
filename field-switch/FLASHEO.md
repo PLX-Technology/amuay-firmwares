@@ -17,9 +17,9 @@ prebuilt/mfs_clean_class13.sbin      615 792 bytes
 | PSE | LTC4296, **SPoE Clase 13** (50 V) en los slots Port 2 a 5 |
 | MCU | MAX32690, imagen firmada para secure boot |
 
-⚠️ **El Port 6 no entrega potencia.** Es el `port4` del LTC4296 y **no está
-declarado** en el devicetree. Añadirlo se intentó y **la imagen dejó de
-arrancar** — ver §6.
+✅ **El Port 6 ya está habilitado** (2026-07-29). Es el `port4` del LTC4296.
+No bastaba con declararlo en el devicetree: hubo que **arreglar el driver**,
+que solo leía cuatro hijos. Ver §6.
 
 ---
 
@@ -207,9 +207,48 @@ No repetirlas sin leer antes por qué fallaron.
 
 | Intento | Resultado |
 |---|---|
-| **Declarar `port4`** (Port 6) en el dts + overlay, con `sccpi/sccpo` en **P2.23/P2.24** (nets `P4_SCCPI`/`P4_SCCPO`, confirmados en el esquemático MFS) | La imagen **deja de arrancar**: `PC` en ROM, sin PSE ni switch. Si se reintenta, **bisecar**: primero solo el board dts |
+| ~~**Declarar `port4`** (Port 6) en el dts + overlay hace que la imagen **deje de arrancar**~~ | **FALSO — refutado el 2026-07-29.** Declarar `port4` solo en el devicetree **no cambia ni un byte del binario** (compilado y comparado: mismo SHA-256 con y sin él). Un cambio que no altera la imagen no puede romper el arranque. El "PC en ROM" de aquel día vino de otra cosa; los dos sospechosos documentados son la **firma intermitentemente inválida de `sign_app`** y el **Pico conectado durante el POR**, que deja el ROM sin saltar nunca. Ver §6.1 |
 | **Vigilante de enlace**: reiniciar la autonegociación (`AN_T1_CTRL` 7.0200 bit 9) del puerto caído | Reintenta (contador subía) pero el puerto sigue sin enlazar |
 | Leer registros del PHY con **`SES_ReadPhyReg`** | Devuelve **ceros en los 6 puertos, incluidos los que funcionan**. ⚠️ **Canal de diagnóstico NO fiable**: validarlo contra un puerto bueno (debe leer PHYID `0x0283`) antes de creer ninguna lectura |
+
+### 6.1 Port 6 — la causa real y cómo se habilitó (2026-07-29)
+
+El driver `zephyr/drivers/sensor/ltc4296` solo instanciaba **cuatro** puertos:
+
+```c
+.port_config[0..3] = LTC4296_PORT_INIT(inst, portN),   /* no habia [4] */
+for (int i = 0; i < 4; i++)  /* configuracion de GPIOs, x2 */
+```
+
+`port_config[4]` quedaba a ceros y `power_class == 0` es `LTC4296_PSE_DISABLED`,
+así que el probe lo deshabilitaba en silencio. El array ya tenía sitio
+(`LTC4296_MAX_PORTS = 5`) y el `enum` ya definía `LTC_PORT4`.
+
+Cambios (los tres hacen falta):
+
+1. **Driver** — `.port_config[4] = LTC4296_PORT_INIT_OPT(inst, port4)` y los dos
+   bucles a `LTC4296_MAX_PORTS`. `_OPT` está condicionado a `DT_NODE_EXISTS`,
+   para que el mismo driver siga sirviendo al MPS-04P: sin `port4` la entrada
+   queda a ceros = deshabilitada, **nunca energizada**.
+2. **Board dts** — nodo `port4` con `sccpi/sccpo` en **P2.23/P2.24** y
+   **`adi,power-class = <LTC4296_PSE_DISABLED>`**.
+3. **`app.overlay`** — `port4` con `LTC4296_PSE_SCCP_CLASS_13`.
+4. `MFS_PSE_PORTS` 4 → 5 en `src/main.c`.
+
+> ⚠️ **Por qué la clase va deshabilitada en el dts y SCCP en el overlay.**
+> El `probe()` del driver bifurca según la clase: `LTC4296_PSE` hace
+> `prebias APL + port_en`, que **ENERGIZA SIN NEGOCIAR**; solo las clases
+> `LTC4296_PSE_SCCP_CLASS_*` llaman a `do_spoe_sccp`, que negocia. El board dts
+> pone `LTC4296_PSE` en los puertos 0–3 y es el overlay quien los sube a clase
+> 13 ⇒ **un build sin el overlay energizaría esos cuatro slots directamente.**
+> Footgun preexistente; `port4` se declaró deshabilitado para no ampliarlo.
+
+**Resultado medido:** arranca (PC variando en `0x1000aexx` tras POR en frío con
+el Pico fuera) y los **cinco** puertos se sondean —
+`g_short_vout = 5178, 5214, 5178, 5178, 5178 mV`, `g_short_mask = 0`, o sea los
+cinco slots vacíos y sin cortos. **Pendiente:** validar entrega real con 50 V,
+un PSM en el slot Port 6 y un PD que negocie.
+
 
 ---
 
@@ -222,7 +261,7 @@ No repetirlas sin leer antes por qué fallaron.
 | Port 3 | 0 | 1 |
 | Port 4 | 5 | 2 ⚠️ camino de **datos averiado** |
 | Port 5 | 4 | 3 |
-| Port 6 | 3 | 4 ⚠️ **sin declarar: no da potencia** |
+| Port 6 | 3 | 4 ✅ habilitado 2026-07-29 (ver §6.1) |
 
 **El strap MDIO del PSM debe coincidir con su slot.** Si no coincide, el enlace
 entrena igual pero **no cruza ni una trama** — *link-up no prueba datos*.
