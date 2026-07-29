@@ -300,7 +300,9 @@ PAGE = r"""<!doctype html>
  .hd h2{margin:0}
  .calpt{border:1px solid #2b3846;border-radius:8px;padding:4px 12px 10px;margin:14px 0}
  .calpt h3{margin:10px 0 4px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#8b98a5}
- .calin{display:flex;flex-wrap:nowrap;gap:8px;align-items:center}
+ .calin{display:flex;flex-wrap:nowrap;gap:8px;align-items:center;min-width:0}
+ .calpt .row{grid-template-columns:100px 1fr}
+ #calbg .card{overflow-x:hidden}
  .calin input{flex:1 1 auto;width:auto;min-width:0}
  .mini{margin-left:0;padding:6px 12px;font-size:13px;white-space:nowrap;flex:0 0 auto}
 </style></head><body>
