@@ -27,7 +27,7 @@ openocd -c "adapter driver cmsis-dap" -c "adapter serial <SERIAL>" \
 
 ## Causa raíz #1 — cuelgue en ERTCO (32 kHz) en el HAL de ADI
 
-El board devicetree (`boards/adi/adin6310t1l/..._m4.dts`) habilita el ERTCO:
+El board devicetree (`boards/adi/mfs06/mfs06_max32690_m4.dts`) habilita el ERTCO:
 
 ```dts
 /* ERTCO requires for RTC */
@@ -106,7 +106,7 @@ Requisitos de build que si faltan producen firmware que **nunca** arranca:
 > repo ya lo trae en `prj.conf`, así que **construir desde este repo** evita el
 > problema. Build pristine correcto:
 > ```
-> west build -p always -b adin6310t1l/max32690/m4 <sample> -d <dir> -- \
+> west build -p always -b mfs06/max32690/m4 <sample> -d <dir> -- \
 >   -DLIB_ADIN6310_PATH=/home/tpu01/ADIN6310SWDR-Rel5.1.0
 > ```
 

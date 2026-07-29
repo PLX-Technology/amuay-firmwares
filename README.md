@@ -1,14 +1,19 @@
-# pacific-firmware
+# pacific-firmware — rama `mfs`
 
-Firmware de los dos equipos del sistema de monitoreo de tanques:
+> Rama curada del **field switch (MFS)**: el firmware que se está usando y el
+> procedimiento de grabado y de aprovisionamiento de CRK en
+> **[`field-switch/FLASHEO.md`](field-switch/FLASHEO.md)**.
+> El firmware del power switch (MPS-04P) vive en la rama `mps`.
+
+Firmware de los equipos del sistema de monitoreo de tanques:
 
 | Directorio | Placa | MCU + switch | Función |
 |---|---|---|---|
-| [`power-switch/`](power-switch/) | **MPS-04P** | MAX32690 + **ADIN6310** | Switch Ethernet TSN: 4 puertos SPE (10BASE-T1L), RJ45 y uplink PCIe a la TPU (CM5) |
-| [`att/`](att/) | **ATT** | STM32WBA65 + **ADIN2111** | Va dentro de un sensor **Varec 2500**: lee el encoder del sensor y transmite la medida por SPE al power switch |
-| [`tools/`](tools/) | — | — | Flasher del STM32 por UART y script de aprovisionamiento de equipos vírgenes |
+| [`field-switch/`](field-switch/) | **MFS** | MAX32690 + **ADIN6310** | Switch Ethernet TSN: 6 puertos SPE (10BASE-T1L), sin RJ45; el uplink a la TPU va por un **PDM** en el slot Port 1 |
+| [`att/`](att/) | **ATT** | STM32WBA65 + **ADIN2111** | Va dentro de un sensor **Varec 2500**: lee el encoder del sensor y transmite la medida por SPE al field switch |
+| [`tools/`](tools/) | — | — | Flasher del STM32 por UART y aprovisionamiento de CRK de equipos vírgenes |
 
-Ambos son aplicaciones **Zephyr**. Este repo contiene **solo lo propio** (apps + definiciones de placa);
+Son aplicaciones **Zephyr**. Este repo contiene **solo lo propio** (apps + definiciones de placa);
 el árbol de Zephyr y los módulos se obtienen aparte con `west`.
 
 ---
@@ -25,81 +30,23 @@ cp tools/provision.env.example tools/provision.env
 
 ---
 
-## power-switch — MAX32690 + ADIN6310
+## field-switch — MAX32690 + ADIN6310
 
-### Compilar y flashear
+Procedimiento completo (grabado, CRK, consola, firma, mapa de slots) en
+**[`field-switch/FLASHEO.md`](field-switch/FLASHEO.md)**. En resumen:
 
 ```bash
-west build -b adin6310t1l/max32690/m4 power-switch
+west build -b mfs06/max32690/m4 field-switch
 ```
 
 El MAX32690 usa **secure boot**: hay que **firmar** el binario y flashear el `.sbin`.
 
-```bash
-sign_app -c MAX32690 ca=zephyr.bin sca=fw.sbin \
-         key_file=<MaximSDK>/Tools/SBT/devices/MAX32690/keys/maximtestcrk.key \
-         algo=ecdsa header=yes load_address=0x10000000 jump_address=<__start>
-```
+> **La consola es de 9600 baudios, no 115200.** Creer lo contrario lleva a leer
+> «silencio» donde hay decenas de KB de datos.
 
-`jump_address` = el símbolo `__start` del `zephyr.map` **de ese build** (cambia en cada compilación).
+> **El Pico debe estar desenchufado en el POR.** Con el CMSIS-DAP conectado al SWD
+> durante el encendido, el ROM no salta a la aplicación y se queda dentro para siempre.
 
-```bash
-openocd -f interface/cmsis-dap.cfg -f target/max32690.cfg \
-        -c "init; reset halt; program fw.sbin 0x10000000 verify; shutdown"
-```
-
-> **El secure boot solo arranca con un POR REAL (corte de alimentación).** Un `reset` de OpenOCD
-> no re-ejecuta el ROM → doble fault → lockup, y parece que el firmware está roto cuando no lo está.
-> Tras el POR hay que **esperar ~30–40 s** antes de leer el PC por SWD: el ROM valida la firma y
-> carga el blob del ADIN6310 por SPI. Si lees antes, ves el PC en el ROM y parece un fallo.
->
-> Al flashear, `checksum mismatch - attempting binary compare` seguido de `Verified OK` es **normal**.
-
-### Topología de puertos
-
-| Puerto ADIN6310 | Conector | Modo | PHY |
-|---|---|---|---|
-| Port 0 | — | RGMII 1G | LAN7431 → PCIe → TPU (uplink) |
-| **Port 1–4** | **J3, J4, J5, J6** | **RMII 10M** | ADIN1100 (módulos SPE enchufables) |
-| Port 5 | RJ45 | RMII 100M | ADIN1300 |
-
-El mapeo conector↔puerto es **1:1** (J3=Port1 … J6=Port4), **ni invertido ni corrido**.
-
-### Bus MDIO — reglas que hay que respetar
-
-El ADIN6310 tiene **un solo bus MDIO** (pines D15/D14). El **ADIN1300 del RJ45 y los cuatro
-módulos SPE cuelgan del mismo par** `MDC`/`MDIO` (R20/R21 son de 0 Ω).
-
-- **El ADIN1300 vive en la dirección MDIO 1.** ⇒ **Ningún módulo SPE puede tener DIP = 1.**
-  Usar 2, 3, 5, 6, 7…
-- Al escanear el bus hay que leer **clause-22 *y* clause-45**. El ADIN1300 es clause-22 y **no
-  aparece** en un escaneo solo-C45 — es un falso negativo que cuesta horas.
-- **Los módulos SPE son RMII**, no RGMII (el eval oficial de ADI usa RGMII; esta placa no).
-  El ADIN6310 entrega el reloj de referencia de 50 MHz.
-
-### Cómo leer el estado (y qué NO creer)
-
-> **`SES_GetLinkState` / `g_link` NO ES EVIDENCIA DE NADA.** Una dirección MDIO vacía se lee
-> `0xffff` por el pull-up del bus, y SES lo interpreta como **link = 1**. Genera "links fantasma"
-> en puertos donde no hay absolutamente nada. Comprobado poniendo un puerto en una dirección vacía.
-
-Para saber si un puerto SPE linkea **de verdad**, leer el PHY:
-
-| Registro (clause-45) | Qué dice |
-|---|---|
-| `1.08F7` B10L_STAT | **bit0 = LINK real** |
-| `7.0201` AN_T1_STAT | bit5 = autonegociación completa |
-| `7.0200` AN_T1_CTRL | bit12 = AN habilitada |
-
-**Firmas diagnósticas** (distinguirlas ahorra mucho tiempo):
-
-| Lectura | Significado |
-|---|---|
-| `0xffff` | slot **vacío** (bus flotando) |
-| `0x0000` en los MMD del núcleo, pero el MMD `0x1E` responde | módulo **alimentado pero SIN RELOJ RMII** → fallo de placa en ese slot |
-| `0xBC00` en la addr 1 | **colisión MDIO**: es `0xBC30 & 0xBC81` (AND cableado del ADIN1300 con un módulo en DIP=1) |
-
----
 
 ## att — STM32WBA65 + ADIN2111
 
@@ -179,9 +126,8 @@ probarlo exige un segundo nodo.
 
 | Equipo | Problema | Acción |
 |---|---|---|
-| **power-switch** | **RJ45 no linkea**: el ADIN1300 arranca en RGMII por strap, pero `port5` debe ir en RMII (el reloj común que necesita el SPE) | Poblar **pull-ups de 10 kΩ a VDDIO en `MACIF_SEL0` (pin 34, `P5_RXC`) y `MACIF_SEL1` (pin 35, `P5_RXCTL`)** → arranca en RMII. **Ya validado en otra placa.** |
-| **power-switch** | **Slot SPE 4 no linkea con ningún módulo** (probado por intercambio: la falla se queda en el slot, los módulos están sanos). El módulo está alimentado y contesta MDIO, pero su núcleo no responde = **sin reloj RMII** | Medir con osciloscopio **`P4_TXC` = pin 47 de J6** y la **bola B9** del ADIN6310, contra `P2_TXC` (pin 47 de J4, bola T3) que sí funciona. Deben ser **50 MHz**. Si B9 tiene reloj y J6.47 no → pista/soldadura abierta; si B9 no tiene → soldadura fría del BGA. |
+| **field-switch** | **El Port 6 no entrega potencia.** Es el `port4` del LTC4296 y **no está declarado** en el devicetree; declararlo dejó la imagen **sin arrancar** (PC en ROM, ni PSE ni switch) | Reintentar **bisecando** (primero solo el board dts) y **leer el PC tras el POR** antes de dar nada por bueno. Líneas SCCP confirmadas en el esquemático: **P2.23 = `P4_SCCPI`, P2.24 = `P4_SCCPO`**. Ver `field-switch/FLASHEO.md` §6 |
+| **field-switch** | **Slot Port 4: camino de datos averiado.** El enlace entrena pero no cruza tramas | Ver el mapa de slots en `field-switch/FLASHEO.md` §7 |
 
-Descartado en ambos casos: **no es de diseño** (esquemático verificado pin por pin: los 4 puertos
-SPE están cableados idénticos), **no es firmware** (misma configuración en los 4) y **no son los
-módulos**.
+Los pendientes del **power switch** (RJ45 y slot SPE 4) están en la rama `mps`,
+en `power-switch/FLASHEO.md` §8.

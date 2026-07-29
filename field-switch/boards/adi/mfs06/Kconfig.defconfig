@@ -1,0 +1,18 @@
+# MFS (field switch) board configuration
+
+# Copyright (c) 2024 Analog Devices, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+if BOARD_MFS06
+
+config BOARD
+	default "MFS06"
+
+if NETWORKING
+
+config NET_L2_ETHERNET
+	default y
+
+endif # NETWORKING
+
+endif # BOARD_MFS06

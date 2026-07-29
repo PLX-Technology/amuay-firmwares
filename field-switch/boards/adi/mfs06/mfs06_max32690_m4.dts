@@ -4,6 +4,32 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+/*
+ * MFS — field switch. MAX32690 + ADIN6310.
+ *
+ * NO es la misma placa que el power switch (MPS-04P), aunque el hardware se
+ * parezca y ambas lleven MAX32690 + ADIN6310. Diferencias que importan aqui:
+ *
+ *   |                 | MFS (esta)            | MPS-04P               |
+ *   |-----------------|-----------------------|-----------------------|
+ *   | Slots SPE       | 6                     | 4 (J3-J6 = Port 1-4)  |
+ *   | RJ45            | no                    | si (Port 5, ADIN1300) |
+ *   | Uplink a la TPU | PDM en el slot Port 1 | LAN7431 -> PCIe       |
+ *   | Puertos PSE     | 5 (slots Port 2-6)    | 4 (LTC port0-3)       |
+ *
+ * Las dos compartian esta definicion de placa bajo el nombre `adin6310t1l`,
+ * con un solo directorio en el arbol de Zephyr: quien lo editaba ultimo
+ * mandaba para ambas compilaciones. Separadas el 2026-07-29.
+ *
+ * ⚠️ Aqui SOLO se declaran port0-port3 del LTC4296, igual que antes de
+ * separar las placas. El MFS necesita un quinto (`port4` = slot Port 6,
+ * lineas SCCP en P2.23/P2.24), pero anadirlo dejo la imagen SIN ARRANCAR
+ * (PC en ROM, ni PSE ni switch) -- ver FLASHEO.md §6. Este fichero conserva
+ * el estado que SI arranca; tener la placa separada es justo lo que permite
+ * reintentarlo sin arriesgar al MPS. Al reintentar, bisecar y leer el PC
+ * tras el POR antes de dar nada por bueno.
+ */
+
 /dts-v1/;
 
 #include <adi/max32/max32690.dtsi>
