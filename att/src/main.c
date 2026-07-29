@@ -708,58 +708,6 @@ static int spe_tx(struct net_if *iface, uint32_t seq)
 }
 
 /* ---------------- main ---------------- */
-/* --- vigilante del enlace SPE ---------------------------------------
- * El ADIN2111 arranca ANTES que main(), con K1 aun desenergizado y por
- * tanto fuera de la linea: entrena contra nada. Conmutar K1 reproduce el
- * desconectar-y-reconectar el cable, que es lo unico que reengancha.
- */
-#define SPE_LINK_GRACE_TICKS   20   /* ~10 s antes del primer intento */
-#define SPE_LINK_RETRY_TICKS   30   /* ~15 s entre intentos */
-
-static void spe_link_kick(void)
-{
-	if (!device_is_ready(gpd)) {
-		return;
-	}
-	gpio_pin_set(gpd, BYPASS_EN_PIN, 0);   /* ADIN2111 fuera del par */
-	k_msleep(300);
-	gpio_pin_set(gpd, BYPASS_EN_PIN, 1);   /* y dentro otra vez */
-	k_msleep(200);
-}
-
-/* Devuelve true si alguna iface tiene portadora. */
-static bool spe_any_carrier(void)
-{
-	for (int i = 1; i <= 2; i++) {
-		struct net_if *f = net_if_get_by_index(i);
-
-		if (f && net_if_is_carrier_ok(f)) {
-			return true;
-		}
-	}
-	return false;
-}
-
-static void spe_link_watchdog(void)
-{
-	static uint32_t ticks;
-	static uint32_t kicks;
-
-	if (spe_any_carrier()) {
-		ticks = 0;
-		kicks = 0;
-		return;
-	}
-	if (++ticks < (kicks ? SPE_LINK_RETRY_TICKS : SPE_LINK_GRACE_TICKS)) {
-		return;
-	}
-	ticks = 0;
-	kicks++;
-	LOG_WRN("SPE sin portadora: conmutando K1 para renegociar (intento %u)",
-		kicks);
-	spe_link_kick();
-}
-
 /* --- OTA: confirmacion condicionada al enlace SPE ---------------------
  * Numero de envios SPE correctos SEGUIDOS que exigimos antes de confirmar
  * la imagen. Con push=500ms son ~2 s de enlace demostrado.
@@ -909,7 +857,6 @@ int main(void)
 			LOG_WRN("SPE: socket cerrado, reintentando...");
 			spe_tx_init(iface);
 		}
-		spe_link_watchdog();
 		{
 			/* transmitir por la PRIMERA iface con portadora, sea cual sea */
 			struct net_if *o = NULL;
