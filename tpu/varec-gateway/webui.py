@@ -113,11 +113,6 @@ LOGIN_PAGE = """<!doctype html>
  button:hover{background:#2f7ae8}
  .err{margin-top:16px;padding:9px 12px;border-radius:7px;background:#3b1d22;
   border:1px solid #6b2a33;color:#ffb4bd;font-size:13px}
- .calpt{border:1px solid #2b3846;border-radius:8px;padding:4px 12px 10px;margin:14px 0}
- .calpt h3{margin:10px 0 4px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#8b98a5}
- .calin{display:flex;gap:8px;flex:1;align-items:center}
- .calin input{flex:1;min-width:0}
- .mini{margin-left:0;padding:6px 12px;font-size:13px;white-space:nowrap}
 </style></head><body>
 <form method="POST" action="/login">
   <h1>__SITE__</h1>
@@ -303,6 +298,11 @@ PAGE = r"""<!doctype html>
  .mut{color:var(--mut);font-size:13px}
  .hd{display:flex;align-items:center;gap:10px;margin-bottom:12px}
  .hd h2{margin:0}
+ .calpt{border:1px solid #2b3846;border-radius:8px;padding:4px 12px 10px;margin:14px 0}
+ .calpt h3{margin:10px 0 4px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#8b98a5}
+ .calin{display:flex;flex-wrap:nowrap;gap:8px;align-items:center}
+ .calin input{flex:1 1 auto;width:auto;min-width:0}
+ .mini{margin-left:0;padding:6px 12px;font-size:13px;white-space:nowrap;flex:0 0 auto}
 </style></head><body>
 <header>
   <h1 id="site">Pasarela Varec</h1>
