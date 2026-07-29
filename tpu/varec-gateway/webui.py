@@ -365,7 +365,14 @@ PAGE = r"""<!doctype html>
       <div class="row"><label>Nivel real</label>
         <span class="calin"><input type="number" id="cb_l" placeholder="mm"></span></div>
     </div>
-    <div class="row"><label>Unidad</label><input type="text" id="c_u" value="mm"></div>
+    <div class="row"><label>Unidad</label>
+      <input type="text" id="c_u" value="mm" list="unidades"></div>
+    <datalist id="unidades">
+      <option value="mm"><option value="cm"><option value="m">
+      <option value="in"><option value="ft"><option value="%">
+      <option value="L"><option value="m3"><option value="gal"><option value="bbl">
+    </datalist>
+    <p class="mut" id="cwarn" style="margin:6px 0 0;font-size:12px"></p>
     <p id="calc" class="mut" style="margin:10px 0"></p>
     <div style="display:flex;gap:8px;margin-top:6px">
       <button id="calsave" style="flex:1">Guardar</button>
@@ -539,7 +546,7 @@ function calOpen(id){
   $c('calm').textContent = (t.scale!=null)
     ? 'Actual: escala '+(+t.scale).toFixed(6)+' / offset '+(+t.offset).toFixed(2)
     : 'Sin calibrar: el valor mostrado son los pulsos crudos.';
-  calCalc();
+  calCalc(); calWarn();
   $c('calbg').style.display='flex';
 }
 function calNow(campo){
@@ -547,7 +554,21 @@ function calNow(campo){
   if(!t || t.count==null){ $c('calm').textContent='Ese sensor no reporta pulsos ahora.'; return; }
   $c(campo).value = t.count; calCalc();
 }
-['ca_c','ca_l','cb_c','cb_l','c_u'].forEach(id=>{ const e=$c(id); if(e) e.oninput=calCalc; });
+const VOL = ['l','m3','gal','bbl','galon','galones','litro','litros'];
+function calWarn(){
+  const u = ($c('c_u').value||'').trim().toLowerCase();
+  const w = $c('cwarn');
+  if(!w) return;
+  if(VOL.includes(u)){
+    w.innerHTML = '<span style="color:#ffd479">Calibrar en volumen supone que el '
+      + 'tanque es <b>vertical de secci&oacute;n constante</b>. En uno horizontal o con '
+      + 'fondos abombados el volumen no crece lineal con el nivel y la recta '
+      + 'fallar&aacute; en los extremos: en ese caso calibra en unidades de longitud.</span>';
+  } else { w.textContent = ''; }
+}
+['ca_c','ca_l','cb_c','cb_l','c_u'].forEach(id=>{
+  const e=$c(id); if(e) e.oninput=()=>{ calCalc(); calWarn(); };
+});
 if($c('ca_now')) $c('ca_now').onclick=()=>calNow('ca_c');
 if($c('cb_now')) $c('cb_now').onclick=()=>calNow('cb_c');
 if($c('calclose')) $c('calclose').onclick=()=>{ $c('calbg').style.display='none'; };
