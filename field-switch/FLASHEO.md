@@ -8,8 +8,16 @@ y todo lo necesario para grabarlo en una placa nueva.
 ## 1. El firmware
 
 ```
-prebuilt/mfs_clean_class13.sbin      615 792 bytes
+prebuilt/mfs_class13_port6.sbin   615 956 B   <- FIRMWARE ACTUAL (jump 0x10005fec)
+prebuilt/mfs_class13_port6.bin    615 636 B      (sin firmar, trazabilidad)
+prebuilt/mfs_clean_class13.sbin   615 792 B   <- anterior, sin el Port 6
 ```
+
+> **Regenerado el 2026-07-29** desde el fuente de esta rama: artefacto y codigo
+> coinciden. Incluye el Port 6 habilitado **y** los dos arreglos del hilo lector
+> del ADIN6310 (un error de lectura ya no mata la comunicacion para siempre).
+> ⚠️ **La placa de banco tiene grabada la version ANTERIOR** — regrabar con esta
+> cuando se pueda hacer un POR.
 
 | | |
 |---|---|
