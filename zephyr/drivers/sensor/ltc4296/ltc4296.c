@@ -1235,7 +1235,10 @@ static int ltc4296_init(const struct device *dev)
 		return -ENODEV;
 	}
 
-	for (int i = 0; i < 4; i++){
+	/* LTC4296_MAX_PORTS, no 4: el MFS usa un quinto puerto PSE (slot Port
+	 * 6). El guardia `.port` de abajo salta los puertos que la placa no
+	 * declara, asi que esto es inocuo en placas de 4 (MPS-04P). */
+	for (int i = 0; i < LTC4296_MAX_PORTS; i++){
 		if (cfg->port_config[i].sccpo_gpio.port) {
 			if (!gpio_is_ready_dt(&cfg->port_config[i].sccpo_gpio)) {
 				//LOG_ERR("GPIO device not ready");
@@ -1246,7 +1249,7 @@ static int ltc4296_init(const struct device *dev)
 		}
 	}
 
-	for (int i = 0; i < 4; i++){
+	for (int i = 0; i < LTC4296_MAX_PORTS; i++){
 		if (cfg->port_config[i].sccpi_gpio.port) {
 			if (!gpio_is_ready_dt(&cfg->port_config[i].sccpi_gpio)) {
 				//LOG_ERR("GPIO device not ready");
@@ -1274,6 +1277,14 @@ static const struct sensor_driver_api ltc4296_driver_api = {
 		.hs_resistor = DT_PROP_OR(DT_CHILD(DT_DRV_INST(parent), inst), adi_hs_resistor, 0),		\
 	}												\
 
+/* Un puerto que NO existe en el devicetree queda a ceros, y `power_class` 0
+ * es LTC4296_PSE_DISABLED: el probe lo deshabilita. Nunca entrega potencia
+ * por omision. Asi el mismo driver sirve a una placa de 4 puertos PSE
+ * (MPS-04P) y a una de 5 (MFS, cuyo slot Port 6 es el port4). */
+#define LTC4296_PORT_INIT_OPT(parent, inst)						\
+	COND_CODE_1(DT_NODE_EXISTS(DT_CHILD(DT_DRV_INST(parent), inst)),		\
+		    (LTC4296_PORT_INIT(parent, inst)), ({0}))
+
 #define LTC4296_DEFINE(inst)                                                                       \
 	static struct ltc4296_data ltc4296_data_##inst;                                            \
                                                                                                    \
@@ -1285,6 +1296,7 @@ static const struct sensor_driver_api ltc4296_driver_api = {
 		.port_config[1] = LTC4296_PORT_INIT(inst, port1),				  \
 		.port_config[2] = LTC4296_PORT_INIT(inst, port2),				  \
 		.port_config[3] = LTC4296_PORT_INIT(inst, port3),				  \
+		.port_config[4] = LTC4296_PORT_INIT_OPT(inst, port4),				  \
 	};                                                                                         \
                                                                                                    \
 	SENSOR_DEVICE_DT_INST_DEFINE(inst, ltc4296_init, NULL, &ltc4296_data_##inst,               \
