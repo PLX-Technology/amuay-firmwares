@@ -546,7 +546,7 @@ function calOpen(id){
   $c('calm').textContent = (t.scale!=null)
     ? 'Actual: escala '+(+t.scale).toFixed(6)+' / offset '+(+t.offset).toFixed(2)
     : 'Sin calibrar: el valor mostrado son los pulsos crudos.';
-  calCalc(); calWarn();
+  calCalc(); calWarn(); calUnit();
   $c('calbg').style.display='flex';
 }
 function calNow(campo){
@@ -555,6 +555,11 @@ function calNow(campo){
   $c(campo).value = t.count; calCalc();
 }
 const VOL = ['l','m3','gal','bbl','galon','galones','litro','litros'];
+function calUnit(){
+  const u = ($c('c_u').value||'').trim() || 'mm';
+  if($c('ca_l')) $c('ca_l').placeholder = u;
+  if($c('cb_l')) $c('cb_l').placeholder = u;
+}
 function calWarn(){
   const u = ($c('c_u').value||'').trim().toLowerCase();
   const w = $c('cwarn');
@@ -567,7 +572,7 @@ function calWarn(){
   } else { w.textContent = ''; }
 }
 ['ca_c','ca_l','cb_c','cb_l','c_u'].forEach(id=>{
-  const e=$c(id); if(e) e.oninput=()=>{ calCalc(); calWarn(); };
+  const e=$c(id); if(e) e.oninput=()=>{ calCalc(); calWarn(); calUnit(); };
 });
 if($c('ca_now')) $c('ca_now').onclick=()=>calNow('ca_c');
 if($c('cb_now')) $c('cb_now').onclick=()=>calNow('cb_c');
