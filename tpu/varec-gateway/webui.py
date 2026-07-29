@@ -113,6 +113,7 @@ LOGIN_PAGE = """<!doctype html>
  button:hover{background:#2f7ae8}
  .err{margin-top:16px;padding:9px 12px;border-radius:7px;background:#3b1d22;
   border:1px solid #6b2a33;color:#ffb4bd;font-size:13px}
+ .mini{margin-left:8px;padding:6px 10px;font-size:13px}
 </style></head><body>
 <form method="POST" action="/login">
   <h1>__SITE__</h1>
@@ -318,30 +319,6 @@ PAGE = r"""<!doctype html>
         <tr><td colspan="11" class="mut">cargando…</td></tr></tbody></table>
     </div>
 
-    <div class="card" id="cal">
-      <h2>Calibración</h2>
-      <p class="mut" style="margin:0 0 12px">Dos puntos bastan: la cinta perforada
-        avanza sobre un piñón, así que los milímetros por pulso son constantes y la
-        relación es una recta. <b>Tómalos lo más separados que puedas</b> — dos puntos
-        próximos disparan el error de la pendiente. Un tercer punto sirve para
-        <i>comprobar</i>, no para afinar: si se desvía, revisa la mecánica.</p>
-      <div class="row"><label>Tanque</label><select id="calt"></select></div>
-      <div class="row"><label>Punto A — pulsos</label>
-        <input type="number" id="ca_c"><button id="ca_now"
-          style="margin-left:8px;padding:6px 10px;font-size:13px">Leer ahora</button></div>
-      <div class="row"><label>Punto A — nivel real</label>
-        <input type="number" id="ca_l" placeholder="mm"></div>
-      <div class="row"><label>Punto B — pulsos</label>
-        <input type="number" id="cb_c"><button id="cb_now"
-          style="margin-left:8px;padding:6px 10px;font-size:13px">Leer ahora</button></div>
-      <div class="row"><label>Punto B — nivel real</label>
-        <input type="number" id="cb_l" placeholder="mm"></div>
-      <div class="row"><label>Unidad</label><input type="text" id="c_u" value="mm"></div>
-      <p id="calc" class="mut" style="margin:8px 0"></p>
-      <button id="calsave">Guardar calibración</button>
-      <p id="calm" class="mut" style="margin:8px 0 0"></p>
-    </div>
-
     <div class="card">
       <p class="mut" style="margin:10px 0 0">El <b>tank_id</b> vive en la EEPROM de cada
         sensor y viaja en cada trama: al cambiarlo aquí se escribe <b>en el sensor</b> por
@@ -358,6 +335,31 @@ PAGE = r"""<!doctype html>
       (unos segundos).</span>
   </div>
 </main>
+<div id="calbg" style="display:none;position:fixed;inset:0;background:#000a;z-index:50;
+     align-items:center;justify-content:center;padding:16px">
+  <div class="card" style="width:min(94vw,430px);margin:0;max-height:92vh;overflow:auto">
+    <h2 style="margin-top:0">Calibrar <span id="caltit"></span></h2>
+    <p class="mut" style="margin:0 0 12px;font-size:13px">Dos puntos bastan: la cinta
+      avanza sobre un pi&ntilde;&oacute;n, as&iacute; que los mm por pulso son constantes.
+      <b>Sep&aacute;ralos todo lo que puedas.</b> Un tercer punto sirve para
+      <i>comprobar</i>, no para afinar: si se desv&iacute;a, revisa la mec&aacute;nica.</p>
+    <div class="row"><label>Punto A &mdash; pulsos</label>
+      <input type="number" id="ca_c"><button id="ca_now" class="mini">Leer</button></div>
+    <div class="row"><label>Punto A &mdash; nivel real</label>
+      <input type="number" id="ca_l" placeholder="mm"></div>
+    <div class="row"><label>Punto B &mdash; pulsos</label>
+      <input type="number" id="cb_c"><button id="cb_now" class="mini">Leer</button></div>
+    <div class="row"><label>Punto B &mdash; nivel real</label>
+      <input type="number" id="cb_l" placeholder="mm"></div>
+    <div class="row"><label>Unidad</label><input type="text" id="c_u" value="mm"></div>
+    <p id="calc" class="mut" style="margin:10px 0"></p>
+    <div style="display:flex;gap:8px;margin-top:6px">
+      <button id="calsave" style="flex:1">Guardar</button>
+      <button id="calclose" style="flex:0 0 auto;background:#2b3846">Cancelar</button>
+    </div>
+    <p id="calm" class="mut" style="margin:10px 0 0"></p>
+  </div>
+</div>
 <script>
 const SECS = {
   site:       {t:"Identificación", nosw:1,
@@ -461,6 +463,7 @@ async function setPeriodo(sel){
 async function tanks(){
   // No repintar mientras se edita: borraria lo que el usuario esta escribiendo.
   if(document.querySelector('.tid:focus, .pms:focus')) return;
+  if($c('calbg') && $c('calbg').style.display==='flex') return;
   try{
     const r=await fetch('/api/tanks'); const d=await r.json();
     $('#hdr').textContent = d.n+' tanque'+(d.n==1?'':'s');
@@ -476,8 +479,10 @@ async function tanks(){
       <td>${selPeriodo(t)}</td>
       <td>${fechaHora(t.ts)}<br><span class="mut" style="font-size:11px">${t.age_s!=null? 'hace '+hace(t.age_s) : ''}</span></td>
       <td><span class="dot ${t.online?'up':'down'}"></span>${t.online?'en línea':'sin señal'}</td>
-      <td><button class="sid" data-id="${t.tank_id}" style="padding:5px 10px;font-size:13px"
-           disabled>Guardar</button></td>
+      <td style="white-space:nowrap"><button class="sid" data-id="${t.tank_id}"
+           style="padding:5px 10px;font-size:13px" disabled>Guardar</button>
+        <button class="cal" data-id="${t.tank_id}"
+           style="padding:5px 10px;font-size:13px;background:#2b3846">Calibrar</button></td>
       </tr>`).join('') :
       '<tr><td colspan="11" class="mut">ningún tanque dado de alta todavía</td></tr>';
     // El boton solo se activa si el valor cambio: evita escrituras accidentales
@@ -487,52 +492,60 @@ async function tanks(){
       b.disabled = (x.value==x.dataset.old || !x.value);
     });
     document.querySelectorAll('.sid').forEach(b=>b.onclick=()=>saveId(b));
-    calRefresh(d.tanks);
+    CALT = d.tanks;
+    document.querySelectorAll('.cal').forEach(b=>b.onclick=()=>calOpen(+b.dataset.id));
     document.querySelectorAll('.pms').forEach(x=>x.onchange=()=>setPeriodo(x));
   }catch(e){ $('#hdr').textContent='sin conexión'; }
 }
 
-let CALT = [];
-function calRefresh(t){
-  CALT = t;
-  const sel = $('#calt'), prev = sel.value;
-  sel.innerHTML = t.map(x=>`<option value="${x.tank_id}">${x.tank_id} — ${x.name||''}</option>`).join('');
-  if(prev) sel.value = prev;
-  calCalc();
-}
+let CALT = [], CALID = null;
+const $c = id => document.getElementById(id);
+
 function calCalc(){
-  const ac=+$('#ca_c').value, al=+$('#ca_l').value;
-  const bc=+$('#cb_c').value, bl=+$('#cb_l').value;
-  const el=$('#calc');
-  if($('#ca_c').value===''||$('#cb_c').value===''||$('#ca_l').value===''||$('#cb_l').value===''){
+  const ac=+$c('ca_c').value, al=+$c('ca_l').value;
+  const bc=+$c('cb_c').value, bl=+$c('cb_l').value;
+  const el=$c('calc');
+  if(['ca_c','ca_l','cb_c','cb_l'].some(k=>$c(k).value==='')){
     el.textContent='Introduce los dos puntos.'; return null; }
-  if(ac===bc){ el.textContent='⚠ Los dos puntos tienen los mismos pulsos: no definen una recta.'; return null; }
-  const scale=(bl-al)/(bc-ac), offset=al-scale*ac;
-  const sep=Math.abs(bc-ac);
-  el.innerHTML = `escala = <b>${scale.toFixed(6)}</b> ${$('#c_u').value}/pulso &nbsp;·&nbsp; `
-    + `offset = <b>${offset.toFixed(2)}</b>`
-    + (sep<50 ? ' &nbsp;<span style="color:#ffb4bd">⚠ puntos muy próximos: la pendiente será imprecisa</span>' : '');
-  return {scale, offset};
+  if(ac===bc){ el.innerHTML='<span style="color:#ffb4bd">Los dos puntos tienen los mismos '
+    + 'pulsos: no definen una recta.</span>'; return null; }
+  const scale=(bl-al)/(bc-ac), offset=al-scale*ac, sep=Math.abs(bc-ac);
+  el.innerHTML = 'escala <b>'+scale.toFixed(6)+'</b> '+$c('c_u').value+'/pulso &middot; '
+    + 'offset <b>'+offset.toFixed(2)+'</b>'
+    + (sep<50 ? '<br><span style="color:#ffb4bd">Puntos muy pr&oacute;ximos: la pendiente '
+      + 'saldr&aacute; imprecisa</span>' : '');
+  return {scale:scale, offset:offset};
 }
-['ca_c','ca_l','cb_c','cb_l','c_u'].forEach(id=>{
-  const e=$('#'+id); if(e) e.oninput=calCalc;
-});
+function calOpen(id){
+  CALID = id;
+  const t = CALT.find(x=>x.tank_id===id) || {};
+  $c('caltit').textContent = 'tanque '+id + (t.name? ' - '+t.name : '');
+  ['ca_c','ca_l','cb_c','cb_l'].forEach(k=>$c(k).value='');
+  $c('c_u').value = t.unit || 'mm';
+  $c('calm').textContent = (t.scale!=null)
+    ? 'Actual: escala '+(+t.scale).toFixed(6)+' / offset '+(+t.offset).toFixed(2)
+    : 'Sin calibrar: el valor mostrado son los pulsos crudos.';
+  calCalc();
+  $c('calbg').style.display='flex';
+}
 function calNow(campo){
-  const id=+$('#calt').value, t=CALT.find(x=>x.tank_id===id);
-  if(!t || t.count==null){ $('#calm').textContent='Ese tanque no está reportando pulsos ahora.'; return; }
-  $('#'+campo).value = t.count; calCalc();
+  const t = CALT.find(x=>x.tank_id===CALID);
+  if(!t || t.count==null){ $c('calm').textContent='Ese sensor no reporta pulsos ahora.'; return; }
+  $c(campo).value = t.count; calCalc();
 }
-if($('#ca_now')) $('#ca_now').onclick=()=>calNow('ca_c');
-if($('#cb_now')) $('#cb_now').onclick=()=>calNow('cb_c');
-if($('#calsave')) $('#calsave').onclick=async()=>{
+['ca_c','ca_l','cb_c','cb_l','c_u'].forEach(id=>{ const e=$c(id); if(e) e.oninput=calCalc; });
+if($c('ca_now')) $c('ca_now').onclick=()=>calNow('ca_c');
+if($c('cb_now')) $c('cb_now').onclick=()=>calNow('cb_c');
+if($c('calclose')) $c('calclose').onclick=()=>{ $c('calbg').style.display='none'; };
+if($c('calbg')) $c('calbg').onclick=e=>{ if(e.target===$c('calbg')) $c('calbg').style.display='none'; };
+if($c('calsave')) $c('calsave').onclick=async()=>{
   const r=calCalc(); if(!r) return;
-  const id=$('#calt').value;
-  const res=await fetch(`/api/tank/${id}/config`,{method:'POST',
+  const res=await fetch('/api/tank/'+CALID+'/config',{method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({scale:r.scale, offset:r.offset, unit:$('#c_u').value})});
+    body:JSON.stringify({scale:r.scale, offset:r.offset, unit:$c('c_u').value})});
   const d=await res.json();
-  $('#calm').textContent = res.ok ? 'Guardada. Se aplica a las medidas siguientes.'
-                                  : ('No se guardó: '+(d.error||'error'));
+  if(res.ok){ $c('calbg').style.display='none'; tanks(); }
+  else $c('calm').textContent='No se guardo: '+(d.error||'error');
 };
 
 function render(){

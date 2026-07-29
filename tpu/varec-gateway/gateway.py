@@ -273,8 +273,9 @@ class Store:
         c = self._conn()
         out, seen = [], set()
         t_now = now()
-        for tid, name, mac, unit, last_seen in c.execute(
-                "SELECT tank_id,name,mac,unit,last_seen FROM tanks ORDER BY tank_id"):
+        for tid, name, mac, unit, last_seen, scale, offset in c.execute(
+                "SELECT tank_id,name,mac,unit,last_seen,scale,offset FROM tanks"
+                " ORDER BY tank_id"):
             seen.add(tid)
             # Periodo OBSERVADO entre las dos ultimas muestras. Es la prueba
             # de que un cambio de periodo llego de verdad al sensor.
@@ -287,6 +288,7 @@ class Store:
             if tid in live:
                 r = dict(live[tid])
                 r["period_s"] = period
+                r["scale"], r["offset"] = scale, offset
                 out.append(r)
                 continue
             # No reporta: reconstruir su ultima medida conocida del historico
@@ -304,6 +306,7 @@ class Store:
                 "humi_rh": row[5] if row else None,
                 "ts": ts, "age_s": (t_now - ts) if ts else None,
                 "period_s": period, "online": False,
+                "scale": scale, "offset": offset,
             })
         # Vivos que aun no estan en la tabla (alta en curso)
         for tid, r in live.items():
