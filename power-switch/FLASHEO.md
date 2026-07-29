@@ -120,6 +120,59 @@ En este equipo: `C:/MaximSDK/Tools/OpenOCD/openocd.exe`, scripts en
 
 ---
 
+## 3.bis ⚠️ Aprovisionar el ADIN6310 de una placa nueva (OBLIGATORIO)
+
+**Una placa nueva trae el ADIN6310 EN BLANCO** y el firmware de produccion
+**NO consigue cargarselo**: la transferencia muere en el 40 % con
+`SMP_PROG_SERVICE_NAK` -> `error 246` (`SES_FWU_ABORTED`) ->
+`Firmware update failed (-101)`, y `SES_AddDevice` nunca completa. Sintoma:
+el MAX32690 arranca (PC en `0x1000xxxx`) pero **ningun puerto funciona** y
+`g_link` se queda todo a cero (el bucle principal nunca corre).
+
+**El firmware que SI lo carga** es uno de jul-2026, anterior a las
+protecciones del LTC4296:
+
+```
+prebuilt/adin6310_provision.sbin   615 712 B   jump 0x10005f84
+```
+
+### Procedimiento (2 pasos, verificado 2026-07-29)
+
+> ⚠️⚠️ **LOS 50 V DEBEN ESTAR DESCONECTADOS.** Este firmware es de la epoca
+> de las quemas y **energiza los puertos SIN NEGOCIAR** -- es lo que
+> destruyo dos LTC4296. Sin el riel de 50 V no puede entregar nada y el paso
+> es seguro; con el conectado, NO. El aprovisionamiento del ADIN6310 va por
+> SPI y no toca el LTC4296.
+
+1. Grabar `adin6310_provision.sbin` y hacer **POR de ~10 s** (un corte breve
+   no resetea el ADIN6310: nuestro firmware quito el pulso de reset porque
+   P1.8 resetea la placa entera). Esperar ~30 s.
+2. Grabar `pse_safe_class13.sbin` y **POR de ~10 s** otra vez.
+
+**El firmware del ADIN6310 PERSISTE entre cortes de alimentacion.** Tras el
+paso 1 el switch queda provisto para siempre; el paso 2 solo devuelve el
+firmware seguro al MAX32690.
+
+### Como saber que funciono
+
+Leer **`g_link[6]`** por SWD (`0x20097980` en el build de `pse_safe_class13`):
+
+| Lectura | Significado |
+|---|---|
+| todo `0` | El bucle principal NO corre -> `SES_AddDevice` fallo, sigue sin aprovisionar |
+| valores mezclados (p.ej. `1,0,1,1,1,0`) | **Configuracion completa**: AddDevice + InitializePorts + VLANs OK |
+
+Confirmacion adicional con el log en RAM (§9): si el arranque va de
+`SES_Init` a `AddDevice` en ~15 ms **sin ninguna linea de "Firmware update in
+progress"**, el switch ya tiene su firmware. Si aparecen esas lineas, esta
+cargandolo.
+
+⚠️ **`g_link` NO sirve para juzgar puertos individuales** (una direccion MDIO
+vacia se lee `0xffff` = link fantasma). Aqui se usa solo como testigo de que
+el bucle principal se ejecuta.
+
+---
+
 ## 4. Aprovisionamiento de la CRK (placa virgen)
 
 Sin la **CRK** en OTP el ROM no valida la imagen firmada y **no auto-arranca**,
