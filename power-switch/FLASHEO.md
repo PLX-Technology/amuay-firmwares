@@ -14,30 +14,19 @@ separarse.
 ## 1. El firmware
 
 ```
-prebuilt/pse_safe_class13.sbin        617 252 B   <- LO QUE ESTA GRABADO en la placa
-prebuilt/pse_safe_class13.bin         616 932 B      (sin firmar, trazabilidad)
+prebuilt/pse_safe_class13.sbin     617 412 B   <- FIRMWARE DE PRODUCCION (jump 0x1000650c)
+prebuilt/pse_safe_class13.bin      617 092 B      (sin firmar, trazabilidad)
 
-prebuilt/pse_safe_class13_5port.sbin  617 252 B   <- lo que produce el fuente HOY
-prebuilt/pse_safe_class13_5port.bin   616 932 B      (jump 0x100064f8, payload 3368f2ab)
+prebuilt/adin6310_provision.sbin   615 712 B   <- solo para aprovisionar (ver 3.bis)
+prebuilt/adin6310_provision.bin    615 392 B      ⚠️ ENERGIZA SIN NEGOCIAR
 ```
 
-> **Por que hay dos.** El 2026-07-29 el driver `ltc4296` paso a soportar un
-> quinto puerto PSE, que necesita el field switch (rama `mfs`). Es codigo
-> compartido, asi que el MPS tambien se recompila distinto: los dos bucles de
-> configuracion de GPIO pasaron de `i < 4` a `LTC4296_MAX_PORTS`. **Mismo
-> tamano, contenido distinto** (`3368f2ab` vs `18090fcc`).
->
-> **El comportamiento del MPS no cambia**: sin `port4` en su devicetree la
-> entrada queda a ceros (`LTC4296_PSE_DISABLED`) y el guardia `.port` hace que
-> los bucles la salten. Verificado: devicetree resuelto con 4 puertos y
-> `power-class = 0x5` en los cuatro, igual que antes.
->
-> La placa sigue con `pse_safe_class13.sbin`. Al grabar
-> `pse_safe_class13_5port.sbin`, artefacto y fuente vuelven a coincidir y este
-> bloque se puede colapsar a un solo firmware.
+> **Regenerado el 2026-07-29** desde el fuente de esta rama, asi que artefacto
+> y codigo coinciden. Incluye los dos arreglos del hilo lector del ADIN6310
+> (ver el commit "el hilo lector ... ya no muere al primer error"), que el
+> `.sbin` anterior no tenia.
 
-| | |
-|---|---|
+---|---|
 | Placa | MPS-04P |
 | Switch | ADIN6310 — 4 puertos SPE (J3–J6), RJ45, uplink PCIe a la TPU |
 | PSE | LTC4296, **SPoE Clase 13** (50–58 V, 231 mA) en los 4 puertos |
@@ -336,21 +325,48 @@ El fuente se recuperó de la TPU y se comprobó contra `build_final`:
 
 Mapeo conector↔puerto **1:1** (J3=Port1 … J6=Port4), ni invertido ni corrido.
 
-### RJ45 (Port 5) — configurado, sin verificar
+### RJ45 (Port 5) — ⛔ NO ENLAZA: los straps `MACIF_SEL` no hacen efecto
 
-El firmware **sí** lo declara (`SES_rmiiMode`, `SES_phyADIN1300`, addr MDIO 1,
-100 Mb full dúplex) y además intenta resolver por software el strap de hardware:
+**Medido el 2026-07-29** con la placa ya aprovisionada y el bloque de
+diagnostico ejecutandose (antes nunca corria: `main` moria antes):
 
-```c
-/* El ADIN1300 arranca en RGMII. Habilitarle RMII poniendo
- * GE_RMII_CFG (MMD 0x1E, reg 0xFF24) bit0 = RMII_EN */
-SES_ReadPhyReg(SES_macPort5, 0x1EFF24, &v);
-SES_WritePhyReg(SES_macPort5, 0x1EFF24, v | 0x0001);
-```
+| Lectura | Valor | Significado |
+|---|---|---|
+| Control (PHYID de un ADIN1100) | `0x0283` / `0xbc81` | ✅ el canal de lectura es **valido** |
+| PHYID del ADIN1300 | `0x0283` / `0xbc30` | ✅ el PHY **vive** y responde en la addr MDIO 1 |
+| `BMCR` | **`0x1040`** | autoneg ON y **velocidad = 1000 Mb** |
+| `BMSR` (leido 2 veces) | `0x7949` | **sin enlace** (bit2=0), **autoneg sin completar** (bit5=0) |
+| `GE_RMII_CFG` (MMD 0x1E 0xFF24) | `0x0000` | inalcanzable via SES (delator conocido) |
 
-**No hay ninguna medida que confirme que enlaza.** El pendiente de hardware
-(poblar pull-ups de 10 kΩ a VDDIO en `MACIF_SEL0` pin 34 y `MACIF_SEL1` pin 35)
-sigue en el README raíz. Y `g_link[5]` **no sirve de prueba** — ver abajo.
+**`BMCR = 0x1040` es la prueba**: los bits de velocidad codifican **1000 Mb**,
+o sea que el ADIN1300 arranco en su modo por defecto **RGMII/Gigabit**. Si los
+straps lo hubieran puesto en RMII estaria limitado a 100 Mb.
+
+Y eso explica el resto: en RGMII el PHY espera un reloj de **125 MHz**, pero el
+ADIN6310 entrega los **50 MHz de RMII**. Sin el reloj de su modo, el nucleo
+digital no opera -> no completa autoneg -> no hay enlace de cobre, aunque el
+cable este puesto y el MDIO responda (va en su propio dominio de reloj).
+
+**PARA EL ELECTRONICO — medida concreta:** tension continua en **pin 34
+(`MACIF_SEL0`)** y **pin 35 (`MACIF_SEL1`)** del ADIN1300 **durante el
+arranque**. Para RMII los **dos** deben estar cerca de VDDIO. Si alguno esta
+bajo, ese pull-up no vence al pull-down interno del chip: resistencia en el pin
+equivocado, valor de 10 kΩ demasiado alto, o solo se poblo uno.
+
+**Descartado con medidas:** no es el firmware (`port5` esta bien configurado en
+RMII/`SES_phyADIN1300`/addr 1/100M y el switch entrega el reloj RMII), no es el
+cable, no es el PHY, y no es el aprovisionamiento del switch (ya resuelto).
+
+> **No se puede forzar por software.** `GE_RMII_CFG` vive en los MMD del
+> fabricante y **el API de SES no los alcanza**: las escrituras reportan exito
+> y no toman efecto — ese `0x0000` es el delator. Es strap de hardware o nada.
+> Probado a fondo en jul-2026, no reintentar.
+>
+> El firmware `adin_ethkick` de julio hacia un "kick" de 32 re-inicializaciones
+> barriendo direcciones MDIO, que entonces hacia linkear el RJ45. Probado hoy
+> con 8 re-inits de la config correcta: **no sirve** (`g_link[5]` sigue 0, las
+> 8 devuelven 0). Probablemente aquello compensaba el strap; con el strap mal
+> puesto no hay kick que valga.
 
 ### Bus MDIO — reglas que hay que respetar
 
