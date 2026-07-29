@@ -14,9 +14,27 @@ separarse.
 ## 1. El firmware
 
 ```
-prebuilt/pse_safe_class13.sbin      617 252 bytes   (firmado, es el que se graba)
-prebuilt/pse_safe_class13.bin       616 932 bytes   (sin firmar, para trazabilidad)
+prebuilt/pse_safe_class13.sbin        617 252 B   <- LO QUE ESTA GRABADO en la placa
+prebuilt/pse_safe_class13.bin         616 932 B      (sin firmar, trazabilidad)
+
+prebuilt/pse_safe_class13_5port.sbin  617 252 B   <- lo que produce el fuente HOY
+prebuilt/pse_safe_class13_5port.bin   616 932 B      (jump 0x100064f8, payload 3368f2ab)
 ```
+
+> **Por que hay dos.** El 2026-07-29 el driver `ltc4296` paso a soportar un
+> quinto puerto PSE, que necesita el field switch (rama `mfs`). Es codigo
+> compartido, asi que el MPS tambien se recompila distinto: los dos bucles de
+> configuracion de GPIO pasaron de `i < 4` a `LTC4296_MAX_PORTS`. **Mismo
+> tamano, contenido distinto** (`3368f2ab` vs `18090fcc`).
+>
+> **El comportamiento del MPS no cambia**: sin `port4` en su devicetree la
+> entrada queda a ceros (`LTC4296_PSE_DISABLED`) y el guardia `.port` hace que
+> los bucles la salten. Verificado: devicetree resuelto con 4 puertos y
+> `power-class = 0x5` en los cuatro, igual que antes.
+>
+> La placa sigue con `pse_safe_class13.sbin`. Al grabar
+> `pse_safe_class13_5port.sbin`, artefacto y fuente vuelven a coincidir y este
+> bloque se puede colapsar a un solo firmware.
 
 | | |
 |---|---|
@@ -42,6 +60,12 @@ anterior. Verificado en el fuente de esta rama:
   sea cual sea el estado previo del chip.
 - Protecciones por defecto intactas: TLIM, foldback, soft-start,
   `TINRUSH = 56.2 ms` finito, timers MFVDO/TOFF.
+- **El board dts deja los cuatro puertos en `LTC4296_PSE_DISABLED`** (desde
+  2026-07-29). Antes ponia `LTC4296_PSE`, que en el `probe()` del driver hace
+  `prebias APL + port_en` = **energiza sin negociar**; solo lo salvaba que el
+  `app.overlay` los subiera a clase 13. Un build sin ese overlay habria
+  energizado los cuatro slots. Ahora quien decide entregar es siempre la
+  aplicacion. **Cambio byte-neutro**: el devicetree resuelto no varia.
 
 **Reintento cada ~5 s** en el bucle principal, solo sobre los puertos que aún no
 entregan (`PxST` bits 2:0 ≠ 2); los que ya entregan no se tocan. Por eso no hace
