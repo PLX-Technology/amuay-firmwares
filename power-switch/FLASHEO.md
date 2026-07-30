@@ -433,11 +433,68 @@ absolutamente nada. Para saber si un puerto SPE enlaza de verdad, leer el PHY:
 
 ---
 
-## 7.ante ★★★ CAUSA REAL de que el MPS no negocie: **Vin por debajo del piso**
+## 7.raiz ★★★★ CAUSA RAÍZ: **el par SPE del MPS está INVERTIDO**
 
-**Síntoma que lo delata sin instrumentos: el LED de PWR del PSM no parpadea
-ni un instante.** Si no parpadea, el puerto **nunca entra en clasificación**,
-y entonces no hay nada que buscar en el SCCP: el fallo es anterior.
+**Defecto de hardware. Ninguna cantidad de firmware lo arregla.**
+
+Medido con el puerto retenido en clasificación 120 s (`mps_hold_clasif.tcl` /
+`mfs_hold_clasif.tcl`), multímetro en el **zócalo del slot**, mismos puntos y
+mismas puntas en las dos placas:
+
+| | `sccpi` en SEARCHING | multímetro | negocia |
+|---|---|---|---|
+| **MFS** slot Port 2 | 1 | **+5 V** | ✅ |
+| **MPS** slot 2 | 0 | **−5 V** | ❌ |
+
+### Cadena causal completa
+
+1. La polaridad del par SPE está cambiada en el zócalo del slot del MPS.
+2. El módulo PSM ve tensión inversa y sus diodos de protección de polaridad
+   (`D1`/`D2`, BAS516) **bloquean** — por eso **ningún módulo se ha dañado**.
+3. Sin firma de detección válida, el módulo **nunca levanta `sccpi`**.
+4. `sccp_reset_pulse` aborta en su primera instrucción con `PD_LINE_NOT_HIGH`.
+5. `retry_spoe_sccp` devuelve `DISCONTINUE_SCCP` = **`retry_rc = 1`**.
+6. Ningún puerto entrega jamás.
+
+**Explica lo que no encajaba:** los **cuatro** puertos del MPS fallan igual
+porque es un error común de trazado, no un defecto por puerto. Y el
+**Port 6 del MFS** (`p4`) falla idéntico — mismo síntoma, `sccpi` clavado en
+0 en SEARCHING. **Comprobar su polaridad: casi seguro la misma inversión.**
+Ese puerto se habilitó el 2026-07-29 y nunca se validó en hardware, así que
+el "✅ Port 6 habilitado" de `field-switch/FLASHEO.md` es cierto **solo a
+nivel de driver**.
+
+**La inversión está ANTES del módulo**, en el zócalo: si estuviera después
+(en el cable SPE), el módulo habría visto la polaridad correcta y `sccpi`
+habría subido. No sube ⇒ el módulo ya recibe el par al revés ⇒ **cambiar el
+cable no sirve de nada**, hay que corregir la placa.
+
+### Para Mayker
+
+Invertir el par SPE en los zócalos de slot del MPS-04P, y revisar el Port 6
+del MFS por lo mismo. Referencia sana: el slot Port 2 del MFS.
+
+### Cómo reproducir la medida
+
+La ventana de clasificación real dura **4 ms cada ~5 s** — no se puede pillar
+con un multímetro. Los scripts `*_hold_clasif.tcl` dejan el puerto retenido
+en clasificación 120 s con el núcleo halteado. Dos trampas ya resueltas
+dentro de ellos: **abortan si `GPIO2 OUTEN == 0`** (placa en la ROM: el reloj
+de SPI0 está apagado, las escrituras se pierden y todo lee `0x0000`), y la
+espera va **troceada en lecturas cada 2 s** porque un `sleep 60000` de golpe
+tumba el enlace CMSIS-DAP.
+
+---
+
+## 7.ante Requisito previo: **Vin tiene que llegar al piso de la clase**
+
+Esto **no** era la causa raíz (ver §7.raíz), pero **sí es un requisito
+previo**: con Vin por debajo del piso el puerto no llega ni a clasificar.
+
+⚠️ **El LED del PSM no sirve como indicador.** Se creyó que "no parpadea ⇒ no
+entra en clasificación", y es falso: la ventana dura **4 ms cada ~5 s** y es
+sencillamente invisible. El puerto entraba en clasificación perfectamente.
+Para saber si clasifica, leer `PxST` (estado 3 = SEARCHING), no mirar el LED.
 
 `retry_spoe_sccp` llama a `ltc4296_is_vin_valid` **antes** de clasificar. Si
 Vin está fuera de `ltc4296_spoe_vol_range_mv[board_class]`, sale con
