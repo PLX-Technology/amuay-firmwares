@@ -433,6 +433,74 @@ absolutamente nada. Para saber si un puerto SPE enlaza de verdad, leer el PHY:
 
 ---
 
+## 7.bis Diagnosticar por qué un puerto no negocia (SPoE / SCCP)
+
+Los registros que expone el firmware **no distinguen un PD conectado de un
+slot vacío**: los dos acaban en `retry_rc = 1` y `PxST = 0x3000`. Antes de
+sospechar del firmware o de la configuración, hay que separar los casos con
+dos medidas por SWD (`tools/ltc4296-swd/`, con el firmware corriendo, 2 min).
+
+### Por qué `retry_rc = 1` no dice nada
+
+`ADI_LTC_DISCONTINUE_SCCP` vale **1** y es el cajón de sastre de
+`retry_spoe_sccp`: recoge `PD_DETECTION_FAILED`, `PD_CRC_FAILED` **y**
+`PD_LINE_NOT_HIGH`. Solo `PD_NOT_PRESENT` (**4**) sale distinto. Un slot
+vacío da 1 y un puerto con la línea SCCP clavada también da 1.
+
+### Medida 1 — línea SCCP (`mps_sccp_ctrl.tcl`, solo lectura)
+
+`sccp_reset_pulse()` aborta en su **primera instrucción**:
+
+```c
+/* check if the line is high before reset pulse */
+if(!READ_LINE(dev))
+	return ADI_LTC_SCCP_PD_LINE_NOT_HIGH;
+```
+
+`sccpi` es ACTIVE_HIGH con pull-up, así que **en reposo debe leer 1** tanto
+si el slot está vacío como si hay un PD conforme (que idlea en alta
+impedancia). **`sccpi = 0` en reposo ⇒ ese puerto no negociará jamás.**
+
+**Control obligatorio antes de culpar al módulo:** leer también `sccpo`
+(`OUTEN` en `GPIO2+0x0C`, `OUT` en `GPIO2+0x18`). Si los cuatro puertos
+tienen el mismo estado de `sccpo` y solo uno lee `sccpi = 0`, el pull-down
+es **externo al MCU**. Estado normal medido: `OUT = 0x00000000`,
+`OUTEN = 0x00528000` (bits 15/17/20/22 = los cuatro `sccpo`).
+
+### Medida 2 — tensión de sondeo (`mps_vout_ab.tcl`)
+
+Con el puerto en clasificación, `GADC` sobre `Vout`:
+
+| Vout de sondeo | Significa |
+|---|---|
+| **~5145 mV** | par sano **o abierto** (es también lo que da un slot vacío) |
+| **35-70 mV** | **corto DC en el par** — módulo con `C10` perforado |
+
+Comparar siempre contra un slot vacío en la misma pasada: es el control.
+
+### Cómo se combinan
+
+| `sccpi` reposo | Vout sondeo | Diagnóstico |
+|---|---|---|
+| 1 | ~5145 mV | slot vacío, o PD que no responde al pulso de presencia |
+| 1 | 35-70 mV | **par en corto** (criba con óhmetro `PWR_P`↔`PWR_N`) |
+| **0** | ~5145 mV | **línea SCCP clavada a masa** con el par de potencia sano — cableado/PDM/módulo, no el firmware |
+| 0 | 35-70 mV | módulo perforado arrastrando también la línea |
+
+Para localizar el punto de la línea clavada, ir quitando eslabones **con la
+fuente apagada** (nunca hot-plug): primero el cable al PDM, después el
+módulo, después mover el módulo a otro slot. Si `sccpi` sube a 1 al retirar
+un eslabón, el culpable es ese.
+
+**Sospechar de una masa común** entre el PSE y el PD: el LTC4296 hace
+sensado de corriente por el **lado bajo**, así que `PWR_N` **no** está a
+masa. Cualquier retorno de masa externo entre las dos placas (sonda SWD,
+USB, malla del cable, misma fuente de banco) cortocircuita ese lado bajo y
+se lleva por delante la detección y el SCCP. Es la misma regla que prohíbe
+unir la masa de la ATT con la del field switch.
+
+---
+
 ## 8. Pendientes de hardware
 
 | Problema | Accion |
