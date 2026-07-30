@@ -491,6 +491,29 @@ Corolario: **`sccpo` accionado sin efecto sobre `sccpi` con un módulo
 insertado** significa que el FET del módulo no responde — o está atascado
 conduciendo (línea clavada a 0) o su gate no llega.
 
+### Caso resuelto así (2026-07-30): un PSM con el par SANO clavando el SCCP
+
+Secuencia de aislamiento, quitando un eslabón cada vez con la fuente apagada:
+
+| Estado | `sccpi0` | Conclusión |
+|---|---|---|
+| PSM en slot 1 + cable al PDM del MFS | **0** | algo clava la línea |
+| se quita el cable al PDM | **0** | cable y PDM **exonerados** |
+| se saca el PSM | **1** | ⇒ **el módulo PSM** (`GPIO2 IN` `0x2c250000`→`0x2c254000`) |
+
+Lo llamativo: **el par de potencia de ese módulo está sano** — sondeo
+5145 mV y óhmetro en MΩ entre `PWR_P` y `PWR_N`. O sea **no es el `C10`
+perforado**; es un defecto distinto que el cribado con óhmetro **no detecta**.
+
+**Medida para el banco (módulo suelto, fuera de la placa):** resistencia del
+pin **`SCCPI`** del conector **a GND**. Sano = abierto/MΩ. **≈5 Ω = `U3`
+(BSS123) conduciendo**, porque `R16` = 4.99 Ω está en serie de su fuente a
+masa. Es la firma exacta del sospechoso que ya estaba anotado desde julio
+("FET de escritura SCCP atascado ON").
+
+⇒ **Ampliar el cribado de módulos**: al óhmetro `PWR_P`↔`PWR_N` (que solo
+pilla el `C10` perforado) hay que añadir **`SCCPI`↔GND**, que pilla este.
+
 ### Descartado: el pin AUTO (pin 13) cableado distinto que en el MFS
 
 En el **MPS** el pin 13 (`AUTO`) va **directo a GND**; en el **MFS** lleva
@@ -551,7 +574,15 @@ criterio del registro.
 
 ### ⚠️ Antes de energizar una placa por primera vez
 
-**Cribar los modulos PSM/PDM con ohmetro entre `PWR_P` y `PWR_N`**: un modulo
+**Cribar los modulos PSM/PDM con ohmetro, DOS medidas** (ver §7.bis; una sola
+no basta, son dos defectos distintos e independientes):
+
+1. **`PWR_P` ↔ `PWR_N`** — sano MOhm; **4 Ohm = C10 perforado**.
+2. **`SCCPI` ↔ GND** — sano abierto; **~5 Ohm = U3 conduciendo** (R16 4.99
+   Ohm en serie). Este modulo pasa la medida 1 y falla la 2: la linea SCCP
+   queda clavada a masa y el puerto **no negocia jamas**.
+
+Detalle de la medida 1: un modulo
 sano da MOhm; **4 Ohm = C10 perforado** (le paso a uno, probablemente por los
 transitorios de hot-plug de 50 V). Un modulo perforado presenta un corto casi
 directo al energizar.
