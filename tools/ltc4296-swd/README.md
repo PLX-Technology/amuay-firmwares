@@ -24,6 +24,8 @@ Para el **MPS** (mismo SPI0/SS1 y mismo pinout SCCP que el MFS):
   distinguen.
 - `mps_pd_fet.tcl` — acciona `sccpo` a mano para ver si el FET de pull-down
   de la linea SCCP responde (el FET vive en el modulo PSM, no en la placa).
+- `mps_auto.tcl` — **solo lectura**: `GIOST.PAD_AUTO` (modo gestionado vs
+  autónomo) y `GCAP` (nº de puertos, soporte SCCP del chip).
 - `mps_sccp_ctrl.tcl` — **solo lectura**: dirección y nivel de los pines
   `sccpi`/`sccpo` de los 4 puertos. Control obligatorio antes de culpar al
   módulo: comprueba que `sccpi` bajo no lo esté causando nuestro propio FET.
