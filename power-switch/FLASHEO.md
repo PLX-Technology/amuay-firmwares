@@ -491,6 +491,30 @@ Corolario: **`sccpo` accionado sin efecto sobre `sccpi` con un módulo
 insertado** significa que el FET del módulo no responde — o está atascado
 conduciendo (línea clavada a 0) o su gate no llega.
 
+### Descartado: el pin AUTO (pin 13) cableado distinto que en el MFS
+
+En el **MPS** el pin 13 (`AUTO`) va **directo a GND**; en el **MFS** lleva
+pull-down y además llega a `P0.16` del micro. **No afecta al SCCP.** Medido
+en el MPS: `GIOST = 0x0001`, o sea **`PAD_AUTO` (bit3) = 0 = modo
+GESTIONADO**, que es justo lo que el firmware da por supuesto (el chip no
+energiza solo, espera órdenes por SPI). En el MFS el estado en reposo es el
+mismo: el devicetree **no declara ningún `auto-gpios`**, el firmware nunca
+toca `P0.16`, y el `spi3` que se lo llevaría como `SCK` está **deshabilitado**
+(la entrada de `pinctrl` es vestigial). Además `AUTO` es una **entrada** del
+LTC4296: no puede clavar a masa la línea SCCP, que es otra red.
+
+⚠️ **La versión segura es la del MPS.** El montaje del MFS es un footgun
+latente: si `P0.16` llegara a quedar alto o flotando, ese LTC4296 pasaría a
+**modo autónomo y energizaría sin que el host negocie**. Hoy está a salvo
+solo por la resistencia de pull-down externa. Si se toca ese pin en firmware,
+dejarlo siempre bajo.
+
+De la misma lectura: `GCAP = 0x0025` → `NUMPORTS` = **5** (valida que la
+lectura SPI es buena) y **`SCCP_SUPPORT` (bit6) = 0**. Es correcto y
+esperado: en este diseño el SCCP **no lo hace el LTC4296**, lo bit-bangea el
+MAX32690 por `sccpi`/`sccpo` a través del módulo PSM (`ltc4296_sccp.c`). No
+hay que buscar ahí ninguna avería.
+
 ### Cómo se combinan
 
 | `sccpi` reposo | Vout sondeo | Diagnóstico |
