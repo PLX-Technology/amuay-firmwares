@@ -24,6 +24,10 @@ Para el **MPS** (mismo SPI0/SS1 y mismo pinout SCCP que el MFS):
   distinguen.
 - `mps_pd_fet.tcl` — acciona `sccpo` a mano para ver si el FET de pull-down
   de la linea SCCP responde (el FET vive en el modulo PSM, no en la placa).
+- `mps_gadc_sanity.tcl` — control del instrumento: valida que el GADC mide
+  de verdad (deshabilitado ~35 mV vs clasificacion ~5145 mV).
+- `mps_alive.tcl` — solo lectura: muestrea el PC para ver si corre la app
+  (0x1000xxxx) o el chip se quedo en la ROM (0x0000xxxx).
 - `mps_auto.tcl` — **solo lectura**: `GIOST.PAD_AUTO` (modo gestionado vs
   autónomo) y `GCAP` (nº de puertos, soporte SCCP del chip).
 - `mps_sccp_ctrl.tcl` — **solo lectura**: dirección y nivel de los pines

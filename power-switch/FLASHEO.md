@@ -491,28 +491,53 @@ Corolario: **`sccpo` accionado sin efecto sobre `sccpi` con un módulo
 insertado** significa que el FET del módulo no responde — o está atascado
 conduciendo (línea clavada a 0) o su gate no llega.
 
-### Caso resuelto así (2026-07-30): un PSM con el par SANO clavando el SCCP
+### ★ Hallazgo (2026-07-30): CUALQUIER PSM insertado clava la línea SCCP
 
-Secuencia de aislamiento, quitando un eslabón cada vez con la fuente apagada:
+Secuencia de aislamiento, quitando o cambiando un eslabón cada vez con la
+fuente apagada, releyendo `sccpi` por SWD entre paso y paso:
 
-| Estado | `sccpi0` | Conclusión |
+| Estado | `sccpi` del puerto | Conclusión |
 |---|---|---|
-| PSM en slot 1 + cable al PDM del MFS | **0** | algo clava la línea |
-| se quita el cable al PDM | **0** | cable y PDM **exonerados** |
-| se saca el PSM | **1** | ⇒ **el módulo PSM** (`GPIO2 IN` `0x2c250000`→`0x2c254000`) |
+| PSM #1 en slot 1 + cable al PDM del MFS | **0** | algo clava la línea |
+| se quita el cable al PDM | **0** | cable y PDM del MFS **exonerados** |
+| se saca el PSM #1 | **1** | no es el slot 1 (`GPIO2 IN` `…50000`→`…54000`) |
+| **PSM #2 en el slot 2** | **0** | **se reproduce con otro módulo y otro slot** |
 
-Lo llamativo: **el par de potencia de ese módulo está sano** — sondeo
-5145 mV y óhmetro en MΩ entre `PWR_P` y `PWR_N`. O sea **no es el `C10`
-perforado**; es un defecto distinto que el cribado con óhmetro **no detecta**.
+⚠️ **No es un módulo estropeado.** Con dos módulos distintos en dos slots
+distintos sale lo mismo, y coincide con lo observado en julio en el **field
+switch** (misma firma, y ningún PSM ha pasado nunca una clasificación SCCP
+en ninguna de las dos placas). **Es sistemático, a nivel de diseño o de lote.**
 
-**Medida para el banco (módulo suelto, fuera de la placa):** resistencia del
-pin **`SCCPI`** del conector **a GND**. Sano = abierto/MΩ. **≈5 Ω = `U3`
-(BSS123) conduciendo**, porque `R16` = 4.99 Ω está en serie de su fuente a
-masa. Es la firma exacta del sospechoso que ya estaba anotado desde julio
-("FET de escritura SCCP atascado ON").
+**Y no se cae al energizar la línea:** con el puerto en **clasificación** y
+**5145 mV** medidos en `Vout`, `sccpi` **sigue en 0**. O sea no es que falte
+tensión en el par.
+
+**Descartado que sea polaridad del firmware.** `PULL_DOWN_LINE` es
+`gpio_pin_set_dt(sccpo, 0)` y `RELEASE_LINE` es `set_dt(sccpo, 1)`; con
+`GPIO_ACTIVE_LOW` eso da pin **físico alto = tirar** y **bajo = soltar**, y
+el init (`GPIO_OUTPUT_LOW`, que en Zephyr es nivel **físico**) lo deja bajo =
+soltado. Medido y coincide: `OUT = 0x00000000` con `OUTEN = 0x00528000`.
+
+**Medida para el banco (varios módulos sueltos, fuera de la placa):**
+resistencia del pin **`SCCPI`** del conector **a GND**. Sano = abierto/MΩ.
+**≈5 Ω = `U3` (BSS123) conduciendo**, porque `R16` = 4.99 Ω está en serie de
+su fuente a masa. Es la firma del sospechoso anotado en julio ("FET de
+escritura SCCP atascado ON"). Si **todos** los módulos dan ~5 Ω, el problema
+es de diseño/montaje del PSM (gate de `U3` retenido en conducción), no de
+unidades sueltas.
 
 ⇒ **Ampliar el cribado de módulos**: al óhmetro `PWR_P`↔`PWR_N` (que solo
-pilla el `C10` perforado) hay que añadir **`SCCPI`↔GND**, que pilla este.
+pilla el `C10` perforado) hay que añadir **`SCCPI`↔GND**.
+
+### Validar el GADC antes de fiarse de un sondeo
+
+`Vout` en clasificación da **~5145 mV en todos los puertos**, vacíos o con
+módulo, porque todos son **abiertos en DC** — no significa que la medida
+esté muerta. Control: con el puerto **deshabilitado** debe caer a **~35 mV**.
+Si no cae, la lectura no vale. Y **generar los frames con `gen_frames.py`**:
+un PEC tecleado a mano (`0x8c` en vez de `0x8e`) hace que el chip **rechace
+la escritura en silencio** y el `GADC` se quede en la fuente anterior, lo que
+se lee como un valor perfectamente plausible pero falso.
 
 ### Descartado: el pin AUTO (pin 13) cableado distinto que en el MFS
 
