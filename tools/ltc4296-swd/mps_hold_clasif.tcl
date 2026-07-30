@@ -64,13 +64,13 @@ spixfer5 0x46 0x15 0x20 0x41 0x20     ;# P1CFG0 = 0x2041
 sleep 50
 echo ""
 echo ">>> MIDE AHORA en el conector del slot 2, entre PWR_P y PWR_N."
-echo ">>> ~5 V = la clasificacion llega  |  ~0 V = no llega.   (60 s)"
+echo ">>> ~5 V = la clasificacion llega  |  ~0 V = no llega.   (120 s)"
 echo ""
 
 # Espera troceada: un `sleep 60000` de golpe tumba el enlace CMSIS-DAP
 # (rafaga de errores hid_write). Leyendo cada 2 s se mantiene vivo, y de
 # paso se confirma que el puerto AGUANTA en SEARCHING toda la ventana.
-for {set i 0} {$i < 30} {incr i} {
+for {set i 0} {$i < 60} {incr i} {
   sleep 2000
   set st [rd16 {0x45 0x1c 0 0 0}]
   echo [format "  %2ds  P1ST=0x%04x  estado=%d %s  sccpi1=%d" \
