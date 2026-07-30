@@ -66,23 +66,28 @@ echo [format "GCAP   = 0x%04x   NUMPORTS = %d  SCCP_SUPPORT = %d" \
       [set g [rd16 {0x0d 0xe3 0 0 0}]] [expr {$g & 0x1F}] [expr {($g >> 6) & 1}]]
 echo [format "P0.16 (AUTO en el MFS): IN=%d OUTEN=%d" [bit 0x40008024 16] [bit 0x4000800C 16]]
 
-echo ""
-echo "PxST de los 5 puertos (bits 2:0 = estado PSE; 4 = POWERED):"
-foreach p {0 1 2 3 4} f {{0x25 0x3b 0 0 0} {0x45 0x1c 0 0 0} {0x65 0xfc 0 0 0} \
-                         {0x85 0x52 0 0 0} {0xa5 0xb2 0 0 0}} {
-  set st [rd16 $f]
-  echo [format "  P%dST = 0x%04x   estado=%d  POWERED=%d  DET_VLOW=%d DET_VHIGH=%d" \
-        $p $st [expr {$st & 0x7}] [expr {($st >> 4) & 1}] \
-        [expr {($st >> 12) & 1}] [expr {($st >> 13) & 1}]]
+# Lecturas desenrolladas: el foreach con lista de listas se atragantaba.
+proc st {p n} {
+  echo [format "  P%dST = 0x%04x   estado=%d  POWERED=%d  PREBIASED=%d DETECTING=%d  DET_VLOW=%d DET_VHIGH=%d" \
+        $p $n [expr {$n & 0x7}] [expr {($n >> 4) & 1}] [expr {($n >> 6) & 1}] \
+        [expr {($n >> 5) & 1}] [expr {($n >> 12) & 1}] [expr {($n >> 13) & 1}]]
 }
+echo ""
+echo "PxST (bits 2:0 = estado PSE; 4 = POWERED = esta entregando):"
+st 0 [rd16 {0x25 0x3b 0 0 0}]
+st 1 [rd16 {0x45 0x1c 0 0 0}]
+st 2 [rd16 {0x65 0xfc 0 0 0}]
+st 3 [rd16 {0x85 0x52 0 0 0}]
+st 4 [rd16 {0xa5 0xb2 0 0 0}]
 
 echo ""
-echo "muestreo sccpi (15 x 100 ms):"
-for {set i 0} {$i < 15} {incr i} {
-  echo [format "  t%02d  p0=%d p1=%d p2=%d p3=%d p4=%d" $i \
+echo "muestreo sccpi + P0ST/P2ST (12 x 250 ms): busca la ventana de negociacion"
+for {set i 0} {$i < 12} {incr i} {
+  echo [format "  t%02d  sccpi p0=%d p1=%d p2=%d p3=%d p4=%d   P0ST=0x%04x P2ST=0x%04x" $i \
         [bit 0x4000A024 14] [bit 0x4000A024 16] [bit 0x4000A024 18] \
-        [bit 0x4000A024 21] [bit 0x4000A024 23]]
-  sleep 100
+        [bit 0x4000A024 21] [bit 0x4000A024 23] \
+        [rd16 {0x25 0x3b 0 0 0}] [rd16 {0x65 0xfc 0 0 0}]]
+  sleep 250
 }
 resume
 shutdown

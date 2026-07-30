@@ -457,11 +457,21 @@ if(!READ_LINE(dev))
 	return ADI_LTC_SCCP_PD_LINE_NOT_HIGH;
 ```
 
-`sccpi` es ACTIVE_HIGH con pull-up, así que **en reposo debe leer 1** tanto
-si el slot está vacío como si hay un PD conforme (que idlea en alta
-impedancia). **`sccpi = 0` en reposo ⇒ ese puerto no negociará jamás.**
+⛔ **RETRACTADO — de aquí NO se deduce lo que yo deduje.** Con un **slot
+vacío** `sccpi` lee 1 (gana el pull-up interno del MCU); **con un módulo PSM
+insertado lee 0, y eso es NORMAL.** Verificado en el **MFS**, la placa de
+referencia: sus dos puertos con módulo (`p0`, `p2`) leen `sccpi = 0` igual
+que el MPS. Yo di por hecho que "en reposo debe leer 1" y construí encima
+todo un diagnóstico de "línea SCCP clavada a masa" que **es falso**, junto
+con una medida de banco (`SCCPI`↔GND ≈5 Ω = `U3` conduciendo) que **no hay
+que hacer**. `sccpi` bajo en reposo con módulo **no** predice nada.
 
-**Control obligatorio antes de culpar al módulo:** leer también `sccpo`
+Lo que sí sigue siendo cierto del código: si en el instante en que corre
+`sccp_reset_pulse` la línea no está alta, aborta con `PD_LINE_NOT_HIGH`. Lo
+que falta por medir es si la línea **sube** durante la ventana de
+clasificación con un PD real enfrente — no su nivel en reposo.
+
+**Control útil (este sí):** leer también `sccpo`
 (`OUTEN` en `GPIO2+0x0C`, `OUT` en `GPIO2+0x18`). Si los cuatro puertos
 tienen el mismo estado de `sccpo` y solo uno lee `sccpi = 0`, el pull-down
 es **externo al MCU**. Estado normal medido: `OUT = 0x00000000`,
@@ -487,47 +497,34 @@ en 1). El driver lo ve como `PD_LINE_NOT_LOW`, lo remapea a
 `PD_DETECTION_FAILED` y sale con `DISCONTINUE_SCCP = 1`. Script:
 `mps_pd_fet.tcl`.
 
-Corolario: **`sccpo` accionado sin efecto sobre `sccpi` con un módulo
-insertado** significa que el FET del módulo no responde — o está atascado
-conduciendo (línea clavada a 0) o su gate no llega.
+### ⛔ Callejón sin salida documentado: "la línea SCCP está clavada"
 
-### ★ Hallazgo (2026-07-30): CUALQUIER PSM insertado clava la línea SCCP
+Se persiguió durante horas y **era una premisa falsa**. Queda escrito para
+que nadie lo repita. `sccpi` con un módulo PSM insertado lee **0**, y eso es
+el comportamiento **normal**: se midió igual en el **MFS**, que es la placa
+de referencia. La secuencia de aislamiento (quitar el cable al PDM → seguía
+0; sacar el módulo → 1; poner otro módulo en otro slot → 0 otra vez) es
+**real y reproducible**, pero **no significa avería**: significa
+simplemente "hay un módulo puesto".
 
-Secuencia de aislamiento, quitando o cambiando un eslabón cada vez con la
-fuente apagada, releyendo `sccpi` por SWD entre paso y paso:
+**No hacer** la medida de banco `SCCPI`↔GND que se dedujo de aquí. Y el
+cribado de módulos sigue siendo **una sola** medida, `PWR_P`↔`PWR_N`.
 
-| Estado | `sccpi` del puerto | Conclusión |
-|---|---|---|
-| PSM #1 en slot 1 + cable al PDM del MFS | **0** | algo clava la línea |
-| se quita el cable al PDM | **0** | cable y PDM del MFS **exonerados** |
-| se saca el PSM #1 | **1** | no es el slot 1 (`GPIO2 IN` `…50000`→`…54000`) |
-| **PSM #2 en el slot 2** | **0** | **se reproduce con otro módulo y otro slot** |
+**Lo único que sobrevive de ese hilo:**
 
-⚠️ **No es un módulo estropeado.** Con dos módulos distintos en dos slots
-distintos sale lo mismo, y coincide con lo observado en julio en el **field
-switch** (misma firma, y ningún PSM ha pasado nunca una clasificación SCCP
-en ninguna de las dos placas). **Es sistemático, a nivel de diseño o de lote.**
+- La polaridad del firmware **es correcta**. `PULL_DOWN_LINE` es
+  `gpio_pin_set_dt(sccpo, 0)` y `RELEASE_LINE` es `set_dt(sccpo, 1)`; con
+  `GPIO_ACTIVE_LOW` eso da pin **físico alto = tirar**, **bajo = soltar**, y
+  el init (`GPIO_OUTPUT_LOW`, que en Zephyr es nivel **físico**) lo deja
+  soltado. Medido y coincide: `OUT = 0`, `OUTEN = 0x00528000`.
+- Lo que **falta** por medir no es el nivel en reposo sino si la línea
+  **sube durante la ventana de clasificación** con un PD real enfrente.
 
-**Y no se cae al energizar la línea:** con el puerto en **clasificación** y
-**5145 mV** medidos en `Vout`, `sccpi` **sigue en 0**. O sea no es que falte
-tensión en el par.
-
-**Descartado que sea polaridad del firmware.** `PULL_DOWN_LINE` es
-`gpio_pin_set_dt(sccpo, 0)` y `RELEASE_LINE` es `set_dt(sccpo, 1)`; con
-`GPIO_ACTIVE_LOW` eso da pin **físico alto = tirar** y **bajo = soltar**, y
-el init (`GPIO_OUTPUT_LOW`, que en Zephyr es nivel **físico**) lo deja bajo =
-soltado. Medido y coincide: `OUT = 0x00000000` con `OUTEN = 0x00528000`.
-
-**Medida para el banco (varios módulos sueltos, fuera de la placa):**
-resistencia del pin **`SCCPI`** del conector **a GND**. Sano = abierto/MΩ.
-**≈5 Ω = `U3` (BSS123) conduciendo**, porque `R16` = 4.99 Ω está en serie de
-su fuente a masa. Es la firma del sospechoso anotado en julio ("FET de
-escritura SCCP atascado ON"). Si **todos** los módulos dan ~5 Ω, el problema
-es de diseño/montaje del PSM (gate de `U3` retenido en conducción), no de
-unidades sueltas.
-
-⇒ **Ampliar el cribado de módulos**: al óhmetro `PWR_P`↔`PWR_N` (que solo
-pilla el `C10` perforado) hay que añadir **`SCCPI`↔GND**.
+**★ La lección de método:** antes de declarar avería a partir de una lectura,
+tomarla **también en la placa que funciona**. Aquí no había placa de
+referencia medida, y ese fue el error: se comparó un puerto contra otro
+puerto de la *misma* placa, y todos los slots vacíos coincidían, lo que dio
+una falsa sensación de control.
 
 ### Validar el GADC antes de fiarse de un sondeo
 
@@ -599,15 +596,7 @@ criterio del registro.
 
 ### ⚠️ Antes de energizar una placa por primera vez
 
-**Cribar los modulos PSM/PDM con ohmetro, DOS medidas** (ver §7.bis; una sola
-no basta, son dos defectos distintos e independientes):
-
-1. **`PWR_P` ↔ `PWR_N`** — sano MOhm; **4 Ohm = C10 perforado**.
-2. **`SCCPI` ↔ GND** — sano abierto; **~5 Ohm = U3 conduciendo** (R16 4.99
-   Ohm en serie). Este modulo pasa la medida 1 y falla la 2: la linea SCCP
-   queda clavada a masa y el puerto **no negocia jamas**.
-
-Detalle de la medida 1: un modulo
+**Cribar los modulos PSM/PDM con ohmetro entre `PWR_P` y `PWR_N`**: un modulo
 sano da MOhm; **4 Ohm = C10 perforado** (le paso a uno, probablemente por los
 transitorios de hot-plug de 50 V). Un modulo perforado presenta un corto casi
 directo al energizar.
