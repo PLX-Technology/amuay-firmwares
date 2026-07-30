@@ -45,24 +45,40 @@ proc rd16 {frame} {
 
 init
 halt
-echo [format "GPIO2 OUTEN = 0x%08x  (control: la app tiene que estar corriendo)" \
-      [lindex [read_memory 0x4000A00C 32 1] 0]]
+
+# ⚠️ Si la placa esta en la ROM, el reloj de SPI0 esta apagado: las
+# escrituras al LTC4296 se pierden y todo lee 0x0000. Abortar, o se mide
+# una ventana que nunca existio.
+set outen [lindex [read_memory 0x4000A00C 32 1] 0]
+echo [format "GPIO2 OUTEN = 0x%08x" $outen]
+if {$outen == 0} {
+  echo ""
+  echo "ABORTADO: la placa esta en la ROM, no en la aplicacion."
+  echo "  -> quitar la cinta SWD, POR de 10 s, y reconectar ya arrancada."
+  resume
+  shutdown
+}
 
 spixfer5 0x48 0x3f 0x01 0x08 0x63     ;# P1CFG1 = 0x0108
 spixfer5 0x46 0x15 0x20 0x41 0x20     ;# P1CFG0 = 0x2041
 sleep 50
-set st [rd16 {0x45 0x1c 0 0 0}]
-echo [format "P1ST = 0x%04x  estado=%d  (3 = SEARCHING)   sccpi1 = %d" \
-      $st [expr {$st & 0x7}] [expr {([lindex [read_memory 0x4000A024 32 1] 0] >> 16) & 1}]]
 echo ""
 echo ">>> MIDE AHORA en el conector del slot 2, entre PWR_P y PWR_N."
-echo ">>> ~5 V = la clasificacion llega  |  ~0 V = no llega."
-echo ">>> Tienes 60 segundos."
-sleep 60000
+echo ">>> ~5 V = la clasificacion llega  |  ~0 V = no llega.   (60 s)"
+echo ""
 
-set st [rd16 {0x45 0x1c 0 0 0}]
-echo [format "al terminar: P1ST = 0x%04x  estado=%d  sccpi1 = %d" \
-      $st [expr {$st & 0x7}] [expr {([lindex [read_memory 0x4000A024 32 1] 0] >> 16) & 1}]]
+# Espera troceada: un `sleep 60000` de golpe tumba el enlace CMSIS-DAP
+# (rafaga de errores hid_write). Leyendo cada 2 s se mantiene vivo, y de
+# paso se confirma que el puerto AGUANTA en SEARCHING toda la ventana.
+for {set i 0} {$i < 30} {incr i} {
+  sleep 2000
+  set st [rd16 {0x45 0x1c 0 0 0}]
+  echo [format "  %2ds  P1ST=0x%04x  estado=%d %s  sccpi1=%d" \
+        [expr {($i + 1) * 2}] $st [expr {$st & 0x7}] \
+        [expr {($st & 0x7) == 3 ? "SEARCHING" : "         "}] \
+        [expr {([lindex [read_memory 0x4000A024 32 1] 0] >> 16) & 1}]]
+}
+
 spixfer5 0x46 0x15 0x00 0x00 0x4e     ;# deshabilitar
 echo "puerto 1 deshabilitado"
 resume
