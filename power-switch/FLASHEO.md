@@ -325,48 +325,79 @@ El fuente se recuperó de la TPU y se comprobó contra `build_final`:
 
 Mapeo conector↔puerto **1:1** (J3=Port1 … J6=Port4), ni invertido ni corrido.
 
-### RJ45 (Port 5) — ⛔ NO ENLAZA: los straps `MACIF_SEL` no hacen efecto
+### RJ45 (Port 5) — ✅ RESUELTO 2026-07-30: los pull-ups estaban al riel de 0.9 V
 
-**Medido el 2026-07-29** con la placa ya aprovisionada y el bloque de
-diagnostico ejecutandose (antes nunca corria: `main` moria antes):
+**Causa raiz:** los pull-ups de strap de **`MACIF_SEL0` (pin 34)** y
+**`MACIF_SEL1` (pin 35)** del ADIN1300 estaban atados al riel de **0.9 V**
+(`0.9VADIN`, el de `DVDD_0P9`) en vez del de **3.3 V** (`3.3VADIN`, el que
+alimenta `VDDIO1` pin 31 y `VDDIO2` pin 40).
 
-| Lectura | Valor | Significado |
+Esos pines pertenecen al dominio de E/S, cuyo umbral de nivel alto ronda los
+**2.3 V** (0.7 x VDDIO). Con 0.9 V el PHY los leia **bajos** — y bajo/bajo es
+la combinacion de **RGMII por defecto**. Las resistencias estaban puestas pero
+electricamente era como si no existieran.
+
+Consecuencia en cadena: en RGMII el ADIN1300 espera un reloj de **125 MHz**,
+pero el ADIN6310 con `port5` en RMII entrega **50 MHz**. Sin el reloj de su
+modo, el nucleo digital no opera -> la autonegociacion no completa -> no hay
+enlace, aunque el MDIO responda (va en su propio dominio de reloj).
+
+**Fix:** mover los dos pull-ups de 10 kOhm al riel **`3.3VADIN`**.
+
+### ★ Criterio de verificacion (por registro, sin instrumentos)
+
+Leer `GE_RMII_CFG` (**MMD 0x1E, reg 0xFF24**) **recien arrancado, sin que el
+firmware escriba nada** — via `SES_ReadPhyReg(SES_macPort5, 0x1EFF24, &v)`:
+
+| Lectura | Significado |
+|---|---|
+| `0x0116` (bit0 = 0) | strap MAL: el PHY arranca en **RGMII** |
+| **`0x0117`** (bit0 = 1) | **strap OK: arranca en RMII** |
+
+Confirmacion final: **`g_link[5]` pasa de `0` a `1`** (`0x20097980` en el build
+de `pse_safe_class13`) y el **LED del conector** enciende. Medido asi el
+2026-07-30 tras el fix.
+
+### ⛔ Por que NO se puede arreglar por software (probado a fondo)
+
+El registro **SI es escribible** — se verifico pasando de `0x0116` a `0x0117`
+por la via clause-45. **La nota de jul-2026 que decia lo contrario era FALSA**:
+aquellas pruebas se hicieron con un modulo SPE en **DIP=1 colisionando** con el
+ADIN1300 en el bus MDIO (delator: PHYID leia `0xBC00` = AND de dos
+dispositivos; limpio lee `0x0283`/`0xBC30`).
+
+Pero hay un candado real:
+
+| Accion | `RMII_EN` | Aplica el modo? |
 |---|---|---|
-| Control (PHYID de un ADIN1100) | `0x0283` / `0xbc81` | ✅ el canal de lectura es **valido** |
-| PHYID del ADIN1300 | `0x0283` / `0xbc30` | ✅ el PHY **vive** y responde en la addr MDIO 1 |
-| `BMCR` | **`0x1040`** | autoneg ON y **velocidad = 1000 Mb** |
-| `BMSR` (leido 2 veces) | `0x7949` | **sin enlace** (bit2=0), **autoneg sin completar** (bit5=0) |
-| `GE_RMII_CFG` (MMD 0x1E 0xFF24) | `0x0000` | inalcanzable via SES (delator conocido) |
+| Escribir `0xFF24` bit0 | ✅ se pone y persiste | ❌ no surte efecto |
+| Reset **BMCR** (bit15) | ✅ lo conserva | ❌ no reinicializa la interfaz/PLL |
+| Reset de subsistema **`0xFF0C`** bit0 | ❌ **lo borra** (re-lee straps) | ✅ si |
 
-**`BMCR = 0x1040` es la prueba**: los bits de velocidad codifican **1000 Mb**,
-o sea que el ADIN1300 arranco en su modo por defecto **RGMII/Gigabit**. Si los
-straps lo hubieran puesto en RMII estaria limitado a 100 Mb.
+**El unico reset que aplica el cambio de interfaz es el que vuelve a muestrear
+los straps.** O se pone el bit o se aplica, nunca las dos cosas ⇒ **es strap de
+hardware o nada.**
 
-Y eso explica el resto: en RGMII el PHY espera un reloj de **125 MHz**, pero el
-ADIN6310 entrega los **50 MHz de RMII**. Sin el reloj de su modo, el nucleo
-digital no opera -> no completa autoneg -> no hay enlace de cobre, aunque el
-cable este puesto y el MDIO responda (va en su propio dominio de reloj).
-
-**PARA EL ELECTRONICO — medida concreta:** tension continua en **pin 34
-(`MACIF_SEL0`)** y **pin 35 (`MACIF_SEL1`)** del ADIN1300 **durante el
-arranque**. Para RMII los **dos** deben estar cerca de VDDIO. Si alguno esta
-bajo, ese pull-up no vence al pull-down interno del chip: resistencia en el pin
-equivocado, valor de 10 kΩ demasiado alto, o solo se poblo uno.
-
-**Descartado con medidas:** no es el firmware (`port5` esta bien configurado en
-RMII/`SES_phyADIN1300`/addr 1/100M y el switch entrega el reloj RMII), no es el
-cable, no es el PHY, y no es el aprovisionamiento del switch (ya resuelto).
-
-> **No se puede forzar por software.** `GE_RMII_CFG` vive en los MMD del
-> fabricante y **el API de SES no los alcanza**: las escrituras reportan exito
-> y no toman efecto — ese `0x0000` es el delator. Es strap de hardware o nada.
-> Probado a fondo en jul-2026, no reintentar.
+> Vias de acceso a los MMD del ADIN1300 (medido): **clause-45**
+> `SES_ReadPhyReg(mac, 0x1EFF24, &v)` **funciona**; el indirecto clause-22 por
+> los registros `0x0D`/`0x0E` **devuelve siempre `0x0000`** — no usarlo.
 >
-> El firmware `adin_ethkick` de julio hacia un "kick" de 32 re-inicializaciones
-> barriendo direcciones MDIO, que entonces hacia linkear el RJ45. Probado hoy
-> con 8 re-inits de la config correcta: **no sirve** (`g_link[5]` sigue 0, las
-> 8 devuelven 0). Probablemente aquello compensaba el strap; con el strap mal
-> puesto no hay kick que valga.
+> **Control de validez obligatorio antes de interpretar nada:** leer `ANAR`
+> (reg 4). En un PHY real el campo selector es **siempre >= 1**; un `0x0000`
+> ahi significa que el acceso no llega y **ninguna otra lectura vale**. Con el
+> canal sano se leyo `0x01e1`.
+>
+> Registros utiles (del driver de Linux `drivers/net/phy/adin.c`):
+> `GE_RMII_CFG 0xff24` (RMII_EN = bit0), `GE_SOFT_RESET 0xff0c` (bit0),
+> `GE_CLK_CFG 0xff1f`, `GE_RGMII_CFG 0xff23`.
+
+### Nota: el "kick" de re-inicializaciones NO era la solucion
+
+El firmware `adin_ethkick` de jul-2026 hacia 32 re-inicializaciones barriendo
+direcciones MDIO y entonces el RJ45 linkeaba. Probado el 2026-07-29 con 8
+re-inits de la config correcta: **no sirve** (`g_link[5]` sigue 0, las 8
+devuelven 0). Aquello compensaba el strap por otra via; con el strap bien
+puesto **no hace falta ningun kick**.
 
 ### Bus MDIO — reglas que hay que respetar
 
@@ -404,11 +435,23 @@ absolutamente nada. Para saber si un puerto SPE enlaza de verdad, leer el PHY:
 
 ## 8. Pendientes de hardware
 
-| Problema | Acción |
+| Problema | Accion |
 |---|---|
-| **RJ45 no linkea** (histórico; el parche por software del §7 no está verificado) | Poblar pull-ups de 10 kΩ a VDDIO en `MACIF_SEL0` (pin 34, `P5_RXC`) y `MACIF_SEL1` (pin 35, `P5_RXCTL`) → arranca en RMII. **Ya validado en otra placa.** |
-| **Slot SPE 4 no linkea con ningún módulo** (la falla se queda en el slot al intercambiar módulos; el módulo está alimentado y contesta MDIO, pero su núcleo no responde = sin reloj RMII) | Medir con osciloscopio `P4_TXC` = pin 47 de J6 y la bola **B9** del ADIN6310, contra `P2_TXC` (pin 47 de J4, bola T3) que sí funciona. Deben ser **50 MHz**. Reloj en B9 y no en J6.47 → pista/soldadura abierta; sin reloj en B9 → soldadura fría del BGA. |
+| **Slot SPE 4 no linkea con ningun modulo** (la falla se queda en el slot al intercambiar modulos; el modulo esta alimentado y contesta MDIO, pero su nucleo no responde = sin reloj RMII) | Medir con osciloscopio `P4_TXC` = pin 47 de J6 y la bola **B9** del ADIN6310, contra `P2_TXC` (pin 47 de J4, bola T3) que si funciona. Deben ser **50 MHz**. Reloj en B9 y no en J6.47 -> pista/soldadura abierta; sin reloj en B9 -> soldadura fria del BGA |
+| **TVS de entrada sin margen** (ver `LTC4296-BURN-AUDIT.md`) | El clamp del SMBJ58A llega a ~93 V, por encima de los **80 V abs max** del LTC4296. Considerar un SMCJ de mayor Ipp o menor clamp |
 
-Descartado en ambos casos: no es de diseño (esquemático verificado pin por pin,
-los 4 puertos SPE están cableados idénticos), no es firmware (misma
-configuración en los 4) y no son los módulos.
+✅ **RJ45 — RESUELTO** el 2026-07-30 (pull-ups de `MACIF_SEL` al riel
+equivocado, ver §7). Aplicar el mismo fix a cada placa nueva y verificar con el
+criterio del registro.
+
+### ⚠️ Antes de energizar una placa por primera vez
+
+**Cribar los modulos PSM/PDM con ohmetro entre `PWR_P` y `PWR_N`**: un modulo
+sano da MOhm; **4 Ohm = C10 perforado** (le paso a uno, probablemente por los
+transitorios de hot-plug de 50 V). Un modulo perforado presenta un corto casi
+directo al energizar.
+
+**Primera energizacion con los slots VACIOS.** Sin PD el firmware no entrega
+nada (negocia o no entrega), asi se comprueba que el riel y el LTC4296 arrancan
+sanos — `g_gcfg` debe pasar de `0xffff` a un valor legible — antes de arriesgar
+ningun modulo.
