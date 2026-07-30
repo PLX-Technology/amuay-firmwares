@@ -478,6 +478,19 @@ Con el puerto en clasificación, `GADC` sobre `Vout`:
 
 Comparar siempre contra un slot vacío en la misma pasada: es el control.
 
+### Un slot vacío da `retry_rc = 1` y eso es NORMAL
+
+No hay que perseguirlo. El FET que escribe en la línea SCCP vive **dentro
+del módulo PSM**, no en la placa. Con el slot vacío no hay FET, así que
+accionar `sccpo` no baja `sccpi` (medido: `sccpo1` de 0→1 y `sccpi1` sigue
+en 1). El driver lo ve como `PD_LINE_NOT_LOW`, lo remapea a
+`PD_DETECTION_FAILED` y sale con `DISCONTINUE_SCCP = 1`. Script:
+`mps_pd_fet.tcl`.
+
+Corolario: **`sccpo` accionado sin efecto sobre `sccpi` con un módulo
+insertado** significa que el FET del módulo no responde — o está atascado
+conduciendo (línea clavada a 0) o su gate no llega.
+
 ### Cómo se combinan
 
 | `sccpi` reposo | Vout sondeo | Diagnóstico |

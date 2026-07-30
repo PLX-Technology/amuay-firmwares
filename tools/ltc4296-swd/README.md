@@ -22,6 +22,8 @@ Para el **MPS** (mismo SPI0/SS1 y mismo pinout SCCP que el MFS):
   contra puerto 1 (vacío). Es la medida que distingue un par en corto
   (35-70 mV) de uno sano/abierto (~5145 mV); `PxST` y `retry_rc` **no** los
   distinguen.
+- `mps_pd_fet.tcl` — acciona `sccpo` a mano para ver si el FET de pull-down
+  de la linea SCCP responde (el FET vive en el modulo PSM, no en la placa).
 - `mps_sccp_ctrl.tcl` — **solo lectura**: dirección y nivel de los pines
   `sccpi`/`sccpo` de los 4 puertos. Control obligatorio antes de culpar al
   módulo: comprueba que `sccpi` bajo no lo esté causando nuestro propio FET.
