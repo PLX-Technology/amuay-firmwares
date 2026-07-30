@@ -51,6 +51,10 @@ LOG_MODULE_REGISTER(att, LOG_LEVEL_INF);
 static const struct device *const adin = DEVICE_DT_GET(DT_NODELABEL(adin2111));
 static const struct device *const gpa  = DEVICE_DT_GET(DT_NODELABEL(gpioa));
 static const struct device *const gpd  = DEVICE_DT_GET(DT_NODELABEL(gpiod));
+static const struct device *const attphy[2] = {
+	DEVICE_DT_GET(DT_NODELABEL(attphy1)),
+	DEVICE_DT_GET(DT_NODELABEL(attphy2)),
+};
 
 #define BYPASS_EN_PIN 14   /* PD14 = UC_BYPASS_EN */
 
@@ -734,6 +738,32 @@ static int spe_tx(struct net_if *iface, uint32_t seq)
 	return zsock_sendto(tx_sock, &f, sizeof(f), 0, (struct sockaddr *)&tx_dst, sizeof(tx_dst));
 }
 
+/* Vuelca los registros del PHY, los mismos que se leen en el MFS, para poder
+ * comparar los dos extremos del enlace con el mismo criterio. */
+static void att_phy_dump(void)
+{
+	for (int i = 0; i < 2; i++) {
+		uint16_t id1 = 0, id2 = 0, b10l = 0, anst = 0, anctl = 0, pma = 0, adv = 0;
+		int rc;
+
+		if (!device_is_ready(attphy[i])) {
+			LOG_WRN("PHY %d no listo", i + 1);
+			continue;
+		}
+		rc = phy_read_c45(attphy[i], 1, 0x0002, &id1);
+		phy_read_c45(attphy[i], 1, 0x0003, &id2);
+		phy_read_c45(attphy[i], 1, 0x08F7, &b10l);
+		phy_read_c45(attphy[i], 7, 0x0201, &anst);
+		phy_read_c45(attphy[i], 7, 0x0200, &anctl);
+		phy_read_c45(attphy[i], 1, 0x0834, &pma);
+		phy_read_c45(attphy[i], 7, 0x0203, &adv);
+
+		LOG_INF("PHY%d rc=%d ID=%04x:%04x B10L=%04x ANst=%04x ANctl=%04x(AN %s) PMA=%04x ADV=%04x",
+			i + 1, rc, id1, id2, b10l, anst, anctl,
+			(anctl & 0x1000) ? "ON" : "OFF", pma, adv);
+	}
+}
+
 /* ---------------- main ---------------- */
 /* --- OTA: confirmacion condicionada al enlace SPE ---------------------
  * Numero de envios SPE correctos SEGUIDOS que exigimos antes de confirmar
@@ -909,6 +939,7 @@ int main(void)
 				enc_ea, enc_eb, sent, failed, cfg.tank_id);
 #ifndef BENCH_NO_SPE
 			{ struct hb { int n; } h = { 0 }; net_if_foreach(hb_cb, &h.n); }
+			att_phy_dump();
 #endif
 		}
 	}
