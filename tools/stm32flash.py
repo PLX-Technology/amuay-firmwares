@@ -52,7 +52,15 @@ def send_addr(ser, addr):
 
 
 def write_mem(ser, addr, data):
-    for _ in range(4):
+    """Escribe un bloque. Insiste, y RESINCRONIZA antes de rendirse.
+
+    El fallo tipico no es del flash sino de la LINEA SERIE: los picos de
+    corriente de la escritura hunden el rail del que cuelga el VCCIO del
+    FT230X (via R84) y se pierde un byte. Tras eso el bootloader sigue vivo,
+    solo hace falta volver a sincronizar. Rendirse al 4o intento tiraba a la
+    basura los 209 KB enteros por culpa de un solo bloque.
+    """
+    for intento in range(8):
         if cmd(ser, 0x31) and send_addr(ser, addr):
             n = len(data)
             ck = (n - 1)
@@ -61,8 +69,10 @@ def write_mem(ser, addr, data):
             ser.write(bytes([n - 1]) + data + bytes([ck & 0xFF]))
             if ack(ser, tmo=3):
                 return True
-        time.sleep(0.05)
         ser.reset_input_buffer()
+        time.sleep(0.05 * (intento + 1))     # espera creciente
+        if intento >= 2:                     # a partir del 3o, resincronizar
+            connect(ser)
     return False
 
 
@@ -103,14 +113,24 @@ if not erase_all(ser):
     print(">>> erase FALLO")
     sys.exit(1)
 
-print("Grabando %d bytes en 0x%08X ..." % (len(data), ADDR))
+# Bloques de 128 B en vez de 256: la mitad de energia por escritura, o sea
+# medio pico de corriente en el rail que alimenta la linea serie. Tarda algo
+# mas, pero llegar al final a la primera sale mucho mas barato que reintentar
+# los 209 KB.
+BLK = 128
+PAUSA = 0.003   # deja respirar al rail entre bloques
+
+print("Grabando %d bytes en 0x%08X (bloques de %d B) ..." % (len(data), ADDR, BLK))
 off = 0
+reintentos = 0
 while off < len(data):
-    chunk = data[off:off + 256]
+    chunk = data[off:off + BLK]
     if not write_mem(ser, ADDR + off, chunk):
-        print("\n>>> write FALLO en offset 0x%X" % off)
+        print("\n>>> write FALLO en offset 0x%X (irrecuperable tras 8 intentos"
+              " y resincronizacion)" % off)
         sys.exit(1)
     off += len(chunk)
+    time.sleep(PAUSA)
     print("  %d/%d bytes" % (off, len(data)), end='\r')
 
 print("\nVerificando (releyendo el flash)...")
