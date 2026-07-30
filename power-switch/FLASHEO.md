@@ -433,6 +433,61 @@ absolutamente nada. Para saber si un puerto SPE enlaza de verdad, leer el PHY:
 
 ---
 
+## 7.ante ★★★ CAUSA REAL de que el MPS no negocie: **Vin por debajo del piso**
+
+**Síntoma que lo delata sin instrumentos: el LED de PWR del PSM no parpadea
+ni un instante.** Si no parpadea, el puerto **nunca entra en clasificación**,
+y entonces no hay nada que buscar en el SCCP: el fallo es anterior.
+
+`retry_spoe_sccp` llama a `ltc4296_is_vin_valid` **antes** de clasificar. Si
+Vin está fuera de `ltc4296_spoe_vol_range_mv[board_class]`, sale con
+`DISCONTINUE_SCCP` (= `retry_rc` **1**, el mismo código que todo lo demás)
+sin haber tocado el puerto.
+
+Medido (2026-07-30), con la fuente puesta en **50.0 V**:
+
+| Placa | Vin que lee el ADC | Error |
+|---|---|---|
+| MFS | 49 455 mV | −545 mV |
+| **MPS** | **48 825 mV** | **−1175 mV** |
+
+El ADC lee **bajo**, y cuánto depende de la placa (~600 mV de dispersión
+entre unidades). Con el piso de Clase 13 en **50 000 mV**, el MPS **nunca**
+valida y por eso no intenta nada.
+
+**⇒ Arreglo operativo, sin tocar firmware: subir la fuente.** El riel de
+diseño para Clase 13 es **~54 V**, no 50 — a 50.0 V se está en el borde
+mismo de la ventana 50–58 V, y con el error del ADC se cae fuera. Subir
+**despacio** (no es hot-plug, pero tampoco un escalón) hasta ~54 V. El
+firmware del MPS **reintenta cada ~5 s**, así que engancha solo, sin POR.
+
+`is_vout_valid` usa la misma tabla pero **solo en la ruta APL**, no en la
+SCCP: no hay un segundo muro.
+
+### ⚠️ El piso de 49 V vive SOLO en un binario, no en el fuente
+
+`mfs_clean_class13.sbin` —el que negocia— tiene el piso de Clase 13 en
+**49 000 mV**. **El fuente del repo dice `{50000,58000}` en las DOS ramas.**
+Ese cambio nunca se commiteó. Es otra vez el patrón de fuente desparejado
+del artefacto que ya mordió a este proyecto. Comprobación directa sobre
+cualquier `.bin`/`.sbin`, sin compilar nada: buscar el patrón LE de los tres
+primeros pares invariantes de la tabla (`20000,30000` ×3) y leer el par de
+índice 3.
+
+| binario | piso Clase 13 | negocia |
+|---|---|---|
+| `mfs_clean_class13` | **49 000** | ✅ |
+| `mfs_p4` | 50 000 | ❌ |
+| `pse_safe_class13` (MPS) | 50 000 | ❌ |
+
+Antes de recompilar hay que decidir **con Mayker** qué piso queda, porque
+bajarlo debilita la protección que impide intentar Clase 13 sobre un riel
+insuficiente. Ni siquiera 49 000 serviría para este MPS (lee 48 825).
+Preferible dejar el piso y **operar el riel a 54 V**, que es lo que el
+diseño pide.
+
+---
+
 ## 7.bis Diagnosticar por qué un puerto no negocia (SPoE / SCCP)
 
 Los registros que expone el firmware **no distinguen un PD conectado de un
