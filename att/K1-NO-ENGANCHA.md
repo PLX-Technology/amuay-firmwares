@@ -71,12 +71,45 @@ no cierra.**
 4. **Continuidad**: con K1 supuestamente cerrado, que los pines del par del
    ADIN2111 queden conectados al conector SPE.
 
-## 5. Nota
+## 5. ★ El enlace FUNCIONABA el 28, así que K1 enganchaba entonces
 
-**Esto no es una regresión de firmware.** Los dos lados están correctamente
-configurados, así que los cambios de los últimos días probablemente
-**destaparon** el fallo (al pasar la ATT a alimentarse por SPE, que fuerza
-arranque en frío siempre) en vez de causarlo.
+La pasarela de la TPU registra datos del `tank21` por SPE el **28/07/2026 a
+las 17:31:43**. O sea que **el relé K1 sí se activaba ese día**: no es un
+defecto de diseño ni un relé muerto de fábrica, es **algo que se rompió entre
+el 28 y el 30**.
+
+Y eso exonera a los tres cambios de firmware de ese día, porque los datos
+llegaron **después** de todos ellos:
+
+| | |
+|---|---|
+| 28/07 11:45 | MCUboot + OTA + trama v3 |
+| 28/07 12:46 | MAC derivada del UID |
+| 28/07 15:00 | vigilante de enlace SPE |
+| **28/07 17:31** | **la pasarela recibe datos** ✅ |
+| 29/07 08:44 | se retira el vigilante |
+
+Además, **solo cuatro commits han tocado `BYPASS_EN_PIN`** en toda la
+historia, y el par añadir/retirar el vigilante tiene **diff neto vacío**
+(`git diff 73391e7^ 21ab9b0 -- att/src/main.c` no devuelve nada). La
+escritura a `PD14` en `main()` **no se ha tocado desde el 15 de julio**.
+
+⇒ El firmware que gobierna K1 es **el mismo que funcionaba el 28**. Con la
+ATT alimentada desde banco, hoy el relé no engancha. **Buscar un fallo
+físico aparecido en esos dos días**: relé, transistor de mando, o su raíl.
+
+### Ojo con la identidad: la MAC cambió
+
+La trama del 28 llegó con MAC **`02:00:00:ad:21:11`** (asignada a mano — la
+`spe0` de la TPU es `02:00:00:ad:11:10`, misma familia). La ATT de hoy deriva
+**`02:00:70:2d:30:08`** del UID del silicio. El registro del tanque en la
+pasarela está indexado a la identidad vieja, así que **cuando el enlace
+vuelva, revisar que la pasarela reconozca la MAC nueva** o seguirá marcando
+"sin señal" aunque lleguen tramas.
+
+Detalle de cronología: a las 17:31 del 28 la trama aún llevaba la MAC vieja,
+pese a que el commit de la MAC-por-UID es de las 12:46 — la ATT todavía no
+tenía grabado ese firmware a esa hora.
 
 ## 6. Instrumentación disponible
 
