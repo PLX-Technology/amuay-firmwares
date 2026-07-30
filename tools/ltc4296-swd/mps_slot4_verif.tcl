@@ -74,6 +74,19 @@ echo [format "  g_lg_any   = %d" [lindex [read_memory 0x20097914 32 1] 0]]
 
 echo ""
 echo "=== 3. slot 4 (puerto 3) retenido en clasificacion ==="
+
+# ⚠️ Si el puerto YA esta entregando, no tocarlo: forzar clasificacion sobre
+# una entrega viva la tumba. (Paso en la primera pasada; el bucle de
+# reintento la recupero en ~5 s, pero no hay que provocarlo.)
+set st [rd16 {0x85 0x52 0 0 0}]
+if {($st & 0x7) == 2} {
+  echo ""
+  echo "  El puerto 3 YA ESTA ENTREGANDO (PxST=0x[format %04x $st]). No se toca."
+  echo "  El rework funciono: no hace falta la retencion."
+  resume
+  shutdown
+}
+
 echo ">>> MIDE en el zocalo del slot 4: debe dar +5 V (antes -5 V).  (120 s)"
 echo ">>> Y mira la columna sccpi3: 1 = el rework FUNCIONO."
 echo ""

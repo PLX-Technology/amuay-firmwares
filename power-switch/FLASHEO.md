@@ -437,6 +437,31 @@ absolutamente nada. Para saber si un puerto SPE enlaza de verdad, leer el PHY:
 
 **Defecto de hardware. Ninguna cantidad de firmware lo arregla.**
 
+### ✅ CONFIRMADO POR EL ARREGLO (2026-07-30)
+
+Mayker invirtió el par **solo en el slot 4** como prueba. Con el riel a 54 V y
+el firmware de producción **sin tocar**, ese puerto negocia y entrega:
+
+```
+P3ST         = 0x3e12   estado=2 DELIVERING, POWERED=1, POWER_STABLE hi/lo
+g_retry_rc   = 1,1,1,2  <- 2 = ADI_LTC_SCCP_COMPLETE en el puerto 3
+g_lg_deliver = 0,0,0,1     g_lg_any = 1
+GFLTEV       = 0x0000      sin fallos      Vin = 52 500 mV
+g_link       = 1,1,1,1     los cuatro enlaces SPE arriba
+```
+
+`0x3e12` es **byte a byte la misma firma** que la primera entrega buena del
+field switch (`PDM-SPE-NOTES.md`). Los otros tres puertos siguen en
+`retry_rc = 1`, como se espera: aún tienen el par invertido.
+
+**Es la prueba más fuerte posible del diagnóstico**: cambió una sola variable
+—la polaridad de un slot— y ese slot pasó de no negociar nunca a entregar.
+**El firmware no se tocó.**
+
+⚠️ Al forzar clasificación sobre un puerto que **ya está entregando** se
+tumba la entrega. El bucle de reintento la recupera en ~5 s, pero los scripts
+deben saltarse los puertos en estado 2 (`mps_slot4_verif.tcl` ya lo hace).
+
 Medido con el puerto retenido en clasificación 120 s (`mps_hold_clasif.tcl` /
 `mfs_hold_clasif.tcl`), multímetro en el **zócalo del slot**, mismos puntos y
 mismas puntas en las dos placas:
