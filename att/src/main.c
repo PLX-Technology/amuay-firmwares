@@ -57,32 +57,17 @@ static const struct device *const attphy[2] = {
 };
 
 #define BYPASS_EN_PIN 14   /* PD14 = UC_BYPASS_EN */
+/* Nivel REAL de PD14 releido del pin (el IDR del STM32 refleja el nivel
+ * fisico aunque el pin sea salida). 1 = la GPIO cumple. */
+static int g_k1_level = -1;
 
-/* --- K1 EN LINEA ANTES DE QUE ARRANQUE EL ADIN2111 -------------------
- * El driver del ADIN2111 se inicializa en POST_KERNEL/60
- * (CONFIG_ETH_INIT_PRIORITY), o sea ANTES de main(). Si K1 sigue sin
- * energizar en ese momento, el PHY esta FUERA del par, entrena contra nada
- * y ya no reengancha. Como la ATT se alimenta POR EL PROPIO PAR, arranca
- * siempre asi: el cable esta puesto pero el PHY no.
- *
- * Conmutar el rele mas tarde NO lo arregla: K1 PUENTEA el par en vez de
- * abrirlo, asi que el extremo contrario no se entera (probado y descartado,
- * ver el vigilante retirado en 21ab9b0). La solucion no es reenganchar
- * despues sino no llegar tarde.
- *
- * Prioridad 55: despues del GPIO (40) y del SPI (50), antes del Eth (60).
- */
-static int att_bypass_relay_early(void)
-{
-	if (!device_is_ready(gpd)) {
-		return -ENODEV;
-	}
-	gpio_pin_configure(gpd, BYPASS_EN_PIN, GPIO_OUTPUT_ACTIVE);
-	k_busy_wait(20000);   /* 20 ms: cierre mecanico del rele */
-
-	return 0;
-}
-SYS_INIT(att_bypass_relay_early, POST_KERNEL, 55);
+/* NOTA: aqui hubo un SYS_INIT que cerraba K1 en POST_KERNEL/55, antes del
+ * driver del PHY (ETH_INIT_PRIORITY=60). El orden era un defecto real, pero
+ * NO era la causa de la falta de enlace: la pasarela dejo de recibir el 28 y
+ * ese cambio es del 30. Se retira porque adelantarlo puede estorbar -- si la
+ * bobina necesita un rail que aun no esta, el intento temprano falla y la
+ * reescritura de main() ya no produce TRANSICION. Se vuelve a la secuencia
+ * que enganchaba el 28: una sola energizacion, dentro de main(). */
 #define ENC_A_PIN      0   /* PA0  = ENCODER AA */
 #define ENC_B_PIN      7   /* PA7  = canal 3 = A out (era PA1, pin equivocado) */
 
@@ -822,6 +807,11 @@ int main(void)
 	} else {
 		int ret = gpio_pin_configure(gpd, BYPASS_EN_PIN, GPIO_OUTPUT_ACTIVE);
 		LOG_INF("UC_BYPASS_EN (PD14) = 1 -> rele K1 energizado, ADIN2111 EN LINEA (ret=%d)", ret);
+		k_msleep(50);   /* margen para el cierre mecanico del rele */
+		g_k1_level = gpio_pin_get_raw(gpd, BYPASS_EN_PIN);
+		LOG_INF("PD14 releido del pin = %d  (%s)", g_k1_level,
+			g_k1_level == 1 ? "la GPIO cumple: mirar aguas abajo"
+					: "el pin NO sube: algo tira de esa red");
 		/* Redundante: att_bypass_relay_early() ya lo cerro antes de que
 		 * arrancara el PHY. Se conserva por la traza de log. */
 	}
@@ -939,6 +929,7 @@ int main(void)
 				enc_ea, enc_eb, sent, failed, cfg.tank_id);
 #ifndef BENCH_NO_SPE
 			{ struct hb { int n; } h = { 0 }; net_if_foreach(hb_cb, &h.n); }
+			LOG_INF("PD14 = %d", gpio_pin_get_raw(gpd, BYPASS_EN_PIN));
 			att_phy_dump();
 #endif
 		}

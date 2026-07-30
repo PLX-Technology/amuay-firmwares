@@ -59,15 +59,29 @@ no cierra.**
 
 ## 4. Qué medir, por orden
 
-1. **`PD14` en el pin del micro**, con la placa arrancada.
-   - **~3.3 V** → la GPIO cumple; el fallo está aguas abajo (pasos 2 y 3).
-   - **~0 V** → el pin no está mandando pese al `ret=0`; mirar carga excesiva
-     o corto en esa red.
-2. **La etapa de mando del relé.** Una GPIO **no puede** excitar una bobina
-   directamente: tiene que haber transistor/MOSFET y su diodo de recirculación.
-   Comprobar que el transistor conduce con `PD14` alto.
-3. **El raíl que alimenta la bobina.** Si K1 necesita una tensión (5 V, 12 V)
+### ✅ `PD14` YA ESTÁ COMPROBADO: entrega 3.3 V en el pin
+
+**No hace falta medirlo.** El firmware **relee el nivel físico del pin** (en el
+STM32 el registro de entrada refleja el pin aunque esté configurado como
+salida) y saca por consola:
+
+```
+PD14 releido del pin = 1   (la GPIO cumple: mirar aguas abajo)
+PD14 = 1                   ← estable, cada segundo
+```
+
+⇒ **La GPIO cumple.** El fallo está **entre `PD14` y los contactos del relé**.
+
+### Lo que queda por medir
+
+1. **La etapa de mando del relé.** Una GPIO **no puede** excitar una bobina
+   directamente: tiene que haber transistor/MOSFET y su diodo de
+   recirculación. Comprobar que el transistor conduce con `PD14` alto.
+2. **El raíl que alimenta la bobina.** Si K1 necesita una tensión (5 V, 12 V)
    que no está presente, no engancha aunque el mando sea correcto.
+   ⚠️ **Ya descartado que dependa del SPoE**: no hace clic ni alimentando la
+   ATT **solo por SPE** ni por banco.
+3. **El propio relé** (bobina abierta, contactos).
 4. **Continuidad**: con K1 supuestamente cerrado, que los pines del par del
    ADIN2111 queden conectados al conector SPE.
 
