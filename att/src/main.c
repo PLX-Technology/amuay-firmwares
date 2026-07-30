@@ -41,6 +41,7 @@
 #include <zephyr/sys/crc.h>
 #include <errno.h>
 #include <zephyr/net/phy.h>
+#include <zephyr/init.h>
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(att, LOG_LEVEL_INF);
 
@@ -52,6 +53,32 @@ static const struct device *const gpa  = DEVICE_DT_GET(DT_NODELABEL(gpioa));
 static const struct device *const gpd  = DEVICE_DT_GET(DT_NODELABEL(gpiod));
 
 #define BYPASS_EN_PIN 14   /* PD14 = UC_BYPASS_EN */
+
+/* --- K1 EN LINEA ANTES DE QUE ARRANQUE EL ADIN2111 -------------------
+ * El driver del ADIN2111 se inicializa en POST_KERNEL/60
+ * (CONFIG_ETH_INIT_PRIORITY), o sea ANTES de main(). Si K1 sigue sin
+ * energizar en ese momento, el PHY esta FUERA del par, entrena contra nada
+ * y ya no reengancha. Como la ATT se alimenta POR EL PROPIO PAR, arranca
+ * siempre asi: el cable esta puesto pero el PHY no.
+ *
+ * Conmutar el rele mas tarde NO lo arregla: K1 PUENTEA el par en vez de
+ * abrirlo, asi que el extremo contrario no se entera (probado y descartado,
+ * ver el vigilante retirado en 21ab9b0). La solucion no es reenganchar
+ * despues sino no llegar tarde.
+ *
+ * Prioridad 55: despues del GPIO (40) y del SPI (50), antes del Eth (60).
+ */
+static int att_bypass_relay_early(void)
+{
+	if (!device_is_ready(gpd)) {
+		return -ENODEV;
+	}
+	gpio_pin_configure(gpd, BYPASS_EN_PIN, GPIO_OUTPUT_ACTIVE);
+	k_busy_wait(20000);   /* 20 ms: cierre mecanico del rele */
+
+	return 0;
+}
+SYS_INIT(att_bypass_relay_early, POST_KERNEL, 55);
 #define ENC_A_PIN      0   /* PA0  = ENCODER AA */
 #define ENC_B_PIN      7   /* PA7  = canal 3 = A out (era PA1, pin equivocado) */
 
@@ -765,6 +792,8 @@ int main(void)
 	} else {
 		int ret = gpio_pin_configure(gpd, BYPASS_EN_PIN, GPIO_OUTPUT_ACTIVE);
 		LOG_INF("UC_BYPASS_EN (PD14) = 1 -> rele K1 energizado, ADIN2111 EN LINEA (ret=%d)", ret);
+		/* Redundante: att_bypass_relay_early() ya lo cerro antes de que
+		 * arrancara el PHY. Se conserva por la traza de log. */
 	}
 	k_msleep(50);
 
