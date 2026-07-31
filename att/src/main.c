@@ -225,6 +225,133 @@ static void cfg_load(void)
 		cfg.parity, cfg.push_ms10 * 10u);
 }
 
+/* ============ PERSISTENCIA DE LA CUENTA DEL ENCODER (EEPROM) ============
+ * enc_count vive en RAM y un arranque en frio lo pone a 0. Como la
+ * calibracion se guarda como CUENTAS (cal_cnt_a/cal_cnt_b), perder la cuenta
+ * no da un cero evidente: da un nivel FALSO PERO PLAUSIBLE. Con un encoder
+ * incremental no hay forma de recuperarlo solo.
+ *
+ * Anillo de checkpoints detras de la configuracion. Ver el porque del
+ * dimensionado en el comentario de ENC_STORE_MIN_MS.
+ * ==================================================================== */
+#define ENC_STORE_BASE   64                 /* la cfg ocupa 0..33 */
+#define ENC_STORE_END    8192               /* AT24C64 */
+#define ENC_STORE_SLOT   16
+#define ENC_STORE_N      ((ENC_STORE_END - ENC_STORE_BASE) / ENC_STORE_SLOT)  /* 508 */
+
+/* Ritmo de escritura. La AT24C64 aguanta ~1e6 ciclos por celda:
+ *   508 ranuras x 1e6 = 5.08e8 escrituras;  a 1 cada 30 s = ~483 anos.
+ * Y solo se escribe si la cuenta CAMBIO, asi que un tanque quieto no gasta. */
+#define ENC_STORE_MIN_MS   30000
+#define ENC_STORE_DELTA    64               /* fuerza checkpoint si se mueve mucho */
+
+struct enc_slot {
+	uint32_t seq;
+	int32_t  count;
+	uint32_t edges;
+	uint16_t crc;
+	uint16_t pad;
+} __packed;
+
+static uint32_t enc_store_seq;      /* seq del ultimo checkpoint escrito */
+static int      enc_store_idx = -1; /* ranura del ultimo checkpoint */
+static int32_t  enc_store_last;     /* cuenta del ultimo checkpoint */
+static bool     enc_ref_ok;         /* false = arrancamos SIN referencia */
+
+static uint16_t enc_slot_crc(const struct enc_slot *r)
+{
+	return crc16_ansi((const uint8_t *)r, sizeof(*r) - 2 * sizeof(uint16_t));
+}
+
+/* Busca el checkpoint valido con seq mayor y restaura la cuenta. */
+static void enc_store_load(void)
+{
+	struct enc_slot r;
+	uint32_t best_seq = 0;
+	int best_i = -1;
+	struct enc_slot best;
+
+	if (!device_is_ready(eep)) {
+		LOG_WRN("EEPROM no lista: la cuenta del encoder arranca SIN REFERENCIA");
+		return;
+	}
+
+	for (int i = 0; i < ENC_STORE_N; i++) {
+		if (eeprom_read(eep, ENC_STORE_BASE + i * ENC_STORE_SLOT, &r, sizeof(r)) < 0) {
+			continue;
+		}
+		if (r.crc != enc_slot_crc(&r) || r.seq == 0 || r.seq == 0xFFFFFFFFu) {
+			continue;   /* ranura virgen (0xFF) o escritura rota */
+		}
+		if (r.seq > best_seq) {
+			best_seq = r.seq;
+			best_i = i;
+			best = r;
+		}
+	}
+
+	if (best_i < 0) {
+		LOG_WRN("★ SIN CHECKPOINT en EEPROM: la cuenta arranca en 0 y la "
+			"calibracion NO es aplicable. El nivel reportado no es fiable "
+			"hasta re-referenciar.");
+		enc_ref_ok = false;
+		return;
+	}
+
+	enc_count      = best.count;
+	enc_edges      = best.edges;
+	enc_store_seq  = best.seq;
+	enc_store_idx  = best_i;
+	enc_store_last = best.count;
+	enc_ref_ok     = true;
+	LOG_INF("Cuenta restaurada de EEPROM: count=%d edges=%u (ranura %d, seq %u)",
+		best.count, best.edges, best_i, best.seq);
+}
+
+/* Escribe un checkpoint en la SIGUIENTE ranura (reparto de desgaste). */
+static int enc_store_write(void)
+{
+	struct enc_slot r;
+	int idx, ret;
+
+	if (!device_is_ready(eep)) { return -ENODEV; }
+
+	idx = (enc_store_idx + 1) % ENC_STORE_N;
+	r.seq   = ++enc_store_seq;
+	r.count = enc_count;
+	r.edges = enc_edges;
+	r.pad   = 0;
+	r.crc   = enc_slot_crc(&r);
+
+	ret = eeprom_write(eep, ENC_STORE_BASE + idx * ENC_STORE_SLOT, &r, sizeof(r));
+	if (ret < 0) {
+		enc_store_seq--;
+		return ret;
+	}
+	enc_store_idx  = idx;
+	enc_store_last = r.count;
+	enc_ref_ok     = true;
+	return 0;
+}
+
+/* Llamar desde el bucle de 1 s. Decide si toca checkpoint. */
+static void enc_store_tick(void)
+{
+	static int64_t last_ms;
+	int64_t now = k_uptime_get();
+	int32_t c = enc_count;
+	int32_t delta = c - enc_store_last;
+
+	if (delta < 0) { delta = -delta; }
+	if (delta == 0) { return; }                 /* quieto: no se gasta EEPROM */
+
+	if (delta < ENC_STORE_DELTA && (now - last_ms) < ENC_STORE_MIN_MS) {
+		return;
+	}
+	last_ms = now;
+	(void)enc_store_write();
+}
+
 static int cfg_save(void)
 {
 	int r;
@@ -821,6 +948,7 @@ int main(void)
 	enc_init();
 
 	cfg_load();
+	enc_store_load();
 
 	{
 		int mb;
@@ -928,6 +1056,7 @@ int main(void)
 				enc_count, att_level_mm(), att_calibrated(), enc_edges, enc_errors,
 				enc_ea, enc_eb, sent, failed, cfg.tank_id);
 #ifndef BENCH_NO_SPE
+			enc_store_tick();
 			{ struct hb { int n; } h = { 0 }; net_if_foreach(hb_cb, &h.n); }
 			LOG_INF("PD14 = %d", gpio_pin_get_raw(gpd, BYPASS_EN_PIN));
 			att_phy_dump();
