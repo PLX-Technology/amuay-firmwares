@@ -1,0 +1,24 @@
+[Unit]
+Description=Forzar Gen1 (2.5 GT/s) en el enlace PCIe del NVMe
+Documentation=file:/usr/local/sbin/nvme-gen1.sh
+
+# Tiene que aplicarse ANTES de que se monte /mnt/ssd y de que nadie escriba:
+# a Gen2 el disco se cae bajo carga sostenida.
+DefaultDependencies=no
+After=sysinit.target
+Before=local-fs.target
+Conflicts=shutdown.target
+Before=shutdown.target
+
+# Si no hay NVMe, el servicio no estorba
+ConditionPathExists=/sys/class/nvme/nvme0
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/nvme-gen1.sh
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=local-fs.target
