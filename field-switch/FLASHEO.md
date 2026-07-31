@@ -25,9 +25,32 @@ prebuilt/mfs_clean_class13.sbin   615 792 B   <- anterior, sin el Port 6
 | PSE | LTC4296, **SPoE Clase 13** (50 V) en los slots Port 2 a 5 |
 | MCU | MAX32690, imagen firmada para secure boot |
 
-✅ **El Port 6 ya está habilitado** (2026-07-29). Es el `port4` del LTC4296.
-No bastaba con declararlo en el devicetree: hubo que **arreglar el driver**,
-que solo leía cuatro hijos. Ver §6.
+✅ **El Port 6 está habilitado Y VERIFICADO EN HARDWARE** (2026-07-30). Es el
+`port4` del LTC4296. No bastaba con declararlo en el devicetree: hubo que
+**arreglar el driver**, que solo leía cuatro hijos (`.port_config[]` se
+quedaba en el índice 3). Ver §6.
+
+**Verificación en la placa** (`tools/ltc4296-swd/`, rama `mps`):
+
+| Comprobación | Resultado |
+|---|---|
+| Puerto instanciado | `GPIO2 OUTEN = 0x01528000` — **cinco** `sccpo`, bit 24 (P2.24) incluido. Con cuatro sería `0x00528000` |
+| Entra en clasificación | `P4ST = 0x2023`, estado 3 = **SEARCHING** |
+| La línea SCCP responde | `sccpi` de **0** (módulo en reposo) a **1** en SEARCHING — igual que los puertos que negocian |
+
+⚠️ **El `.sbin` anterior de este fichero NO ARRANCABA.** Falló tres veces
+(una esperando 30 s), con el PC dando vueltas por el ROM sin saltar jamás a
+`0x1000xxxx`, pese a que su **firma verificaba** contra la CRK y su cabecera
+parecía correcta (magic, `rom_version`, `load`, `jump`, `imglen` coherente con
+el payload). **Se ha sustituido** por uno compilado desde el fuente de esta
+rama y firmado con la receta de §6. Causa del rechazo: **sin identificar**.
+
+⚠️ **Y NO tiene ningún problema de polaridad.** Se llegó a sospechar que el
+Port 6 sufría la inversión de par del MPS porque su `sccpi` leía 0 durante
+clasificación. **Era un artefacto de medida**: con el puerto sin instanciar el
+firmware tampoco configura el pull-up de ese `sccpi`, así que el pin flotaba.
+La inversión de par es **del MPS**, que tiene 4 slots; el MFS tiene 6
+(incluido el del PDM) y no la sufre.
 
 ---
 
