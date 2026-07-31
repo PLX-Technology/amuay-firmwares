@@ -38,7 +38,13 @@ def tank_regs(rec: dict) -> list:
     """Convierte una muestra en sus 10 registros Modbus."""
     if rec is None:
         return [0] * REGS_PER_TANK
-    v = struct.unpack(">HH", struct.pack(">f", float(rec.get("value") or 0.0)))
+    # ⚠️ `or 0.0` convertiria un None en un CERO PERFECTAMENTE CREIBLE. Cuando
+    # la ATT no tiene referencia su cuenta no significa nada, y un SCADA leyendo
+    # 0.00 mm no tiene forma de saber que es basura. Modbus no tiene NULL, pero
+    # un float32 NaN si es detectable por el cliente.
+    val = rec.get("value")
+    val = float("nan") if val is None else float(val)
+    v = struct.unpack(">HH", struct.pack(">f", val))
     cnt = int(rec.get("count") or 0) & 0xFFFFFFFF
     return [
         v[0], v[1],
@@ -78,10 +84,17 @@ class MqttOut:
 
     def on_sample(self, rec):
         t = f"{self.prefix}/{rec['tank_id']}"
-        self.c.publish(f"{t}/value", f"{rec['value']:.3f}", self.qos, self.retain)
+        # Sin referencia no se publica un numero: se manda carga VACIA, que en
+        # MQTT borra el mensaje retenido. Asi un suscriptor no se queda con el
+        # ultimo valor bueno creyendo que sigue vigente.
+        # (Y ademas f"{None:.3f}" reventaria.)
+        payload = "" if rec["value"] is None else f"{rec['value']:.3f}"
+        self.c.publish(f"{t}/value", payload, self.qos, self.retain)
         self.c.publish(f"{t}/raw", json.dumps({
             "tank_id": rec["tank_id"], "name": rec["name"], "ts": rec["ts"],
-            "value": rec["value"], "unit": rec["unit"], "count": rec["count"],
+            "value": rec["value"],   # null si no hay referencia
+            "ref_ok": rec.get("ref_ok", True),
+            "unit": rec["unit"], "count": rec["count"],
             "edges": rec["edges"], "errors": rec["errors"],
             "uptime_s": rec["uptime_s"], "mac": rec["mac"],
         }), self.qos, self.retain)

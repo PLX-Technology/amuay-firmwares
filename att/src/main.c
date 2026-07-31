@@ -183,9 +183,22 @@ static int att_calibrated(void)
 {
 	return (cfg.cal_cnt_b - cfg.cal_cnt_a) != 0;
 }
+/* Centinela de "sin dato" para el nivel. Espejo del ATT_NA de 16 bits que ya
+ * usan temperatura y humedad, pero para el campo de 32 bits. */
+#define ATT_LEVEL_NA ((int32_t)0x80000000)
+
+/* false = la cuenta arranco sin referencia (no habia checkpoint en EEPROM).
+ * Se declara aqui, y no junto al resto de la persistencia, porque
+ * att_level_mm() la necesita y esta antes en el fichero. */
+static bool enc_ref_ok;
+
 static int32_t att_level_mm(void)
 {
 	int32_t dc = cfg.cal_cnt_b - cfg.cal_cnt_a;
+	/* Sin referencia la CUENTA no significa nada: interpolar sobre ella
+	 * daria un nivel falso pero plausible. Mejor no dar dato. */
+	if (!enc_ref_ok) { return ATT_LEVEL_NA; }
+
 	if (dc == 0) { return enc_count; }
 	return cfg.cal_lvl_a +
 	       (int32_t)((int64_t)(enc_count - cfg.cal_cnt_a) *
@@ -256,7 +269,7 @@ struct enc_slot {
 static uint32_t enc_store_seq;      /* seq del ultimo checkpoint escrito */
 static int      enc_store_idx = -1; /* ranura del ultimo checkpoint */
 static int32_t  enc_store_last;     /* cuenta del ultimo checkpoint */
-static bool     enc_ref_ok;         /* false = arrancamos SIN referencia */
+/* declarada arriba, antes de att_level_mm() */
 
 static uint16_t enc_slot_crc(const struct enc_slot *r)
 {

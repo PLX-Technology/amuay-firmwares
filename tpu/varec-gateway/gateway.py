@@ -46,6 +46,9 @@ FRAME_FMT_BY_VER = {
 FRAME_LEN_BY_VER = {v: struct.calcsize(f) for v, f in FRAME_FMT_BY_VER.items()}
 FRAME_MIN_LEN = min(FRAME_LEN_BY_VER.values())
 ATT_NA = -32768          # centinela de la ATT: "sin sensor / sin dato"
+# Centinela de "sin referencia" para el nivel (32 bits). La ATT lo manda
+# cuando su cuenta arranco sin checkpoint: la calibracion no es aplicable.
+ATT_LEVEL_NA = -2147483648
 
 
 def parse_att_frame(payload: bytes):
@@ -77,9 +80,18 @@ def parse_att_frame(payload: bytes):
         # None y no 0.0, para no inventar una lectura que no existe.
         temp = None if temp == ATT_NA else temp / 10.0
         humi = None if humi == ATT_NA else humi / 10.0
+    # Sin referencia la CUENTA no significa nada, asi que NINGUNA calibracion
+    # es aplicable -- ni la de la ATT ni la de la TPU. Se marca explicitamente
+    # en vez de deducirlo de level_mm: en v1 ese campo no existe y vale None
+    # sin que eso signifique nada malo.
+    ref_ok = True
+    if level == ATT_LEVEL_NA:
+        level = None
+        ref_ok = False
     return {"ver": ver, "tank_id": tank, "seq": seq, "count": count,
-            "level_mm": level, "edges": edges, "errors": errors,
-            "uptime": uptime, "temp_c": temp, "humi_rh": humi}
+            "level_mm": level, "ref_ok": ref_ok, "edges": edges,
+            "errors": errors, "uptime": uptime, "temp_c": temp,
+            "humi_rh": humi}
 
 STOP = threading.Event()
 
@@ -424,7 +436,11 @@ def ingest(cfg: dict, store: Store, live: Live, outs: list):
             # La ATT manda MILISEGUNDOS (k_uptime_get_32). Convertir aqui: un
             # uptime de "121742 s" tras un reinicio delata el error de unidades.
             "uptime_s": uptime // 1000,
-            "value": count * (c.get("scale") or 1.0) + (c.get("offset") or 0.0),
+            # None = la ATT no tiene referencia: la cuenta no significa nada
+            # y aplicarle la recta daria un valor falso pero plausible.
+            "value": (count * (c.get("scale") or 1.0) + (c.get("offset") or 0.0)
+                      if fr["ref_ok"] else None),
+            "ref_ok": fr["ref_ok"],
             "unit": c.get("unit") or "mm",
             "name": c.get("name") or f"tank{tank_id}",
             # Ambiente (v3). None = la placa no lo reporta.
@@ -516,12 +532,17 @@ def ingest_modbus(cfg: dict, store: Store, live: Live, outs: list):
 
         store.upsert_tank(tank_id, dev)
         c = store.tank_cfg().get(tank_id, {})
+        # Los registros 7/8 salen del mismo att_level_mm(), asi que traen el
+        # centinela igual que la trama SPE.
+        ref_ok = (level != ATT_LEVEL_NA)
         base = level if cal else count          # calibrado -> nivel; si no, cuenta
         rec = {
             "ts": now(), "tank_id": tank_id, "mac": dev, "seq": 0,
             "count": count, "edges": edges, "errors": errors,
             "uptime_s": uptime_s,
-            "value": base * (c.get("scale") or 1.0) + (c.get("offset") or 0.0),
+            "value": (base * (c.get("scale") or 1.0) + (c.get("offset") or 0.0)
+                      if ref_ok else None),
+            "ref_ok": ref_ok,
             "unit": c.get("unit") or "mm",
             "name": c.get("name") or f"tank{tank_id}",
         }
