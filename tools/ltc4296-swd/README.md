@@ -32,6 +32,10 @@ Para el **MPS** (mismo SPI0/SS1 y mismo pinout SCCP que el MFS):
   (0x1000xxxx) o el chip se quedo en la ROM (0x0000xxxx).
 - `mps_auto.tcl` — **solo lectura**: `GIOST.PAD_AUTO` (modo gestionado vs
   autónomo) y `GCAP` (nº de puertos, soporte SCCP del chip).
+- `mfs_link.tcl` — estado de enlace de los 6 puertos del MFS (`g_link`). Ojo:
+  los slots VACIOS dan links FANTASMA (leen 1 sin nada conectado).
+- `mfs_phy6.tcl` — registros del ADIN1100 de los 6 puertos: PHYID, AN control
+  (bit12 = autoneg), AN status, B10L link, PMA. Es el discriminador bueno.
 - `mps_sccp_ctrl.tcl` — **solo lectura**: dirección y nivel de los pines
   `sccpi`/`sccpo` de los 4 puertos. Control obligatorio antes de culpar al
   módulo: comprueba que `sccpi` bajo no lo esté causando nuestro propio FET.
