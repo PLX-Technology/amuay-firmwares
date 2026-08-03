@@ -296,3 +296,55 @@ un PSM en el slot Port 6 y un PD que negocie.
 
 **El strap MDIO del PSM debe coincidir con su slot.** Si no coincide, el enlace
 entrena igual pero **no cruza ni una trama** — *link-up no prueba datos*.
+
+---
+
+## 8. ★ `phyPullupCtrl = 1` — el enlace de datos de los seis puertos (2026-08-03)
+
+**Sintoma:** el slot Port 4 (`macPort5`) entregaba potencia pero **no enlazaba
+datos**. Se arrastraba desde julio como "problema conocido, sin resolver".
+
+**Causa:** el **segundo campo** de `phyConfig` estaba a `0` en los seis puertos.
+Con `phyPullupCtrl = 0` el SES **no llega a identificar el PHY** (`PHYID1` lee
+`0x0000`), por tanto no lo configura, y **la autonegociacion se queda apagada**.
+
+```c
+/* antes */ { true, 0, N, SES_phySpeed10, ... }
+/* ahora */ { true, 1, N, SES_phySpeed10, ... }
+```
+
+El arreglo era conocido desde el 21 de julio (rama
+`fix/power-switch-phypullupctrl`) y **nunca se habia aplicado a esta rama**.
+
+**Verificado en la placa:** `PHYID1 = 0x0283`, `AN control` bit12 = 1,
+portadora real en `B10L`. Con una ATT conectada: `carrier=1 up=1` en su lado.
+
+### Barrido de PHY de los 6 puertos
+
+Se anaden globales `g_ph_*[6]`, refrescadas cada segundo, legibles por SWD.
+
+⚠️ **Existen porque `g_link` no sirve para diagnosticar.** No distingue "el SES
+no ve el PHY" de "el PHY esta pero sin portadora", y **da links fantasma en los
+slots vacios** (lee 1 sin nada conectado). Solo un 0 de `g_link` es fiable.
+Estas globales si separan los dos casos:
+
+| Registro | Que dice |
+|---|---|
+| `g_ph_id1` | `0x0283` = el SES ve el ADIN1100; `0xFFFF`/`0x0000` = no lo identifica |
+| `g_ph_b10l` | bit0 = portadora real a nivel 10BASE-T1L |
+| `g_ph_anst` | bit2 = link, bit5 = AN completada |
+| `g_ph_anctl` | bit12 = autonegociacion encendida |
+
+Las direcciones **dependen del build**: sacarlas del `.map`, nunca reutilizar
+las de otro. Como identificar el build que corre de verdad: leer la cabecera
+del `.sbin` en flash (`mdw 0x10000000 8`) y buscar el `jump_address` en los
+`.map`. Los builds `build_pullup` y `build_phydiag` comparten `__start`
+(`0x100070f4`) y tamano, y **aun asi tienen SHA distinto** — pero las
+direcciones de los simbolos coinciden, asi que para leerlos da igual cual sea.
+
+### ⚠️ Este build lleva `CONFIG_LOG=y`
+
+`prj.conf` tiene el registro **activado** a nivel depuracion. Es lo que corre en
+la placa hoy y por eso se sube asi (artefacto y codigo deben coincidir), pero
+**para produccion hay que volver a `CONFIG_LOG=n`** y valorar quitar el barrido
+de PHY: son 36 lecturas MDIO por segundo que en operacion normal no hacen falta.

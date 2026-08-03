@@ -38,6 +38,15 @@ K_THREAD_STACK_DEFINE(stack_area, 2000);
 K_SEM_DEFINE(reader_thread_sem, 0, 1);
 K_MUTEX_DEFINE(spi_mutex);
 volatile int g_link[6];
+/* Barrido de PHY de los 6 puertos. Indice = numero de macPort.
+ * El mapeo conocido: macPort5 = slot Port 4 (rotulado en la placa). */
+volatile unsigned short g_ph_id1[6];    /* 0x010002  0x0283 = ADIN1100 visto */
+volatile unsigned short g_ph_id2[6];    /* 0x010003  0xBC81 */
+volatile unsigned short g_ph_b10l[6];   /* 0x0108F7  B10L link status */
+volatile unsigned short g_ph_anst[6];   /* 0x070201  AN status */
+volatile unsigned short g_ph_anctl[6];  /* 0x070200  AN control, bit12 = AN on */
+volatile unsigned short g_ph_pma[6];    /* 0x010834  PMA ctrl (maestro/esclavo) */
+volatile int            g_ph_rc[6];     /* rc de la 1a lectura de cada puerto */
 volatile unsigned int g_st[10];
 volatile unsigned int g_st3[5];
 volatile unsigned int g_rx[4], g_tx[4];
@@ -553,12 +562,12 @@ int main(void)
 		 * phyAddr: PROVISIONAL. La fija el DIP de cada modulo y aqui no la
 		 * conocemos: el escaneo MDIO del arranque (g_map) dira las reales.
 		 */
-		{ 1, SES_rmiiMode, { 0, 0, 0 }, 1, SES_phyADIN1100, {true, 0, 0, SES_phySpeed10, SES_phyDuplexModeFull, SES_autoMdix}},
-		{ 1, SES_rmiiMode, { 0, 0, 0 }, 1, SES_phyADIN1100, {true, 0, 1, SES_phySpeed10, SES_phyDuplexModeFull, SES_autoMdix}},
-		{ 1, SES_rmiiMode, { 0, 0, 0 }, 1, SES_phyADIN1100, {true, 0, 2, SES_phySpeed10, SES_phyDuplexModeFull, SES_autoMdix}},
-		{ 1, SES_rmiiMode, { 0, 0, 0 }, 1, SES_phyADIN1100, {true, 0, 3, SES_phySpeed10, SES_phyDuplexModeFull, SES_autoMdix}},
-		{ 1, SES_rmiiMode, { 0, 0, 0 }, 1, SES_phyADIN1100, {true, 0, 4, SES_phySpeed10, SES_phyDuplexModeFull, SES_autoMdix}},
-		{ 1, SES_rmiiMode, { 0, 0, 0 }, 1, SES_phyADIN1100, {true, 0, 5, SES_phySpeed10, SES_phyDuplexModeFull, SES_autoMdix}}
+		{ 1, SES_rmiiMode, { 0, 0, 0 }, 1, SES_phyADIN1100, {true, 1, 0, SES_phySpeed10, SES_phyDuplexModeFull, SES_autoMdix}},
+		{ 1, SES_rmiiMode, { 0, 0, 0 }, 1, SES_phyADIN1100, {true, 1, 1, SES_phySpeed10, SES_phyDuplexModeFull, SES_autoMdix}},
+		{ 1, SES_rmiiMode, { 0, 0, 0 }, 1, SES_phyADIN1100, {true, 1, 2, SES_phySpeed10, SES_phyDuplexModeFull, SES_autoMdix}},
+		{ 1, SES_rmiiMode, { 0, 0, 0 }, 1, SES_phyADIN1100, {true, 1, 3, SES_phySpeed10, SES_phyDuplexModeFull, SES_autoMdix}},
+		{ 1, SES_rmiiMode, { 0, 0, 0 }, 1, SES_phyADIN1100, {true, 1, 4, SES_phySpeed10, SES_phyDuplexModeFull, SES_autoMdix}},
+		{ 1, SES_rmiiMode, { 0, 0, 0 }, 1, SES_phyADIN1100, {true, 1, 5, SES_phySpeed10, SES_phyDuplexModeFull, SES_autoMdix}}
 	};
 
 	SES_driverFunctions_t comm_callbacks = {
@@ -731,6 +740,25 @@ int main(void)
 		g_link[3] = SES_GetLinkState(SES_macPort3);
 		g_link[4] = SES_GetLinkState(SES_macPort4);
 		g_link[5] = SES_GetLinkState(SES_macPort5);
+
+		/* Registros del PHY de los seis puertos. g_link no distingue
+		 * "el SES no ve el PHY" de "el PHY esta pero sin portadora", y
+		 * ademas da links fantasma en los slots vacios. Esto si. */
+		{
+			static const SES_mac_t phl[6] = {
+				SES_macPort0, SES_macPort1, SES_macPort2,
+				SES_macPort3, SES_macPort4, SES_macPort5 };
+			uint16_t v;
+
+			for (int q = 0; q < 6; q++) {
+				v = 0; g_ph_rc[q] = SES_ReadPhyReg(phl[q], 0x010002, &v); g_ph_id1[q]   = v;
+				v = 0; SES_ReadPhyReg(phl[q], 0x010003, &v);              g_ph_id2[q]   = v;
+				v = 0; SES_ReadPhyReg(phl[q], 0x0108F7, &v);              g_ph_b10l[q]  = v;
+				v = 0; SES_ReadPhyReg(phl[q], 0x070201, &v);              g_ph_anst[q]  = v;
+				v = 0; SES_ReadPhyReg(phl[q], 0x070200, &v);              g_ph_anctl[q] = v;
+				v = 0; SES_ReadPhyReg(phl[q], 0x010834, &v);              g_ph_pma[q]   = v;
+			}
+		}
 
 		{
 			static int mfs_rescan = 0;
