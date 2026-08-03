@@ -113,7 +113,27 @@ de dar nada por bueno**, no ir a mirar síntomas indirectos.
 
 ---
 
+## 3.bis ★ Grabar SIN SWD, por serie — ver `GRABADO-POR-SERIE.md`
+
+Verificado 2026-08-03 con firmware real: **se puede grabar el MAX32690 entero
+por el LPUART del J11**, sin tocar `SWDIO`/`SWCLK`. Es la via para actualizar o
+recuperar un field switch en campo con solo un cable USB, y la unica que quedo
+disponible el dia que el SWD del Pico dejo de responder.
+
+Dos cosas que hay que saber, y estan explicadas en ese documento:
+
+- ⚠️ **Hay que rellenar la imagen a pagina completa de 16 KB**
+  (`tools/sscp/pad_a_pagina.py`). Sin eso falla SIEMPRE en el 99 %.
+- ⚠️ **No tocar la placa durante la transferencia.** Cada reset o corte mata la
+  sesion, y ademas enmascara el fallo real.
+
 ## 4. Aprovisionamiento de la CRK (placa virgen)
+
+> ⚠️ **Corregido 2026-08-03:** lo de "POR frio DURANTE la ventana" de mas abajo
+> vale para una placa **virgen o sin aplicacion valida**... y en ese caso ni
+> siquiera hace falta: el ROM **espera indefinidamente**, asi que basta con
+> enchufar y lanzar. El POR solo es necesario cuando la placa **si** tiene
+> firmware que arranca. Ver `GRABADO-POR-SERIE.md` §4.
 
 Sin la **CRK** (Customer Root Key) en OTP, el ROM no valida la imagen firmada y
 **no auto-arranca**, aunque la flash esté perfectamente escrita.
