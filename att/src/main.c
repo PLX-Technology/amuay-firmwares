@@ -17,6 +17,8 @@
  *
  * BYPASS: PD14 (UC_BYPASS_EN) en ALTO energiza el rele K1 y mete el ADIN2111 en
  * la linea SPE. Sin esto NO hay link jamas (el rele arranca puenteando P1<->P2).
+ * Se puede desactivar con CFG_F_NO_K1 (HR 0 bit2) en las placas con SJ1
+ * puenteado, donde el ADIN2111 ya esta en la linea por hardware.
  */
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
@@ -156,6 +158,11 @@ struct att_cfg {
 
 #define CFG_F_PUSH   BIT(0)
 #define CFG_F_RTU    BIT(1)
+/* NO energizar K1. Opt-in a proposito: el rele en reposo puentea P1<->P2 y
+ * deja el ADIN2111 FUERA de la linea, asi que en una placa sin el puente SJ1
+ * activar esto la deja sin enlace de red y sin forma de arreglarlo salvo por
+ * consola serie o RS-485. El defecto (bit a 0) energiza, como siempre. */
+#define CFG_F_NO_K1  BIT(2)
 
 static const struct device *const eep = DEVICE_DT_GET(DT_NODELABEL(eeprom0));
 static struct att_cfg cfg;
@@ -427,7 +434,7 @@ static int mb_input_reg_rd(uint16_t addr, uint16_t *reg)
 }
 
 /* --- HOLDING REGISTERS = configuracion (FC 03 leer / FC 06 escribir) ---
- *   HR 0 : flags (bit0 = push L2, bit1 = Modbus RTU)
+ *   HR 0 : flags (bit0 = push L2, bit1 = Modbus RTU, bit2 = NO energizar K1)
  *   HR 1 : unit id Modbus (1..247)
  *   HR 2 : baudios RTU / 100 (96, 192, 384, 1152)
  *   HR 3 : paridad RTU (0=none 1=even 2=odd)
@@ -463,7 +470,7 @@ static int mb_holding_rd(uint16_t addr, uint16_t *reg)
 static int mb_holding_wr(uint16_t addr, uint16_t reg)
 {
 	switch (addr) {
-	case 0: cfg.flags = reg & (CFG_F_PUSH | CFG_F_RTU); break;
+	case 0: cfg.flags = reg & (CFG_F_PUSH | CFG_F_RTU | CFG_F_NO_K1); break;
 	case 1:
 		if (reg < 1 || reg > 247) { return -ENOTSUP; }   /* fuera del rango Modbus */
 		cfg.unit_id = reg;
@@ -941,8 +948,26 @@ int main(void)
 #endif
 	LOG_INF("ADIN2111 ready=%d", device_is_ready(adin) ? 1 : 0);
 
+	/* La configuracion se lee ANTES del bypass porque la decision depende de
+	 * ella. Esto retrasa unos ms la energizacion del rele, que es el lado
+	 * seguro: la nota de arriba avisa de que intentarlo DEMASIADO PRONTO
+	 * falla si la bobina necesita un rail que aun no esta. */
+	cfg_load();
+
 	/* 1) sacar el bypass: mete el ADIN2111 en la linea SPE */
-	if (!device_is_ready(gpd)) {
+	if (cfg.flags & CFG_F_NO_K1) {
+		/* ⚠️ Placa con SJ1 PUENTEADO: el ADIN2111 ya esta cableado en la
+		 * linea y el rele no pinta nada -- ademas es de 5 V en un rail de
+		 * 3,3 V, asi que ni cierra. Se deja el pin en BAJO de forma
+		 * explicita, no sin configurar: un pin flotando en la puerta de un
+		 * driver de bobina no es un estado, es una loteria. */
+		if (device_is_ready(gpd)) {
+			gpio_pin_configure(gpd, BYPASS_EN_PIN, GPIO_OUTPUT_INACTIVE);
+			g_k1_level = gpio_pin_get_raw(gpd, BYPASS_EN_PIN);
+		}
+		LOG_INF("UC_BYPASS_EN: K1 NO se energiza (CFG_F_NO_K1). Se asume SJ1"
+			" puenteado; PD14 = %d", g_k1_level);
+	} else if (!device_is_ready(gpd)) {
 		LOG_ERR("GPIOD no listo: no puedo sacar el bypass");
 	} else {
 		int ret = gpio_pin_configure(gpd, BYPASS_EN_PIN, GPIO_OUTPUT_ACTIVE);
@@ -960,7 +985,6 @@ int main(void)
 	/* 2) encoder */
 	enc_init();
 
-	cfg_load();
 	enc_store_load();
 
 	{
