@@ -55,6 +55,12 @@ MPS_I_NA      = -32768              # el puerto no da lectura valida
 #   magic ver nports seq uptime_ms  iout[4]  pxst[4]
 MPS_FMT       = "!IHHII" + "h" * 4 + "H" * 4
 MPS_LEN       = struct.calcsize(MPS_FMT)
+#   v2, al final de la trama: gcmd unlocks vin_mv vin_ok disc_n
+MPS_FMT_V2    = "!HHiHH"
+MPS_LEN_V2    = struct.calcsize(MPS_FMT_V2)
+# Llave de desbloqueo del LTC4296 (GCMD). Con el chip bloqueado, las
+# escrituras se ignoran EN SILENCIO: no hay error que mirar.
+LTC_UNLOCK_KEY = 0x05
 # Estado PSE (bits 2:0 de PxST). El 2 es el unico que significa "entregando".
 PSE_ESTADO = {0: "deshabilitado", 1: "durmiendo", 2: "entregando",
               3: "buscando", 4: "error", 5: "inactivo", 6: "pre-deteccion",
@@ -82,13 +88,29 @@ def parse_mps_frame(payload: bytes):
             "entregando": st == 2,
             "pxst": pxst[i],
         })
-    return {"ver": ver, "seq": seq, "uptime_s": uptime_ms // 1000,
-            "puertos": puertos}
+    d = {"ver": ver, "seq": seq, "uptime_s": uptime_ms // 1000,
+         "puertos": puertos, "chip": None}
+    # Solo si la version lo anuncia Y los bytes estan: asi un MPS con firmware
+    # v1 sigue funcionando contra esta pasarela.
+    if ver >= 2 and len(payload) >= MPS_LEN + MPS_LEN_V2:
+        gcmd, unlocks, vin_mv, vin_ok, disc_n = struct.unpack(
+            MPS_FMT_V2, payload[MPS_LEN:MPS_LEN + MPS_LEN_V2])
+        d["chip"] = {
+            "gcmd": gcmd,
+            "bloqueado": (gcmd & LTC_UNLOCK_KEY) != LTC_UNLOCK_KEY,
+            "redesbloqueos": unlocks,
+            # -1 = aun no ha habido ninguna clasificacion que medir. None, no 0:
+            # un cero aqui se leeria como "el rail esta muerto".
+            "vin_mv": None if vin_mv < 0 else vin_mv,
+            "vin_en_rango": bool(vin_ok),
+            "clasif_abandonadas": disc_n,
+        }
+    return d
 
 
 # Ultima telemetria del MPS. En memoria a proposito: es un panel de estado
 # instantaneo, no una serie historica.
-PSE_LIVE = {"ts": 0, "mac": None, "puertos": []}
+PSE_LIVE = {"ts": 0, "mac": None, "puertos": [], "chip": None}
 PSE_LOCK = threading.Lock()
 
 
@@ -123,6 +145,7 @@ def ingest_pse(cfg: dict):
             PSE_LIVE["puertos"] = fr["puertos"]
             PSE_LIVE["uptime_s"] = fr["uptime_s"]
             PSE_LIVE["seq"] = fr["seq"]
+            PSE_LIVE["chip"] = fr.get("chip")
     s.close()
 
 
