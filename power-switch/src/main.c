@@ -9,6 +9,7 @@ LOG_MODULE_REGISTER(eth_adin6310, CONFIG_LOG_DEFAULT_LEVEL);
 
 #include <zephyr/kernel.h>
 #include <stdio.h>
+#include <string.h>
 #include <zephyr/device.h>
 #include <zephyr/net/net_config.h>
 #include <zephyr/drivers/gpio.h>
@@ -481,6 +482,114 @@ int adin6310_enable_pse(struct device *ltc4296, uint8_t switch_op)
 	return device_init(ltc4296);
 }
 
+/* ============ TELEMETRIA: CORRIENTE POR PUERTO DEL LTC4296 ============
+ * El MPS no tiene pila de red y no le hace falta: SES_XmitFrame() inyecta una
+ * trama ya montada directamente en el switch. Se arma la cabecera Ethernet a
+ * mano.
+ *
+ * Ethertype propio 0x88B6, al lado del 0x88B5 que usa la ATT para sus tramas
+ * de nivel, para que la pasarela pueda distinguirlas sin ambiguedad.
+ *
+ * Destino difusion: la TPU no necesita conocer ninguna MAC de antemano, y el
+ * switch la hace llegar por donde este conectada.
+ * ==================================================================== */
+#define MPS_ETHERTYPE  0x88B6
+#define MPS_MAGIC      0x4D505331u   /* "MPS1" */
+#define MPS_TELE_TICKS 2             /* el bucle es de 1 s -> cada 2 s */
+#define MPS_I_NA       ((int16_t)0x8000)  /* sin dato; espejo del ATT_NA */
+
+struct mps_tele {
+	uint8_t  dst[6];
+	uint8_t  src[6];
+	uint16_t ethertype;
+	uint32_t magic;
+	uint16_t version;
+	uint16_t nports;
+	uint32_t seq;
+	uint32_t uptime_ms;
+	int16_t  iout_ma[4];   /* MPS_I_NA = el puerto no da lectura valida */
+	uint16_t pxst[4];      /* estado, para distinguir "no entrega" de "0 mA" */
+	/* --- v2: diagnostico del chip. Van al final a proposito: un parser v1
+	 * desempaqueta solo los primeros bytes y no se entera. --- */
+	uint16_t gcmd;         /* GCMD; 0x05 = desbloqueado */
+	uint16_t unlocks;      /* veces que hubo que reescribir la llave */
+	int32_t  vin_mv;       /* Vin de la ultima clasificacion; -1 = ninguna aun */
+	uint16_t vin_ok;       /* 1 = ese Vin estaba en rango */
+	uint16_t disc_n;       /* clasificaciones abandonadas por Vin fuera de rango */
+} __packed;
+
+/* MAC localmente administrada, misma familia que el resto del banco
+ * (la spe0 de la TPU es 02:00:00:AD:11:10). */
+static const uint8_t mps_mac[6] = { 0x02, 0x00, 0x00, 0xAD, 0x4C, 0x01 };
+
+volatile int g_tele_rc;      /* ultimo retorno de SES_XmitFrame */
+volatile unsigned g_tele_n;  /* tramas emitidas */
+
+/* Vigilante de bloqueo del LTC4296 */
+volatile unsigned short g_gcmd;      /* ultimo GCMD leido */
+volatile unsigned short g_unlock_n;  /* veces que hubo que re-desbloquear */
+
+/* Testigos del driver: el Vin que midio la ultima clasificacion, incluida la
+ * del arranque en frio, que es la unica que importa para este fallo. */
+extern volatile int      g_ltc_vin_mv;
+extern volatile unsigned char  g_ltc_vin_ok;
+extern volatile unsigned short g_ltc_disc_n;
+
+static void mps_tele_send(const struct device *ltc)
+{
+	static uint32_t seq;
+	static const enum ltc4296_port pp[4] = {
+		LTC_PORT0, LTC_PORT1, LTC_PORT2, LTC_PORT3 };
+	struct mps_tele f;
+	SES_transmitFrameData_t tx;
+
+	memset(&f, 0, sizeof(f));
+	memset(f.dst, 0xFF, sizeof(f.dst));            /* difusion */
+	memcpy(f.src, mps_mac, sizeof(f.src));
+	f.ethertype = htons(MPS_ETHERTYPE);
+	f.magic     = htonl(MPS_MAGIC);
+	f.version   = htons(2);
+	f.nports    = htons(4);
+	seq++;
+	f.seq       = htonl(seq);
+	f.uptime_ms = htonl((uint32_t)k_uptime_get_32());
+
+	for (int i = 0; i < 4; i++) {
+		int ima = 0;
+		uint16_t st = 0;
+
+		/* ⚠️ El ADC de puerto solo tiene dato valido (bit NEW) en los
+		 * puertos que entregan. Si falla se manda el centinela: un 0
+		 * seria un dato falso perfectamente creible. */
+		if (ltc4296_read_port_adc(ltc, pp[i], &ima) == 0) {
+			if (ima >  32000) { ima =  32000; }
+			if (ima < -32000) { ima = -32000; }
+			f.iout_ma[i] = (int16_t)htons((uint16_t)(int16_t)ima);
+		} else {
+			f.iout_ma[i] = (int16_t)htons((uint16_t)MPS_I_NA);
+		}
+
+		if (ltc4296_read_port_status(ltc, pp[i], &st) != 0) { st = 0; }
+		f.pxst[i] = htons(st);
+	}
+
+	f.gcmd    = htons(g_gcmd);
+	f.unlocks = htons(g_unlock_n);
+	f.vin_mv  = (int32_t)htonl((uint32_t)g_ltc_vin_mv);
+	f.vin_ok  = htons(g_ltc_vin_ok);
+	f.disc_n  = htons(g_ltc_disc_n);
+
+	memset(&tx, 0, sizeof(tx));
+	tx.frameType      = SES_standardFrame;
+	tx.data_p         = &f;
+	tx.byteCount      = sizeof(f);
+	tx.ses.generateFcs   = 1;
+	tx.ses.egressPortMap = 0xFF;   /* por todos: la TPU puede colgar de cualquiera */
+
+	g_tele_rc = SES_XmitFrame(&tx);
+	if (g_tele_rc == 0) { g_tele_n++; }
+}
+
 int main(void)
 {
 	int32_t ret;
@@ -861,8 +970,16 @@ int main(void)
 	}
 	unsigned int lg_tick = 0;
 
+	unsigned int tele_tick = 0;
+
 	while (1) {
 		k_sleep(K_MSEC(1000));
+
+		if (++tele_tick >= MPS_TELE_TICKS) {
+			tele_tick = 0;
+			mps_tele_send(ltc4296_dev);
+		}
+
 		g_link[0] = SES_GetLinkState(SES_macPort0);
 		g_link[1] = SES_GetLinkState(SES_macPort1);
 		g_link[2] = SES_GetLinkState(SES_macPort2);
@@ -882,6 +999,32 @@ int main(void)
 			int any = 0;
 
 			lg_tick = 0;
+
+			/* ⚠️ VIGILANTE DE BLOQUEO — tiene que ir ANTES de los
+			 * reintentos de abajo. El LTC4296 se re-bloquea solo y un chip
+			 * bloqueado IGNORA LAS ESCRITURAS EN SILENCIO, asi que sin esto
+			 * ltc4296_retry_spoe_sccp() escribiria al vacio indefinidamente
+			 * y el puerto no volveria a negociar hasta un reset. probe()
+			 * desbloquea una sola vez, al arrancar.
+			 *
+			 * NO se llama a ltc4296_chk_global_events() (la recuperacion del
+			 * fabricante, sin un solo llamante en todo el arbol): cuando ve
+			 * el chip bloqueado hace ltc4296_reset(), que TIRARIA la entrega
+			 * de los puertos vivos. Reescribir la llave es idempotente. */
+			{
+				uint16_t gc = 0;
+
+				if (ltc4296_reg_read(ltc4296_dev, 0x08, &gc) == 0) {
+					if ((gc & 0x05) != 0x05) {
+						ltc4296_unlock(ltc4296_dev);
+						g_unlock_n++;
+						/* releer: si sigue bloqueado, el problema es
+						 * mas gordo y hay que verlo en el panel */
+						ltc4296_reg_read(ltc4296_dev, 0x08, &gc);
+					}
+					g_gcmd = gc;
+				}
+			}
 
 			/* re-negociar SOLO los puertos que aun no entregan (DELIVERING=2) */
 			for (int q = 0; q < 4; q++) {

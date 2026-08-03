@@ -22,6 +22,14 @@
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(LTC4296, CONFIG_SENSOR_LOG_LEVEL);
 
+/* Instrumentacion del arranque en frio: el Vin que midio la ultima
+ * clasificacion, incluida la que hace probe() con el rail aun subiendo.
+ * Volatiles porque los lee la aplicacion (telemetria) sin sincronizacion:
+ * son testigos de diagnostico, no estado compartido. */
+volatile int      g_ltc_vin_mv = -1;  /* -1 = todavia no se ha medido ninguna */
+volatile unsigned char  g_ltc_vin_ok;   /* 1 = estaba dentro de rango */
+volatile unsigned short g_ltc_disc_n;   /* clasificaciones abandonadas por Vin */
+
 int ltc4296_spoe_vol_range_mv[12][2] = { {20000,30000},  /* SPoE Class 10         */
 						{20000,30000},  /* SPoE Class 11         */
 						{20000,30000},  /* SPoE Class 12         */
@@ -965,6 +973,14 @@ int ltc4296_do_spoe_sccp(const struct device *dev, enum ltc4296_board_class boar
 		ret = ltc4296_is_vin_valid(dev, port_vin_mv, board_class, &vin_valid);
 		if (ret != 0) {
 			return ret;
+		}
+
+		/* Testigo del arranque en frio: este es el numero que decide si el
+		 * puerto llega a clasificar, y sin esto no se ve desde ningun lado. */
+		g_ltc_vin_mv = port_vin_mv;
+		g_ltc_vin_ok = (vin_valid ? 1 : 0);
+		if (!vin_valid) {
+			g_ltc_disc_n++;
 		}
 		if(vin_valid == true) {
 			if(ltc4296_vi->ltc4296_print_vin == true) {

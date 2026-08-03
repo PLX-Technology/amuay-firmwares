@@ -742,3 +742,85 @@ directo al energizar.
 nada (negocia o no entrega), asi se comprueba que el riel y el LTC4296 arrancan
 sanos — `g_gcfg` debe pasar de `0xffff` a un valor legible — antes de arriesgar
 ningun modulo.
+
+---
+
+## 8. Telemetria por Ethernet, vigilante de bloqueo y testigo de Vin (2026-08-03)
+
+### 8.1 Telemetria
+
+El MPS emite cada 2 s una trama propia (**ethertype `0x88B6`**, al lado del
+`0x88B5` de la ATT) con la corriente y el estado de cada puerto PSE, mas el
+diagnostico del chip. No hace falta pila de red: la libreria del ADIN6310
+expone `SES_XmitFrame()`, que inyecta una trama ya montada en el switch.
+
+⚠️ **Sin dato no es cero.** El ADC de puerto solo da lectura valida (bit
+`NEW`, BIT(12)) en los puertos que entregan. En el resto se manda un centinela
+y el consumidor pinta un guion. Un cero creible es peor que un hueco.
+
+Escala: `i_mA = (codigo - 2048) * 1000 / (10 * hs_resistor)`, con
+**`hs_resistor` en MILIOHMIOS**. Verificado contra la fuente de banco: un
+puerto entregando al MFS daba 50,4 mA con `hs=270` y la fuente marcaba 58 mA
+en total. La hipotesis alternativa (centiohmios) daba 504 mA, diez veces mas
+que todo el consumo del equipo.
+
+### 8.2 ★ Vigilante de bloqueo del LTC4296
+
+**El chip se re-bloquea solo, y un chip bloqueado IGNORA LAS ESCRITURAS EN
+SILENCIO.** En el codigo tal como estaba:
+
+- `probe()` desbloquea **una sola vez**, al arrancar (`ltc4296.c:1166`)
+- `ltc4296_retry_spoe_sccp()` es una envoltura pelada de `do_spoe_sccp` y
+  **no desbloquea nunca** (`ltc4296.c:1142-1151`)
+- `ltc4296_chk_global_events()`, que es la recuperacion que escribio el
+  fabricante, **no la llama nadie**: en toda la rama solo existen la definicion
+  y el prototipo. Codigo muerto.
+
+Consecuencia: si el chip se bloquea, el reintento de cada 5 s escribe al vacio
+**para siempre** y el puerto no vuelve a negociar hasta un reset. Encaja con el
+sintoma clasico de este banco, "solo negocia despues de un POR".
+
+El bucle principal ahora lee `GCMD` antes de cada ronda de reintentos y
+reescribe la llave si hace falta.
+
+⚠️ **NO se llama a `chk_global_events()`**: cuando encuentra el chip bloqueado
+hace `ltc4296_reset()`, que **tiraria la entrega de los puertos vivos**. La
+recuperacion del fabricante es mas agresiva de lo que conviene. Reescribir la
+llave es idempotente y no perturba nada.
+
+⚠️ **SIN CONFIRMAR EN HARDWARE.** El mecanismo esta demostrado leyendo el
+codigo, no observado en la placa: en toda la sesion del 3-ago `redesbloqueos`
+se quedo en 0. Y cuando el MFS dejo de entregar, su `GCMD` leia `0x0005`
+(desbloqueado), asi que **aquello fue otra cosa**. Por eso el parche ademas
+instrumenta: si el mecanismo es este, el contador lo delatara.
+
+### 8.3 Testigo de Vin del arranque en frio
+
+El valor que decide si un puerto llega a clasificar lo mide `probe()` **durante
+el arranque, con el rail todavia subiendo**, y no salia de la funcion por
+ningun camino: usa un struct local y ademas **descarta el resultado** de
+`do_spoe_sccp()` (`ltc4296.c:1208-1212`). De ahi que el testigo tenga que vivir
+en el driver.
+
+**Medido en la placa, dos arranques, valor identico:**
+
+| | |
+|---|---|
+| Suelo de clase 13 (`ltc4296.c:28`) | **50000 mV exactos** |
+| Vin leido alimentando a 54 V | **52809 mV** |
+| Error de ganancia del ADC | **-2,2 %** (se estimaba -2,5 %) |
+| Margen real | **2,8 V** |
+
+Es decir: **por debajo de ~51,2 V de entrada real** la lectura cae bajo el
+suelo, `is_vin_valid()` dice que no y el puerto queda apagado. Por eso este
+banco necesita la fuente a 54 V y no a 50.
+
+### 8.4 Pendiente: bajar el suelo a 48900
+
+La comprobacion actual compara una lectura **descalibrada** contra el limite
+del estandar, lo que obliga a ~51,2 V reales para algo especificado a 50 V.
+Con `48900` el filtro pasaria a significar *"Vin real >= 50 V"*.
+
+No es relajar el estandar: es compensar un error de medida conocido. Y alinea
+el MPS con el MFS, cuyo binario ya lleva `49000` — un valor que, por cierto,
+**sigue existiendo solo dentro del `.sbin` y no en el fuente**.

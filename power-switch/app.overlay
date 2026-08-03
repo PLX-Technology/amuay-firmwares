@@ -1,21 +1,21 @@
 &ltc4296 {
         port0 {
                 adi,power-class = <LTC4296_PSE_SCCP_CLASS_13>;
-                adi,hs-resistor = <250>;
+                adi,hs-resistor = <270>;
         };
 
         port1 {
                 adi,power-class = <LTC4296_PSE_SCCP_CLASS_13>;
-                adi,hs-resistor = <250>;
+                adi,hs-resistor = <270>;
         };
 
         port2 {
                 adi,power-class = <LTC4296_PSE_SCCP_CLASS_13>;
-                adi,hs-resistor = <250>;
+                adi,hs-resistor = <270>;
         };
 
         port3 {
                 adi,power-class = <LTC4296_PSE_SCCP_CLASS_13>;
-                adi,hs-resistor = <250>;
+                adi,hs-resistor = <270>;
         };
 };
