@@ -1,0 +1,11 @@
+# Los scripts de shell se ejecutan en Linux (TPU) y DEBEN llevar finales LF.
+#
+# ⚠️ Esto no es cosmetica. Un script con CRLF falla de una forma que no se
+# parece a la causa: bash no reconoce el terminador de un heredoc como `EOF`
+# sino como `EOF\r`, y el error que sale es
+#     "syntax error: unexpected end of file"
+# apuntando al final del fichero, no a la linea del problema. Paso el
+# 2026-08-03 al editar montar_dhcp_spe.sh desde Windows.
+*.sh text eol=lf
+
+# Los .tcl los lee openocd, que corre en Windows; se dejan como estan.
