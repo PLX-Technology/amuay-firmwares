@@ -46,6 +46,95 @@ FRAME_FMT_BY_VER = {
 FRAME_LEN_BY_VER = {v: struct.calcsize(f) for v, f in FRAME_FMT_BY_VER.items()}
 FRAME_MIN_LEN = min(FRAME_LEN_BY_VER.values())
 ATT_NA = -32768          # centinela de la ATT: "sin sensor / sin dato"
+
+# --- Telemetria del power switch (MPS): corriente por puerto del LTC4296 ---
+# Ethertype propio para no mezclarla con la de los tanques.
+MPS_ETHERTYPE = 0x88B6
+MPS_MAGIC     = 0x4D505331          # "MPS1"
+MPS_I_NA      = -32768              # el puerto no da lectura valida
+#   magic ver nports seq uptime_ms  iout[4]  pxst[4]
+MPS_FMT       = "!IHHII" + "h" * 4 + "H" * 4
+MPS_LEN       = struct.calcsize(MPS_FMT)
+# Estado PSE (bits 2:0 de PxST). El 2 es el unico que significa "entregando".
+PSE_ESTADO = {0: "deshabilitado", 1: "durmiendo", 2: "entregando",
+              3: "buscando", 4: "error", 5: "inactivo", 6: "pre-deteccion",
+              7: "desconocido"}
+
+
+def parse_mps_frame(payload: bytes):
+    """Decodifica la telemetria del MPS (sin cabecera Ethernet)."""
+    if len(payload) < MPS_LEN:
+        return None
+    f = struct.unpack(MPS_FMT, payload[:MPS_LEN])
+    if f[0] != MPS_MAGIC:
+        return None
+    ver, nports, seq, uptime_ms = f[1], f[2], f[3], f[4]
+    iout, pxst = f[5:9], f[9:13]
+    puertos = []
+    for i in range(min(nports, 4)):
+        st = pxst[i] & 0x7
+        puertos.append({
+            "puerto": i,
+            "slot": i + 1,                  # serigrafia del MPS: slot = puerto + 1
+            # None = sin lectura valida. NO es cero.
+            "ma": None if iout[i] == MPS_I_NA else iout[i],
+            "estado": PSE_ESTADO.get(st, "?"),
+            "entregando": st == 2,
+            "pxst": pxst[i],
+        })
+    return {"ver": ver, "seq": seq, "uptime_s": uptime_ms // 1000,
+            "puertos": puertos}
+
+
+# Ultima telemetria del MPS. En memoria a proposito: es un panel de estado
+# instantaneo, no una serie historica.
+PSE_LIVE = {"ts": 0, "mac": None, "puertos": []}
+PSE_LOCK = threading.Lock()
+
+
+def ingest_pse(cfg: dict):
+    """Hilo propio para el ethertype del MPS. No toca la ingesta de tanques."""
+    iface = find_iface(cfg["ingest"]["iface_driver"], cfg["ingest"].get("iface", ""))
+    print(f"[pse] escuchando ethertype 0x{MPS_ETHERTYPE:04X} en {iface}")
+    try:
+        s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW,
+                          socket.htons(MPS_ETHERTYPE))
+        s.bind((iface, 0))
+        s.settimeout(1.0)
+    except OSError as e:
+        print(f"[pse] no pude abrir el socket: {e}", file=sys.stderr)
+        return
+
+    while not STOP.is_set():
+        try:
+            pkt = s.recv(512)
+        except socket.timeout:
+            continue
+        except OSError as e:
+            print(f"[pse] {e}", file=sys.stderr)
+            time.sleep(1)
+            continue
+        fr = parse_mps_frame(pkt[14:])
+        if fr is None:
+            continue
+        with PSE_LOCK:
+            PSE_LIVE["ts"] = now()
+            PSE_LIVE["mac"] = ":".join(f"{b:02x}" for b in pkt[6:12])
+            PSE_LIVE["puertos"] = fr["puertos"]
+            PSE_LIVE["uptime_s"] = fr["uptime_s"]
+            PSE_LIVE["seq"] = fr["seq"]
+    s.close()
+
+
+def pse_snapshot() -> dict:
+    """Copia de la ultima telemetria, con su antiguedad."""
+    with PSE_LOCK:
+        d = dict(PSE_LIVE)
+        d["puertos"] = list(PSE_LIVE["puertos"])
+    d["edad_s"] = (now() - d["ts"]) if d["ts"] else None
+    # Sin trama reciente el panel no debe dar por buenos los ultimos mA.
+    d["vivo"] = d["edad_s"] is not None and d["edad_s"] <= 10
+    return d
 # Centinela de "sin referencia" para el nivel (32 bits). La ATT lo manda
 # cuando su cuenta arranco sin checkpoint: la calibracion no es aplicable.
 ATT_LEVEL_NA = -2147483648
@@ -586,7 +675,7 @@ def main():
 
     outs = []
     from outputs import build_outputs           # noqa: E402
-    outs = build_outputs(cfg, live, store, STOP)
+    outs = build_outputs(cfg, live, store, STOP, pse_fn=pse_snapshot)
 
     # Ingesta por dos caminos: SPE (tramas L2) y/o Modbus RTU (RS-485).
     # Con el SPE del ATT roto, el RTU es el que trae los datos.
@@ -596,6 +685,10 @@ def main():
     if cfg["ingest"].get("enabled", True):
         threading.Thread(target=ingest, args=(cfg, store, live, outs),
                          daemon=True, name="spe").start()
+        # Hilo aparte para la telemetria del MPS: si falla, la ingesta de
+        # tanques -- que es la critica -- no se entera.
+        threading.Thread(target=ingest_pse, args=(cfg,),
+                         daemon=True, name="pse").start()
 
     while not STOP.is_set():
         time.sleep(0.5)

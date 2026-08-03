@@ -324,6 +324,15 @@ PAGE = r"""<!doctype html>
     </div>
 
     <div class="card">
+      <h2>Consumo por puerto <span class="mut" id="pse_hdr" style="text-transform:none;font-weight:400"></span></h2>
+      <table><thead><tr><th>Slot</th><th>Corriente</th><th>Estado</th></tr></thead>
+        <tbody id="pse_tb"><tr><td colspan="3" class="mut">cargando…</td></tr></tbody></table>
+      <p class="mut" style="margin:10px 0 0">Medido por el LTC4296 del <b>power switch</b>.
+        Un guion significa <b>sin lectura</b>, no cero: el ADC de puerto solo da dato
+        valido en los puertos que estan entregando.</p>
+    </div>
+
+    <div class="card">
       <p class="mut" style="margin:10px 0 0">El <b>tank_id</b> vive en la EEPROM de cada
         sensor y viaja en cada trama: al cambiarlo aquí se escribe <b>en el sensor</b> por
         Modbus, no en la pasarela. Así, si sustituyes una ATT averiada, le pones su id y
@@ -477,6 +486,19 @@ async function tanks(){
   if(document.querySelector('.tid:focus, .pms:focus')) return;
   if($c('calbg') && $c('calbg').style.display==='flex') return;
   try{
+    // Consumo del PSE. En su propio try: si falla, la tabla de tanques -- que
+    // es lo importante -- se sigue pintando igual.
+    try{
+      const rp=await fetch('/api/pse'); const p=await rp.json();
+      const ps=p.puertos||[];
+      $('#pse_hdr').textContent = p.vivo ? '' : (p.edad_s==null ? '(sin telemetria)' : `(sin datos hace ${p.edad_s}s)`);
+      $('#pse_tb').innerHTML = ps.length ? ps.map(x=>`<tr>
+        <td>${x.slot}</td>
+        <td><b>${(p.vivo && x.ma!=null) ? x.ma+' mA' : '—'}</b></td>
+        <td class="mut">${x.estado}</td></tr>`).join('')
+        : '<tr><td colspan="3" class="mut">sin telemetria del power switch</td></tr>';
+    }catch(e){ /* el panel de tanques manda: no romper por esto */ }
+
     const r=await fetch('/api/tanks'); const d=await r.json();
     $('#hdr').textContent = d.n+' tanque'+(d.n==1?'':'s');
     $('#tb').innerHTML = d.tanks.length ? d.tanks.map(t=>`<tr>

@@ -244,10 +244,14 @@ class ModbusOut:
 
 # ============================================================ HTTP / JSON / UI
 class HttpOut:
-    def __init__(self, cfg, live, store, stop, full_cfg=None, cfg_path=None):
+    def __init__(self, cfg, live, store, stop, full_cfg=None, cfg_path=None,
+                 pse_fn=None):
         import http.server
         import webui
         self.live, self.store, self.stop = live, store, stop
+        # Se recibe la funcion, no se importa gateway: seria un import circular
+        # y ademas gateway corre como __main__, no como modulo importable.
+        self.pse_fn = pse_fn
         self.full_cfg = full_cfg or {}
         self.cfg_path = cfg_path
         outer = self
@@ -426,6 +430,12 @@ class HttpOut:
                     rost = outer.store.roster(snap)
                     self._send({"tanks": rost, "n": len(rost),
                                 "ts": int(time.time())})
+                elif p == "/api/pse":
+                    # Consumo por puerto del LTC4296 del power switch. Panel de
+                    # estado instantaneo, sin historico.
+                    if outer.pse_fn is None:
+                        return self._send({"error": "sin telemetria del PSE"}, 404)
+                    self._send(outer.pse_fn())
                 elif p.startswith("/api/tank/"):
                     parts = p.split("/")
                     try:
@@ -443,7 +453,8 @@ class HttpOut:
                         self._send(snap.get(tid) or {"error": "sin datos"},
                                    200 if tid in snap else 404)
                 else:
-                    self._send({"rutas": ["/  (UI web)", "/api/tanks", "/api/tank/<id>",
+                    self._send({"rutas": ["/  (UI web)", "/api/tanks", "/api/pse",
+                                          "/api/tank/<id>",
                                           "/api/tank/<id>/history?res=raw|1m|1h",
                                           "/api/config"]}, 404)
 
@@ -464,7 +475,7 @@ class HttpOut:
 
 
 # ============================================================ fabrica
-def build_outputs(cfg, live, store, stop) -> list:
+def build_outputs(cfg, live, store, stop, pse_fn=None) -> list:
     outs = []
     if cfg.get("mqtt", {}).get("enabled"):
         try:
@@ -475,5 +486,6 @@ def build_outputs(cfg, live, store, stop) -> list:
         outs.append(ModbusOut(cfg.get("modbus_tcp"), cfg.get("modbus_rtu"), live, stop))
     if cfg.get("http", {}).get("enabled"):
         outs.append(HttpOut(cfg["http"], live, store, stop,
-                            full_cfg=cfg, cfg_path=cfg.get("_path")))
+                            full_cfg=cfg, cfg_path=cfg.get("_path"),
+                            pse_fn=pse_fn))
     return outs
