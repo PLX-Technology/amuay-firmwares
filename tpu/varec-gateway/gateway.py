@@ -150,13 +150,41 @@ def ingest_pse(cfg: dict):
 
 
 def pse_snapshot() -> dict:
-    """Copia de la ultima telemetria, con su antiguedad."""
+    """Copia de la ultima telemetria, con su antiguedad y la potencia por slot.
+
+    P = Vin x I. La tension sale de `vin_mv`, el Vin que midio la ultima
+    clasificacion del LTC4296.
+
+    ⚠️ Ese valor solo se refresca cuando corre una clasificacion, y el MPS
+    solo reintenta en los puertos que NO entregan: con los 4 slots entregando
+    a la vez, la tension se congela en la ultima medida. Para vatios exactos
+    con todo cargado habria que leer Vout por puerto con el GADC.
+
+    ⚠️ Es la tension de ENTRADA, no la de salida. El error es ~0,1 % (a 60 mA
+    la resistencia de sensado cae 16 mV sobre 53,8 V), asi que sirve de sobra
+    para dimensionar, pero es una estimacion.
+    """
     with PSE_LOCK:
         d = dict(PSE_LIVE)
-        d["puertos"] = list(PSE_LIVE["puertos"])
+        d["puertos"] = [dict(p) for p in PSE_LIVE["puertos"]]
     d["edad_s"] = (now() - d["ts"]) if d["ts"] else None
     # Sin trama reciente el panel no debe dar por buenos los ultimos mA.
     d["vivo"] = d["edad_s"] is not None and d["edad_s"] <= 10
+
+    # Potencia por slot. SIN DATO NO ES CERO: si falta la corriente o la
+    # tension queda None y el panel pinta un guion. Un 0,0 W en un puerto que
+    # entrega se leeria como "conectado y sin consumo".
+    vin_mv = (d.get("chip") or {}).get("vin_mv")
+    total = None
+    for p in d["puertos"]:
+        ma = p.get("ma")
+        if vin_mv is None or ma is None:
+            p["w"] = None
+        else:
+            p["w"] = round(vin_mv * ma / 1e6, 3)
+            total = (total or 0.0) + p["w"]
+    d["w_total"] = None if total is None else round(total, 3)
+    d["w_vin_mv"] = vin_mv          # la tension usada, para poder auditarlo
     return d
 # Centinela de "sin referencia" para el nivel (32 bits). La ATT lo manda
 # cuando su cuenta arranco sin checkpoint: la calibracion no es aplicable.

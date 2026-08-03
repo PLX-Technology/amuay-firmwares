@@ -325,11 +325,17 @@ PAGE = r"""<!doctype html>
 
     <div class="card">
       <h2>Consumo por puerto <span class="mut" id="pse_hdr" style="text-transform:none;font-weight:400"></span></h2>
-      <table><thead><tr><th>Slot</th><th>Corriente</th><th>Estado</th></tr></thead>
-        <tbody id="pse_tb"><tr><td colspan="3" class="mut">cargando…</td></tr></tbody></table>
+      <table><thead><tr><th>Slot</th><th>Corriente</th><th>Potencia</th><th>Estado</th></tr></thead>
+        <tbody id="pse_tb"><tr><td colspan="4" class="mut">cargando…</td></tr></tbody></table>
       <p class="mut" style="margin:10px 0 0">Medido por el LTC4296 del <b>power switch</b>.
         Un guion significa <b>sin lectura</b>, no cero: el ADC de puerto solo da dato
         valido en los puertos que estan entregando.</p>
+      <p class="mut" style="margin:6px 0 0">La potencia es <b>estimada</b>: corriente
+        medida por la tension de entrada, no por la de salida de cada puerto (el error
+        es ~0,1&nbsp;%). ⚠️ Esa tensi&oacute;n se refresca al reintentar una
+        clasificaci&oacute;n, y eso solo ocurre en los puertos que <b>no</b> entregan:
+        con los cuatro slots cargados a la vez, el valor se congela en la
+        &uacute;ltima medida.</p>
     </div>
 
     <div class="card">
@@ -495,8 +501,12 @@ async function tanks(){
       $('#pse_tb').innerHTML = ps.length ? ps.map(x=>`<tr>
         <td>${x.slot}</td>
         <td><b>${(p.vivo && x.ma!=null) ? x.ma+' mA' : '—'}</b></td>
+        <td><b>${(p.vivo && x.w!=null) ? x.w.toFixed(2)+' W' : '—'}</b></td>
         <td class="mut">${x.estado}</td></tr>`).join('')
-        : '<tr><td colspan="3" class="mut">sin telemetria del power switch</td></tr>';
+        + ((p.vivo && p.w_total!=null) ? `<tr><td class="mut">total</td><td></td>
+             <td><b>${p.w_total.toFixed(2)} W</b></td>
+             <td class="mut">a ${(p.w_vin_mv/1000).toFixed(1)} V</td></tr>` : '')
+        : '<tr><td colspan="4" class="mut">sin telemetria del power switch</td></tr>';
     }catch(e){ /* el panel de tanques manda: no romper por esto */ }
 
     const r=await fetch('/api/tanks'); const d=await r.json();
