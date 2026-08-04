@@ -23,6 +23,7 @@ import socket
 import struct
 
 MB_PORT = 502
+HR_FLAGS = 0
 HR_UNIT_ID = 1
 HR_PUSH_MS10 = 4
 HR_TANK_ID = 5
@@ -61,21 +62,81 @@ def mac_to_ip(mac: str) -> str:
 
 
 # ---------------------------------------------------------------- Modbus
-def _txn(ip: str, unit: int, pdu: bytes, timeout=4.0) -> bytes:
-    s = socket.create_connection((ip, MB_PORT), timeout=timeout)
-    try:
-        req = struct.pack(">HHHB", 1, 0, len(pdu) + 1, unit) + pdu
-        s.sendall(req)
-        h = s.recv(7)
-        if len(h) < 7:
-            raise IOError("respuesta corta")
-        _, _, ln, _ = struct.unpack(">HHHB", h)
-        body = s.recv(ln - 1)
+class Sesion:
+    """UNA sola conexion TCP para varias transacciones seguidas.
+
+    ⚠️ ABRIR UNA CONEXION POR TRANSACCION AGOTA LOS CONTEXTOS TCP DE LA ATT.
+    Ya paso dos veces en este proyecto: tras unas pocas operaciones seguidas el
+    sensor deja de aceptar conexiones y todo da tiempo de espera agotado --
+    parece que el sensor se ha caido, y lo que se ha caido es su tabla de
+    contextos. Se recupera solo cuando caducan, pero mientras tanto no hay
+    forma de hablar con el.
+
+    Cualquier operacion de varios pasos (leer-modificar-escribir, o escribir y
+    guardar en EEPROM) DEBE ir por una sola sesion.
+
+    ⚠️ Ademas se correlaciona por transaction id: con una conexion persistente,
+    reintentar sin comprobar el tid desincroniza el flujo y se acaba leyendo la
+    respuesta de la peticion anterior como si fuera la actual.
+    """
+
+    def __init__(self, ip: str, unit: int = 1, timeout: float = 4.0):
+        self.unit = unit
+        self.tid = 0
+        self.s = socket.create_connection((ip, MB_PORT), timeout=timeout)
+
+    def _leer(self, n: int) -> bytes:
+        """Lee EXACTAMENTE n bytes.
+
+        ⚠️ recv(n) puede devolver MENOS: TCP es un flujo de bytes, no de
+        mensajes, y no garantiza que una respuesta llegue en un solo segmento.
+        Dar por hecho lo contrario produce un fallo intermitente y
+        desconcertante -- "respuesta incompleta" sobre un sensor que esta
+        contestando perfectamente.
+        """
+        buf = b""
+        while len(buf) < n:
+            trozo = self.s.recv(n - len(buf))
+            if not trozo:
+                raise IOError("conexion cerrada por el sensor")
+            buf += trozo
+        return buf
+
+    def txn(self, pdu: bytes) -> bytes:
+        self.tid = (self.tid % 0xFFFF) + 1
+        req = struct.pack(">HHHB", self.tid, 0, len(pdu) + 1, self.unit) + pdu
+        self.s.sendall(req)
+        h = self._leer(7)
+        tid, _, ln, _ = struct.unpack(">HHHB", h)
+        body = self._leer(ln - 1)
+        if tid != self.tid:
+            raise IOError(f"respuesta descolocada (tid {tid} != {self.tid})")
         if body and (body[0] & 0x80):
             raise IOError(f"excepcion Modbus {body[1] if len(body) > 1 else '?'}")
         return body
-    finally:
-        s.close()
+
+    def close(self):
+        try:
+            self.s.close()
+        except OSError:
+            pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.close()
+
+
+def _txn(ip: str, unit: int, pdu: bytes, timeout=4.0) -> bytes:
+    """Una transaccion suelta, con su propia conexion.
+
+    ⚠️ Para operaciones de VARIOS pasos NO usar esto en bucle: una conexion por
+    transaccion agota los contextos TCP de la ATT y la deja fuera de servicio
+    hasta que alguien va a reiniciarla. Usar Sesion.
+    """
+    with Sesion(ip, unit, timeout) as ses:
+        return ses.txn(pdu)
 
 
 def read_cfg(ip: str, unit: int = 1) -> dict:
@@ -100,6 +161,39 @@ def set_tank_id(ip: str, tank_id: int, unit: int = 1, save=True):
     if save:
         # Sin esto el cambio vive solo en RAM y se pierde al reiniciar.
         write_reg(ip, HR_CMD, CMD_SAVE, unit)
+
+
+# Banderas de HR 0. Espejo de CFG_F_* en att/src/main.c.
+F_PUSH     = 0x01   # push L2 por SPE
+F_RTU      = 0x02   # puerto RS-485 (Modbus RTU)
+F_NO_K1    = 0x04   # no energizar el rele K1
+F_ENC_LEDS = 0x08   # LEDs de canal del encoder (diagnostico)
+
+
+def set_flag(ip: str, mask: int, on: bool, unit: int = 1, save=True):
+    """Cambia UNA bandera de HR 0 sin tocar las demas.
+
+    ⚠️ Se LEE antes de escribir. HR 0 es un registro con varias banderas: mandar
+    solo la que se quiere cambiar apagaria las otras -- incluida F_NO_K1, que en
+    una placa con SJ1 puenteado dejaria el rele energizandose y el sensor sin
+    enlace de red.
+
+    ⚠️ El RS-485 y los LEDs surten efecto AL INSTANTE en el firmware; `save`
+    solo decide si ademas sobrevive a un reinicio. Para el modo diagnostico de
+    los LEDs interesa NO guardar: se enciende para mirar y se olvida apagarlo.
+    """
+    with Sesion(ip, unit) as ses:
+        body = ses.txn(struct.pack(">BHH", 3, HR_FLAGS, 1))
+        if len(body) < 4:
+            raise IOError("respuesta incompleta al leer HR 0")
+        cur = struct.unpack(">H", body[2:4])[0]
+        new = (cur | mask) if on else (cur & ~mask)
+        if new == cur:
+            return cur
+        ses.txn(struct.pack(">BHH", 6, HR_FLAGS, new))
+        if save:
+            ses.txn(struct.pack(">BHH", 6, HR_CMD, CMD_SAVE))
+    return new
 
 
 def set_push_ms(ip: str, ms: int, unit: int = 1, save=True):

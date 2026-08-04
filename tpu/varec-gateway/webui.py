@@ -543,7 +543,15 @@ async function tanks(){
       <td style="white-space:nowrap"><button class="sid" data-id="${t.tank_id}"
            style="padding:5px 10px;font-size:13px" disabled>Guardar</button>
         <button class="cal" data-id="${t.tank_id}"
-           style="padding:5px 10px;font-size:13px;background:#2b3846">Calibrar</button></td>
+           style="padding:5px 10px;font-size:13px;background:#2b3846">Calibrar</button>
+        <select class="acc" data-id="${t.tank_id}"
+           style="padding:5px 8px;font-size:13px;background:#2b3846;margin-left:4px">
+          <option value="">Acciones…</option>
+          <option value="485off">Apagar RS-485</option>
+          <option value="485on">Encender RS-485</option>
+          <option value="ledson">LEDs encoder: ver</option>
+          <option value="ledsoff">LEDs encoder: apagar</option>
+        </select></td>
       </tr>`).join('') :
       '<tr><td colspan="11" class="mut">ningún tanque dado de alta todavía</td></tr>';
     // El boton solo se activa si el valor cambio: evita escrituras accidentales
@@ -555,8 +563,34 @@ async function tanks(){
     document.querySelectorAll('.sid').forEach(b=>b.onclick=()=>saveId(b));
     CALT = d.tanks;
     document.querySelectorAll('.cal').forEach(b=>b.onclick=()=>calOpen(+b.dataset.id));
+    document.querySelectorAll('.acc').forEach(x=>x.onchange=()=>accion(x));
     document.querySelectorAll('.pms').forEach(x=>x.onchange=()=>setPeriodo(x));
   }catch(e){ $('#hdr').textContent='sin conexión'; }
+}
+
+// Acciones sobre un sensor. Son EXPLICITAS ("apagar"/"encender") y no un
+// interruptor de estado: la pasarela NO conoce hoy el valor de esas banderas
+// -- no viajan en la trama de telemetria -- y un interruptor tendria que
+// adivinar la posicion, que es peor que no mostrarla.
+async function accion(sel){
+  const id = +sel.dataset.id, v = sel.value;
+  sel.value = '';
+  if(!v) return;
+  const body = {'485off':{rs485:false}, '485on':{rs485:true},
+                'ledson':{enc_leds:true}, 'ledsoff':{enc_leds:false}}[v];
+  const txt  = {'485off':'apagar el RS-485', '485on':'encender el RS-485',
+                'ledson':'encender los LEDs del encoder',
+                'ledsoff':'apagar los LEDs del encoder'}[v];
+  if(v==='485off' && !confirm('¿Apagar el puerto RS-485 del tanque '+id+'?\n\n'
+      +'Deja de responder por Modbus RTU hasta que se vuelva a encender. '
+      +'El enlace por SPE no se ve afectado.')) return;
+  try{
+    const r = await fetch('/api/tank/'+id+'/config',{method:'POST',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+    const d = await r.json();
+    if(!r.ok){ alert('No se pudo '+txt+':\n'+(d.error||r.status)); return; }
+    await tanks();
+  }catch(e){ alert('No se pudo '+txt+': '+e); }
 }
 
 let CALT = [], CALID = null;

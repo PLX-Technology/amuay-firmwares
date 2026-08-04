@@ -393,6 +393,18 @@ class HttpOut:
                         sensor.set_tank_id(ip, nid, unit)
                     if "push_ms" in body:
                         sensor.set_push_ms(ip, int(body["push_ms"]), unit)
+                    # Puerto RS-485: se enciende y apaga EN CALIENTE, sin
+                    # reiniciar el sensor. Se persiste, porque apagarlo es una
+                    # decision de instalacion.
+                    if "rs485" in body:
+                        sensor.set_flag(ip, sensor.F_RTU, bool(body["rs485"]),
+                                        unit, save=True)
+                    # LEDs del encoder: diagnostico. NO se persisten a
+                    # proposito -- se encienden para mirar el cableado y es
+                    # facil olvidarse de apagarlos; asi un reinicio los apaga.
+                    if "enc_leds" in body:
+                        sensor.set_flag(ip, sensor.F_ENC_LEDS,
+                                        bool(body["enc_leds"]), unit, save=False)
                 except Exception as e:
                     return self._send({"error": str(e)}, 502)
                 self._send({"ok": True, "ip": ip})
