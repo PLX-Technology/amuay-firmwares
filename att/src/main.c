@@ -22,6 +22,7 @@
  */
 #include <zephyr/kernel.h>
 #include <zephyr/sys/reboot.h>
+#include <stm32_ll_gpio.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/uart.h>
@@ -197,27 +198,50 @@ static int att_en_bateria(void)
 #define R485_TX_PIN 12
 #define R485_RX_PIN 11
 
-/* ⚠️ ES UN CAMINO DE IDA: no hay vuelta atras sin reiniciar.
+/* Suelta o devuelve los pines del USART2. IDA Y VUELTA, en caliente.
  *
- * Devolverle los pines al USART2 en caliente exigiria pinctrl_apply_state(), y
- * su configuracion (PINCTRL_DT_DEV_CONFIG_GET) NO es accesible desde la
- * aplicacion: vive en la unidad de compilacion del driver. La alternativa
- * limpia seria CONFIG_PM_DEVICE + pm_device_action_run(), que hoy no esta
- * activado en esta placa.
+ * ⚠️ La vuelta NO puede hacerse con pinctrl_apply_state(): su configuracion
+ * (PINCTRL_DT_DEV_CONFIG_GET) no es accesible desde la aplicacion -- vive en la
+ * unidad de compilacion del driver -- y CONFIG_PM_DEVICE no esta activado en
+ * esta placa. Se reprograma el pin a mano con LL, con los MISMOS valores que
+ * declara el devicetree, para que no haya dos verdades:
  *
- * Por eso esto SOLO se llama con el RS-485 deshabilitado por configuracion,
- * decision que ya es de arranque -- cfg_save() avisa de que "se aplica al
- * reiniciar". NO se usa al pasar a bateria: soltar alli dejaria el puerto
- * MUERTO al volver la alimentacion externa, precio absurdo por un LED. */
-static void att_485_soltar(void)
+ *   PA11 (RX)  AF3 + pull-up   <- att_wba65.dts, usart2_rx_pa11_pu
+ *   PA12 (TX)  AF3 + pull-up   <- stm32wba65cgux-pinctrl.dtsi:784
+ *
+ * ⚠️ El pull-up de RX no es decorativo: sin el, con el bus RS-485 abierto la
+ * entrada flota y el UART lee basura con errores de trama. Si se toca esto, se
+ * toca tambien el devicetree. */
+static int g_485_soltado;
+
+/* Definida mas abajo, tras la struct del Modbus RTU: la usa el manejador
+ * de escritura de HR 0, que va antes. */
+static void att_485_puerto(int encender);
+
+static void att_485_pines(int soltar)
 {
-	/* Alta impedancia: el micro deja de atacar la linea. NO se pone a cero,
-	 * por lo del comparador de direccion explicado arriba. */
-	gpio_pin_configure(gpa, R485_TX_PIN, GPIO_INPUT);
-	gpio_pin_configure(gpa, R485_RX_PIN, GPIO_INPUT);
-	LOG_INF("RS-485 deshabilitado: pines TX/RX en alta impedancia"
-		" (se apaga el LED de TX; el de RX lo gobierna el transceptor)");
+	if (soltar == g_485_soltado) {
+		return;
+	}
+	if (soltar) {
+		/* Alta impedancia: el micro deja de atacar la linea. NO se pone a
+		 * cero, por lo del comparador de direccion explicado arriba. */
+		gpio_pin_configure(gpa, R485_TX_PIN, GPIO_INPUT);
+		gpio_pin_configure(gpa, R485_RX_PIN, GPIO_INPUT);
+		LOG_INF("RS-485: pines TX/RX en alta impedancia (LED de TX apagado;"
+			" el de RX lo gobierna el transceptor)");
+	} else {
+		LL_GPIO_SetAFPin_8_15(GPIOA, LL_GPIO_PIN_11, LL_GPIO_AF_3);
+		LL_GPIO_SetAFPin_8_15(GPIOA, LL_GPIO_PIN_12, LL_GPIO_AF_3);
+		LL_GPIO_SetPinPull(GPIOA, LL_GPIO_PIN_11, LL_GPIO_PULL_UP);
+		LL_GPIO_SetPinPull(GPIOA, LL_GPIO_PIN_12, LL_GPIO_PULL_UP);
+		LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_11, LL_GPIO_MODE_ALTERNATE);
+		LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_12, LL_GPIO_MODE_ALTERNATE);
+		LOG_INF("RS-485: pines devueltos al USART2 (AF3)");
+	}
+	g_485_soltado = soltar;
 }
+
 
 /* ---------------- RS-485 (USART2, PA12=TX PA11=RX) ---------------- */
 static volatile uint32_t r485_rx_bytes;
@@ -620,14 +644,27 @@ static int mb_holding_rd(uint16_t addr, uint16_t *reg)
 static int mb_holding_wr(uint16_t addr, uint16_t reg)
 {
 	switch (addr) {
-	case 0:
+	case 0: {
+		const uint16_t antes = cfg.flags;
+
 		cfg.flags = reg & (CFG_F_PUSH | CFG_F_RTU | CFG_F_NO_K1 |
 				   CFG_F_ENC_LEDS);
+
+		/* El RS-485 se enciende y se apaga EN CALIENTE desde la pasarela.
+		 * Antes solo se leia al arrancar, asi que apagarlo exigia un
+		 * reinicio -- y en un tanque en campo eso no es una opcion.
+		 *
+		 * ⚠️ NO se toca si estamos en bateria: alli el puerto ya esta
+		 * apagado a proposito y encenderlo aqui se saltaria ese ahorro. */
+		if (((antes ^ cfg.flags) & CFG_F_RTU) && !att_en_bateria()) {
+			att_485_puerto((cfg.flags & CFG_F_RTU) != 0);
+		}
 		/* Los LEDs de diagnostico responden AL INSTANTE, sin esperar a
 		 * guardar en EEPROM ni a un reinicio: se encienden para mirar el
 		 * encoder mientras alguien esta delante del tanque. */
 		enc_leds_aplicar();
 		break;
+	}
 	case 1:
 		if (reg < 1 || reg > 247) { return -ENOTSUP; }   /* fuera del rango Modbus */
 		cfg.unit_id = reg;
@@ -681,6 +718,27 @@ static struct modbus_iface_param mb_rtu = {
 		.stop_bits = UART_CFG_STOP_BITS_1,
 	},
 };
+
+/* Enciende o apaga el puerto RS-485 completo: interfaz Modbus + pines.
+ *
+ * ⚠️ EL ORDEN IMPORTA en los dos sentidos. Al encender, los pines PRIMERO: un
+ * servidor Modbus escuchando sobre pines en alta impedancia no llega al
+ * transceptor. Al apagar, la interfaz PRIMERO: soltar los pines de un UART que
+ * aun puede estar transmitiendo cortaria una trama por la mitad. */
+static void att_485_puerto(int encender)
+{
+	if (encender) {
+		att_485_pines(0);
+		if (g_mb_rtu >= 0 && modbus_init_server(g_mb_rtu, mb_rtu)) {
+			LOG_ERR("RS-485: no pude reactivar el servidor Modbus");
+		}
+	} else {
+		if (g_mb_rtu >= 0) {
+			modbus_disable((uint8_t)g_mb_rtu);
+		}
+		att_485_pines(1);
+	}
+}
 
 /* ---- TCP sobre SPE: Zephyr no trae servidor, se usa RAW ADU ---- */
 static int mb_tcp_iface = -1;
@@ -1280,7 +1338,7 @@ int main(void)
 		/* RTU sobre el RS-485, solo si la configuracion lo pide */
 		if (!(cfg.flags & CFG_F_RTU)) {
 			LOG_INF("Modbus RTU: deshabilitado por configuracion");
-			att_485_soltar();
+			att_485_pines(1);
 		} else {
 			mb = modbus_iface_get_by_name("modbus0");
 			if (mb < 0 || modbus_init_server(mb, mb_rtu)) {
@@ -1373,16 +1431,13 @@ int main(void)
 			 * volver de bateria no debe encender un RS-485 que estaba
 			 * deshabilitado a proposito. */
 			if (bat) {
-				if (g_mb_rtu >= 0) {
-					modbus_disable((uint8_t)g_mb_rtu);
-					LOG_INF("Modbus RTU: interfaz apagada (bateria)");
-				}
-			} else if ((cfg.flags & CFG_F_RTU) && g_mb_rtu >= 0) {
-				if (modbus_init_server(g_mb_rtu, mb_rtu)) {
-					LOG_ERR("Modbus RTU: no pude reactivarlo");
-				} else {
-					LOG_INF("Modbus RTU: interfaz reactivada");
-				}
+				/* Puerto entero abajo: interfaz Modbus + pines. Apaga
+				 * ademas el LED de TX, que en bateria es consumo puro. */
+				att_485_puerto(0);
+				LOG_INF("RS-485 apagado por bateria");
+			} else if (cfg.flags & CFG_F_RTU) {
+				att_485_puerto(1);
+				LOG_INF("RS-485 reactivado");
 			}
 		}
 		if (bat) {
