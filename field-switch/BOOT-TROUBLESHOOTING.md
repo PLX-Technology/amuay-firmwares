@@ -25,6 +25,52 @@ openocd -c "adapter driver cmsis-dap" -c "adapter serial <SERIAL>" \
 
 ---
 
+## Causa raíz #3 — reinicio periódico de **19,7 s** con la placa a 24 V
+
+2026-08-04, banco. Síntoma: la placa imprime el cartel de Zephyr, **se queda
+muda** y se reinicia. Ocho arranques seguidos, intervalos de **19,7 s clavados**.
+
+### ⚠️ Lo que descarta que sea culpa del firmware
+
+**El mismo ciclo de 19,7 s corta las sesiones de grabado por serie**, que mueren
+siempre en el **11-12 %** — que a 0,55 s/paquete son justo ~20 s de sesión.
+Durante un grabado SCP **la aplicación no corre**: manda el bootloader del ROM.
+Si el reinicio ocurre igual, **no lo provoca el código de la aplicación**.
+
+Corolario práctico: los grabados que terminan al 100 % son los que enganchan la
+ventana del ROM **en el primer arranque tras el POR**, antes de que la
+aplicación llegue a correr. Los que enganchan una vuelta más tarde mueren al
+11-12 %. Por eso el éxito parece aleatorio y los fallos caen siempre en el mismo
+porcentaje: **no es transporte ni suerte, es el ciclo de reinicio**.
+
+### Sospechoso: el LTC4296 con la placa fuera de rango
+
+El LTC4296 es un **chip aparte con su propia lógica** y **no se reinicia cuando
+lo hace el micro**. Con la placa a **24 V** —fuera de su rango de clase 13, que
+es 50-58 V— queda intentando periódicamente y cada intento puede hundir la
+alimentación de banco lo justo para reiniciar el MAX32690.
+
+**Comprobación de diez segundos, sin grabar nada:** mirar el amperímetro de la
+fuente. Un pico de corriente cada ~20 s confirma la hipótesis.
+
+**La prueba que falta: alimentar la placa a 50 V.** Es la condición de diseño y
+la única que no se ha probado.
+
+### Descartado por el camino (para no repetirlo)
+
+- **No es `CONFIG_LOG`.** Con la configuración de campo (`LOG=y`, nivel 4,
+  inmediato) se reinicia igual. Llegué a acusar al registro y era falso.
+- **No es la configuración.** `prj.conf.bak-prod` y `prj.conf.bak-mio` son el
+  **mismo fichero** (793 B los dos); creí que diferían por leer mal el `ls`.
+- **No es el ERTCO** (causa raíz #1): el bucle ya está acotado en
+  `sys_me18.c:331` y el patrón del binpatch **no aparece** en el binario.
+- **No es una llamada con efectos colaterales dentro de una macro `LOG_*`**
+  (el clásico al apagar el registro): no hay ninguna, ni en `main.c` ni en el
+  driver del LTC4296.
+- **No hay watchdog software**: `CONFIG_TASK_WDT` no está activado.
+
+---
+
 ## Causa raíz #1 — cuelgue en ERTCO (32 kHz) en el HAL de ADI
 
 El board devicetree (`boards/adi/mfs06/mfs06_max32690_m4.dts`) habilita el ERTCO:

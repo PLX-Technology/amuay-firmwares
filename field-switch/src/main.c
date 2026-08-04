@@ -463,6 +463,11 @@ int adin6310_enable_pse(struct device *ltc4296, uint8_t switch_op)
 #define MFS_RESCAN_EVERY    30
 
 /* --- Diagnostico visible por SWD --- */
+/* Vigilante de bloqueo del LTC4296 y reintento de SPoE */
+volatile unsigned short g_gcmd;                 /* ultimo GCMD leido */
+volatile unsigned short g_unlock_n;             /* re-desbloqueos */
+volatile int            g_retry_rc[MFS_PSE_PORTS];  /* rc del ultimo reintento */
+
 volatile uint16_t g_short_mask;              /* bit p = LTC_PORTp en corto */
 volatile int      g_short_vout[MFS_PSE_PORTS];
 
@@ -509,8 +514,29 @@ static uint16_t mfs_scan_shorts(const struct device *dev)
 		/* corto = Vout bajo Y positivo. Un valor <0 o muy grande
 		 * (p.ej. +/-71000 con SPI/ADC mudo) NO es corto: se ignora
 		 * para evitar falsos positivos. */
-		if (v >= 0 && v < MFS_SHORT_VOUT_MV)
+		if (v >= 0 && v < MFS_SHORT_VOUT_MV) {
 			mask |= (1u << p);
+			continue;   /* ⚠️ en corto: NO se intenta energizar */
+		}
+
+		/* --- reintento dentro del escaneo ---------------------------
+		 * Puerto sano y sin entregar: se intenta negociar.
+		 *
+		 * ⚠️ VA AQUI Y NO EN UN BLOQUE APARTE, y no es cosmetica:
+		 * do_spoe_sccp() solo negocia en su rama `port_chk ==
+		 * LTC_PORT_DISABLED`; sobre un puerto en BUSCANDO o en error se
+		 * mete por otro camino. mfs_probe_port_vout() acaba de dejar este
+		 * puerto DESHABILITADO, que es justo el estado de partida bueno.
+		 *
+		 * La version anterior lo llamaba cada 5 s sobre los cinco puertos
+		 * en cualquier estado, y la placa entraba en BUCLE DE ARRANQUE.
+		 * ------------------------------------------------------------ */
+		{
+			struct ltc4296_vi vi;
+
+			g_retry_rc[p] = ltc4296_retry_spoe_sccp(
+				dev, (enum ltc4296_port)p, &vi);
+		}
 	}
 
 	g_short_mask = mask;
@@ -732,6 +758,8 @@ int main(void)
 	gpio_pin_configure_dt(&fault_led, GPIO_OUTPUT_INACTIVE);
 	mfs_scan_shorts(ltc4296_dev);
 
+	unsigned int mfs_pse_tick = 0;
+
 	while (1) {
 		k_sleep(K_MSEC(1000));
 		g_link[0] = SES_GetLinkState(SES_macPort0);
@@ -743,8 +771,13 @@ int main(void)
 
 		/* Registros del PHY de los seis puertos. g_link no distingue
 		 * "el SES no ve el PHY" de "el PHY esta pero sin portadora", y
-		 * ademas da links fantasma en los slots vacios. Esto si. */
-		{
+		 * ademas da links fantasma en los slots vacios. Esto si.
+		 *
+		 * Cada 10 s, no cada segundo: son 36 lecturas MDIO por vuelta.
+		 * Se conserva porque es el unico diagnostico sin depurador. */
+		static int mfs_phy_tick = 0;
+		if (++mfs_phy_tick >= 10) {
+			mfs_phy_tick = 0;
 			static const SES_mac_t phl[6] = {
 				SES_macPort0, SES_macPort1, SES_macPort2,
 				SES_macPort3, SES_macPort4, SES_macPort5 };
@@ -757,6 +790,34 @@ int main(void)
 				v = 0; SES_ReadPhyReg(phl[q], 0x070201, &v);              g_ph_anst[q]  = v;
 				v = 0; SES_ReadPhyReg(phl[q], 0x070200, &v);              g_ph_anctl[q] = v;
 				v = 0; SES_ReadPhyReg(phl[q], 0x010834, &v);              g_ph_pma[q]   = v;
+			}
+		}
+
+		/* ⚠️ VIGILANTE DE BLOQUEO DEL LTC4296.
+		 * El chip se re-bloquea solo y un chip bloqueado IGNORA LAS
+		 * ESCRITURAS EN SILENCIO. Aqui importa el doble: sin esto no solo
+		 * deja de negociar, es que mfs_scan_shorts() tambien dejaria de
+		 * funcionar sin dar ningun error.
+		 *
+		 * NO se llama a ltc4296_chk_global_events() (la recuperacion del
+		 * fabricante, sin un solo llamante en todo el arbol): hace
+		 * ltc4296_reset(), que TIRARIA la entrega de los puertos vivos.
+		 * Reescribir la llave es idempotente.
+		 *
+		 * Verificado que no da problemas: con esto activo y el reintento
+		 * fuera, la placa arranca y sigue viva (bisect 2026-08-04). */
+		if (++mfs_pse_tick >= 5) {
+			uint16_t gc = 0;
+
+			mfs_pse_tick = 0;
+
+			if (ltc4296_reg_read(ltc4296_dev, 0x08, &gc) == 0) {
+				if ((gc & 0x05) != 0x05) {
+					ltc4296_unlock(ltc4296_dev);
+					g_unlock_n++;
+					ltc4296_reg_read(ltc4296_dev, 0x08, &gc);
+				}
+				g_gcmd = gc;
 			}
 		}
 

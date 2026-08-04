@@ -77,6 +77,15 @@ from utils import *
 import colorama
 import zipfile
 
+# ⚠️ VA DESPUES de los `import *` de arriba, y no es cosmetica.
+# `from progressbar import *` importa la FUNCION progressbar() que exponen las
+# versiones modernas de progressbar2, y esa funcion TAPA al modulo del mismo
+# nombre. Las llamadas `progressbar.ProgressBar(...)` de mas abajo mueren con
+#     'function' object has no attribute 'ProgressBar'  ->  SCP session FAILED
+# ya con la sesion abierta, asi que PARECE un fallo de grabado y no lo es.
+# Reimportar el modulo aqui devuelve el nombre a su sitio.
+import progressbar
+
 import sys
 # ---- CONSTANTS
 
