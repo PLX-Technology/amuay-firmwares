@@ -96,6 +96,57 @@ static const int8_t QTAB[16] = {
 static const struct gpio_dt_spec led_a = GPIO_DT_SPEC_GET(DT_ALIAS(led1), gpios);
 static const struct gpio_dt_spec led_b = GPIO_DT_SPEC_GET(DT_ALIAS(led2), gpios);
 
+/* ---------------- Alimentacion: senal de bateria en PB11 ----------------
+ *
+ * Con la placa en bateria hay que CALLAR: transmitir es lo mas caro que hace
+ * esta placa. El push por SPE enciende el PHY y la linea; responder por
+ * RS-485 activa el ADM2587E, que es aislado y arrastra su propio convertidor.
+ *
+ * ⚠️ CONSECUENCIA QUE HAY QUE TENER PRESENTE: en bateria la ATT deja de
+ * responder por Modbus, asi que NO se le puede cambiar la configuracion hasta
+ * que vuelva la alimentacion externa. Es inherente a lo pedido -- callar es
+ * callar -- pero conviene saberlo antes de quedarse mirando por que no
+ * contesta.
+ *
+ * El nivel activo NO esta documentado por hardware. Se define aqui en un solo
+ * sitio para poder invertirlo con una linea cuando se compruebe en la placa.
+ */
+#define BAT_PORT   DT_NODELABEL(gpiob)
+#define BAT_PIN    11
+/* 1 = PB11 en ALTO significa "en bateria". Ver att_en_bateria(). */
+#define BAT_ACTIVO_ALTO  1
+
+/* Iface del Modbus RTU, a ambito de fichero para poder deshabilitarla
+ * cuando la placa pasa a bateria. -1 = no arranco o esta apagada. */
+static int g_mb_rtu = -1;
+
+static const struct device *gpb;
+static volatile int g_en_bateria;      /* ultimo estado leido, para la traza */
+
+/* Espejo de CFG_F_ENC_LEDS. Cache en vez de mirar cfg.flags: lo consulta la
+ * ISR del encoder en cada flanco. `volatile` porque lo escribe el hilo de
+ * Modbus al cambiar la configuracion y lo lee la interrupcion. */
+static volatile int g_enc_leds;
+
+/* ¿Esta la placa alimentada por bateria?
+ *
+ * Sin puerto listo se devuelve 0 (= alimentacion externa) A PROPOSITO: ante la
+ * duda, la placa TRANSMITE. Un falso "en bateria" dejaria el tanque mudo y sin
+ * forma de diagnosticarlo en remoto, que es mucho peor que gastar de mas. */
+static int att_en_bateria(void)
+{
+	int v;
+
+	if (gpb == NULL) {
+		return 0;
+	}
+	v = gpio_pin_get_raw(gpb, BAT_PIN);
+	if (v < 0) {
+		return 0;
+	}
+	return BAT_ACTIVO_ALTO ? (v != 0) : (v == 0);
+}
+
 /* ---------------- RS-485 (USART2, PA12=TX PA11=RX) ---------------- */
 static volatile uint32_t r485_rx_bytes;
 
@@ -163,9 +214,34 @@ struct att_cfg {
  * activar esto la deja sin enlace de red y sin forma de arreglarlo salvo por
  * consola serie o RS-485. El defecto (bit a 0) energiza, como siempre. */
 #define CFG_F_NO_K1  BIT(2)
+/* LEDs de canal del encoder = MODO DIAGNOSTICO, apagados por defecto.
+ *
+ * Parpadean con cada flanco del encoder, asi que en un tanque que se mueve
+ * estan encendidos casi todo el tiempo, consumiendo sin que nadie los mire:
+ * en campo no hay quien los vea. Se dejan encendibles desde la pasarela para
+ * comprobar el cableado del encoder sin desplazarse hasta el tanque.
+ *
+ * ⚠️ Opt-IN, y por eso es bit y no un defecto invertido: si algun dia se
+ * queda encendido por error, se apaga desde la pasarela; al reves habria que
+ * ir al tanque. */
+#define CFG_F_ENC_LEDS BIT(3)
 
 static const struct device *const eep = DEVICE_DT_GET(DT_NODELABEL(eeprom0));
 static struct att_cfg cfg;
+
+/* Aplica el estado de los LEDs de canal. Al apagarlos hay que FORZARLOS A CERO
+ * aqui: si el ultimo flanco del encoder los dejo encendidos, sin esto se
+ * quedarian asi para siempre -- que es justo lo que veniamos a arreglar.
+ *
+ * Se llama al arrancar y cada vez que la pasarela toca HR 0. */
+static void enc_leds_aplicar(void)
+{
+	g_enc_leds = (cfg.flags & CFG_F_ENC_LEDS) != 0;
+	if (!g_enc_leds) {
+		if (gpio_is_ready_dt(&led_a)) { gpio_pin_set_dt(&led_a, 0); }
+		if (gpio_is_ready_dt(&led_b)) { gpio_pin_set_dt(&led_b, 0); }
+	}
+}
 
 static void cfg_defaults(void)
 {
@@ -434,7 +510,9 @@ static int mb_input_reg_rd(uint16_t addr, uint16_t *reg)
 }
 
 /* --- HOLDING REGISTERS = configuracion (FC 03 leer / FC 06 escribir) ---
- *   HR 0 : flags (bit0 = push L2, bit1 = Modbus RTU, bit2 = NO energizar K1)
+ *   HR 0 : flags (bit0 = push L2, bit1 = Modbus RTU, bit2 = NO energizar K1,
+ *          bit3 = LEDs de canal del encoder, DIAGNOSTICO, apagados por
+ *          defecto; surten efecto al instante, sin guardar ni reiniciar)
  *   HR 1 : unit id Modbus (1..247)
  *   HR 2 : baudios RTU / 100 (96, 192, 384, 1152)
  *   HR 3 : paridad RTU (0=none 1=even 2=odd)
@@ -470,7 +548,14 @@ static int mb_holding_rd(uint16_t addr, uint16_t *reg)
 static int mb_holding_wr(uint16_t addr, uint16_t reg)
 {
 	switch (addr) {
-	case 0: cfg.flags = reg & (CFG_F_PUSH | CFG_F_RTU | CFG_F_NO_K1); break;
+	case 0:
+		cfg.flags = reg & (CFG_F_PUSH | CFG_F_RTU | CFG_F_NO_K1 |
+				   CFG_F_ENC_LEDS);
+		/* Los LEDs de diagnostico responden AL INSTANTE, sin esperar a
+		 * guardar en EEPROM ni a un reinicio: se encienden para mirar el
+		 * encoder mientras alguien esta delante del tanque. */
+		enc_leds_aplicar();
+		break;
 	case 1:
 		if (reg < 1 || reg > 247) { return -ENOTSUP; }   /* fuera del rango Modbus */
 		cfg.unit_id = reg;
@@ -655,8 +740,17 @@ static void enc_isr(const struct device *dev, struct gpio_callback *cb, uint32_t
 	uint8_t a = gpio_pin_get(gpa, ENC_A_PIN) ? 1 : 0;
 	uint8_t b = gpio_pin_get(gpa, ENC_B_PIN) ? 1 : 0;
 	uint8_t cur = (a << 1) | b;
-	gpio_pin_set_dt(&led_a, b);   /* canal A = PA7 (ENC_B_PIN) */
-	gpio_pin_set_dt(&led_b, a);   /* canal B = PA0 (ENC_A_PIN) */
+
+	/* LEDs de canal solo en modo diagnostico (CFG_F_ENC_LEDS). Apagados por
+	 * defecto: parpadean con CADA flanco, asi que en un tanque en movimiento
+	 * estarian encendidos casi siempre y en campo no hay quien los mire.
+	 *
+	 * La condicion va DENTRO de la ISR y no vale con no configurar el pin:
+	 * esta rutina corre en cada flanco del encoder y es donde se enciende. */
+	if (g_enc_leds) {
+		gpio_pin_set_dt(&led_a, b);   /* canal A = PA7 (ENC_B_PIN) */
+		gpio_pin_set_dt(&led_b, a);   /* canal B = PA0 (ENC_A_PIN) */
+	}
 	if (a != enc_pa) { enc_ea++; enc_pa = a; }
 	if (b != enc_pb) { enc_eb++; enc_pb = b; }
 	int8_t d = QTAB[(enc_prev << 2) | cur];
@@ -695,16 +789,23 @@ static int enc_init(void)
 	enc_prev = (gpio_pin_get(gpa, ENC_A_PIN) ? 2 : 0) | (gpio_pin_get(gpa, ENC_B_PIN) ? 1 : 0);
 	LOG_INF("Encoder listo: PA0/PA1 por software (x4), estado inicial AB=%u", enc_prev);
 
-	/* LEDs espejo de canal: led1 = A (PA7), led2 = B (PA0) */
+	/* LEDs espejo de canal: led1 = A (PA7), led2 = B (PA0).
+	 * Se configuran igual, pero ARRANCAN APAGADOS y solo siguen al encoder
+	 * si CFG_F_ENC_LEDS esta activo (modo diagnostico desde la pasarela).
+	 * Antes se encendian aqui con el estado inicial del encoder. */
 	if (gpio_is_ready_dt(&led_a)) {
 		gpio_pin_configure_dt(&led_a, GPIO_OUTPUT_INACTIVE);
 	}
 	if (gpio_is_ready_dt(&led_b)) {
 		gpio_pin_configure_dt(&led_b, GPIO_OUTPUT_INACTIVE);
 	}
-	gpio_pin_set_dt(&led_a, gpio_pin_get(gpa, ENC_B_PIN));
-	gpio_pin_set_dt(&led_b, gpio_pin_get(gpa, ENC_A_PIN));
-	LOG_INF("LEDs de canal listos: led1=canal A (PA7) led2=canal B (PA0)");
+	enc_leds_aplicar();
+	if (g_enc_leds) {
+		gpio_pin_set_dt(&led_a, gpio_pin_get(gpa, ENC_B_PIN));
+		gpio_pin_set_dt(&led_b, gpio_pin_get(gpa, ENC_A_PIN));
+	}
+	LOG_INF("LEDs de canal: %s (HR 0 bit3 = diagnostico)",
+		g_enc_leds ? "ENCENDIDOS" : "apagados");
 	return 0;
 }
 
@@ -954,6 +1055,24 @@ int main(void)
 	 * falla si la bobina necesita un rail que aun no esta. */
 	cfg_load();
 
+	/* Senal de bateria (PB11). Entrada pura, sin pull: el nivel lo impone el
+	 * hardware de alimentacion. Si el puerto no esta listo, att_en_bateria()
+	 * devuelve 0 y la placa transmite -- ante la duda, hablar. */
+	gpb = DEVICE_DT_GET(DT_NODELABEL(gpiob));
+	if (device_is_ready(gpb)) {
+		int ret = gpio_pin_configure(gpb, BAT_PIN, GPIO_INPUT);
+
+		g_en_bateria = att_en_bateria();
+		LOG_INF("Alimentacion: PB11 = %d -> %s (ret=%d)",
+			gpio_pin_get_raw(gpb, BAT_PIN),
+			g_en_bateria ? "BATERIA (se suspenden transmisiones)" : "externa",
+			ret);
+	} else {
+		gpb = NULL;
+		LOG_ERR("GPIOB no listo: no puedo leer la senal de bateria,"
+			" se asume alimentacion externa");
+	}
+
 	/* 1) sacar el bypass: mete el ADIN2111 en la linea SPE */
 	if (cfg.flags & CFG_F_NO_K1) {
 		/* ⚠️ Placa con SJ1 PUENTEADO: el ADIN2111 ya esta cableado en la
@@ -1008,6 +1127,7 @@ int main(void)
 			if (mb < 0 || modbus_init_server(mb, mb_rtu)) {
 				LOG_ERR("Modbus RTU: no arranco (iface=%d)", mb);
 			} else {
+				g_mb_rtu = mb;
 				LOG_INF("Modbus RTU listo: %u baud, paridad %u, esclavo unit id %u",
 					cfg.baud_div * 100u, cfg.parity, cfg.unit_id);
 			}
@@ -1065,7 +1185,50 @@ int main(void)
 
 	/* 5) transmitir la medida periodicamente */
 	while (1) {
+		int bat;
+
 		k_msleep(cfg.push_ms10 * 10u);
+
+		/* ⚠️ EN BATERIA SE CALLA. Transmitir es de largo lo mas caro que hace
+		 * esta placa: el push enciende el PHY y la linea SPE.
+		 *
+		 * El encoder SIGUE CONTANDO -- la ISR no se toca -- asi que al volver
+		 * la alimentacion externa el nivel es correcto y no hay que recalibrar.
+		 * Ese era el requisito implicito: ahorrar energia sin perder la medida.
+		 *
+		 * Se relee en cada vuelta, no una vez al arrancar: la placa puede
+		 * pasar a bateria en caliente y hay que enterarse. */
+		bat = att_en_bateria();
+		if (bat != g_en_bateria) {
+			g_en_bateria = bat;
+			LOG_INF("Alimentacion: paso a %s",
+				bat ? "BATERIA -> transmisiones suspendidas"
+				    : "externa -> transmisiones reanudadas");
+
+			/* El RS-485 hay que callarlo APAGANDO LA INTERFAZ; no basta con
+			 * no llamar a nada, porque la ATT es ESCLAVO Modbus y responde
+			 * sola en cuanto un maestro pregunta. Cada respuesta activa el
+			 * ADM2587E, que es aislado y arrastra su propio convertidor.
+			 *
+			 * ⚠️ Solo se reactiva si la configuracion lo pedia (CFG_F_RTU):
+			 * volver de bateria no debe encender un RS-485 que estaba
+			 * deshabilitado a proposito. */
+			if (bat) {
+				if (g_mb_rtu >= 0) {
+					modbus_disable((uint8_t)g_mb_rtu);
+					LOG_INF("Modbus RTU: interfaz apagada (bateria)");
+				}
+			} else if ((cfg.flags & CFG_F_RTU) && g_mb_rtu >= 0) {
+				if (modbus_init_server(g_mb_rtu, mb_rtu)) {
+					LOG_ERR("Modbus RTU: no pude reactivarlo");
+				} else {
+					LOG_INF("Modbus RTU: interfaz reactivada");
+				}
+			}
+		}
+		if (bat) {
+			continue;
+		}
 #ifndef BENCH_NO_SPE
 		if (tx_sock < 0 && (seq % 8) == 0) {
 			LOG_WRN("SPE: socket cerrado, reintentando...");
