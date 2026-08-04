@@ -106,10 +106,23 @@ de dar nada por bueno**, no ir a mirar síntomas indirectos.
 
 ## 3. Consola serie
 
-**COM del Pico, 9600 baudios, 8N1.** El conector `uC SWD` (J11) lleva
-`LPUART_TX/RX` puenteadas por la CDC-UART del Pico.
+**COM del Pico, 8N1.** El conector `uC SWD` (J11) lleva `LPUART_TX/RX`
+puenteadas por la CDC-UART del Pico.
 
-> **No son 115200.** Creerlo lleva a leer «silencio» donde hay decenas de KB.
+⚠️ **La velocidad la fija el `prj.conf` del build. Ante silencio, PROBAR LAS DOS.**
+
+| Firmware | Baudios |
+|---|---|
+| **Actual** (rama `mfs`, nivel 3) | **115200** — verificado 2026-08-04 |
+| Versiones antiguas | 9600 |
+
+Medido el 2026-08-04 sobre una unidad en servicio ya actualizada: a 115200 salen
+los mensajes limpios; a 9600, 28 bytes de basura de trama.
+
+> Este apartado afirmaba «9600, no son 115200», y esa frase **costó tiempo real**
+> el 2026-08-04: llevó a dudar de medidas que eran correctas y a dar por buena
+> una pista falsa. El fallo de fondo es tratar como fija una velocidad que
+> depende del build. **Barrer 115200/57600/9600 antes de concluir «está muda».**
 
 ---
 
