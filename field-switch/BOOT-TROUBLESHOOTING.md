@@ -43,20 +43,69 @@ aplicación llegue a correr. Los que enganchan una vuelta más tarde mueren al
 11-12 %. Por eso el éxito parece aleatorio y los fallos caen siempre en el mismo
 porcentaje: **no es transporte ni suerte, es el ciclo de reinicio**.
 
-### Sospechoso: el LTC4296 con la placa fuera de rango
+### De dónde sale el reinicio: es CONSECUENCIA del cuelgue, no la causa
 
-El LTC4296 es un **chip aparte con su propia lógica** y **no se reinicia cuando
-lo hace el micro**. Con la placa a **24 V** —fuera de su rango de clase 13, que
-es 50-58 V— queda intentando periódicamente y cada intento puede hundir la
-alimentación de banco lo justo para reiniciar el MAX32690.
+`main.c:633`: **P1.8 gobierna el `RESET_N` de la placa a través de una puerta
+AND**, y P1.8 es la línea de reset del ADIN6310. Si la comunicación con el
+switch falla y vence su temporizador, el firmware pulsa esa línea para
+reiniciar el switch **y reinicia la placa entera**. Por eso el periodo es
+idéntico en binarios distintos: no lo marca el código, lo marca ese temporizador.
 
-**Comprobación de diez segundos, sin grabar nada:** mirar el amperímetro de la
-fuente. Un pico de corriente cada ~20 s confirma la hipótesis.
+Lo que hay que buscar, entonces, es **por qué se cuelga**, no qué reinicia.
 
-**La prueba que falta: alimentar la placa a 50 V.** Es la condición de diseño y
-la única que no se ha probado.
+### ✅ Cómo se resolvió: **bajar el registro a nivel 3**
+
+`CONFIG_LOG_DEFAULT_LEVEL=4` es **DEBUG**, no INFO. Medido: **807 KB de trazas
+en 150 s**, en modo inmediato —bloqueando el procesador en cada línea a 115200—,
+con el hilo lector de SPI consumiendo el **42 % de CPU** solo en registrar.
+
+Con `CONFIG_LOG_DEFAULT_LEVEL=3` la placa arranca limpia y estable: **0
+reinicios**, `Configuration done`, `Vin 52704V` en rango, y **3,8 KB** de
+consola en el mismo intervalo — 210 veces menos.
+
+⚠️ **La causa raíz del cuelgue no está probada.** Lo que está medido es que a
+nivel 3 no ocurre. Lo más plausible es que el diluvio de trazas en modo
+inmediato retrasara la comunicación con el ADIN6310 lo suficiente para que
+venciera el temporizador de arriba, pero eso es una hipótesis, no un hecho
+verificado. Si vuelve a aparecer, empezar por ahí.
+
+### ⚠️ El nivel DEBUG además **sabotea el grabado por serie**
+
+El firmware inunda el mismo puerto por el que hay que grabar, así que la fase de
+conexión del SCP lee registro donde espera respuestas del ROM:
+
+```
+Error: expected data size != real one
+Connection Failed
+```
+
+Con nivel 4 hicieron falta **tres intentos** para enganchar la ventana del ROM.
+Recuperar un field switch en campo se convertía en una lotería **por culpa del
+propio firmware**. Razón operativa de peso para no desplegar 50 unidades a DEBUG.
 
 ### Descartado por el camino (para no repetirlo)
+
+- **No es desbordamiento de pila.** Medido con `CONFIG_THREAD_ANALYZER`: el
+  máximo es el hilo lector de SPI con **828 / 2000 (41 %)**; `main` usa 1780 de
+  30000 (5 %) e `ISR0` 428 de 2048 (20 %). Ninguna se acerca.
+- **No es la tensión de alimentación.** La imagen de producción se reinicia
+  igual a 24 V que a **50 V**. Llegué a atribuirlo a la tensión comparando dos
+  imágenes distintas a tensiones distintas; era falso.
+- **No es el tamaño ni el trazado del binario.** Parecía que "toda compilación
+  con código de más arranca" (las de +504 B, +2 KB y +2,3 KB iban bien y las dos
+  limpias no), pero **la imagen buena final es la MÁS PEQUEÑA de todas**
+  (625 192 B, frente a 626 708 B de una que se colgaba). Era coincidencia.
+- **No es `CONFIG_LOG=n`.** Con la configuración de campo (`LOG=y`, nivel 4,
+  inmediato) se reinicia igual. El nivel importa; encenderlo o apagarlo, no.
+- **No es la configuración.** `prj.conf.bak-prod` y `prj.conf.bak-mio` son el
+  **mismo fichero** (793 B los dos).
+- **No es el ERTCO** (causa raíz #1): el bucle ya está acotado en
+  `sys_me18.c:331` y el patrón del binpatch **no aparece** en el binario.
+- **No es una llamada con efectos colaterales dentro de una macro `LOG_*`**: no
+  hay ninguna, ni en `main.c` ni en el driver del LTC4296.
+- **No hay watchdog software**: `CONFIG_TASK_WDT` no está activado. Y
+  `CONFIG_HW_STACK_PROTECTION` **no se puede usar**: el board no activa
+  `CONFIG_ARM_MPU`, así que se ignora en silencio — usar `CONFIG_STACK_SENTINEL`.
 
 - **No es `CONFIG_LOG`.** Con la configuración de campo (`LOG=y`, nivel 4,
   inmediato) se reinicia igual. Llegué a acusar al registro y era falso.
