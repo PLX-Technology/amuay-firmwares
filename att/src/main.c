@@ -108,8 +108,15 @@ static const struct gpio_dt_spec led_b = GPIO_DT_SPEC_GET(DT_ALIAS(led2), gpios)
  * callar -- pero conviene saberlo antes de quedarse mirando por que no
  * contesta.
  *
- * El nivel activo NO esta documentado por hardware. Se define aqui en un solo
- * sitio para poder invertirlo con una linea cuando se compruebe en la placa.
+ * ✅ POLARIDAD VERIFICADA EN LA PLACA DE TANK1 (2026-08-04): PB11 = 0 con
+ * alimentacion externa, 1 en bateria.
+ *
+ * ⚠️ La prueba concluyente NO fue el silencio -- eso lo da igual una placa
+ * apagada, y de hecho el slot SPE dejo de entregar, asi que por SPE no habria
+ * podido transmitir aunque quisiera. Lo que lo demuestra es que el TIEMPO DE
+ * MARCHA que reporta la ATT siguio subiendo sin reiniciarse (283 s -> 514 s) y
+ * que la cuenta del encoder cambio (1012 -> 1010) mientras estaba callada: la
+ * placa estuvo VIVA, contando, y callada por decision del firmware.
  */
 #define BAT_PORT   DT_NODELABEL(gpiob)
 #define BAT_PIN    11
