@@ -14,6 +14,9 @@ LOG_MODULE_REGISTER(eth_adin6310, CONFIG_LOG_DEFAULT_LEVEL);
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/spi.h>
 #include <zephyr/drivers/sensor/ltc4296.h>
+#include <zephyr/sys/byteorder.h>
+#include <mxc_sys.h>
+#include <flc_regs.h>                   /* actrl: leer el USN del info block */
 
 #include "SMP_stack_api.h"
 #include "SES_port_api.h"
@@ -471,6 +474,188 @@ volatile int            g_retry_rc[MFS_PSE_PORTS];  /* rc del ultimo reintento *
 volatile uint16_t g_short_mask;              /* bit p = LTC_PORTp en corto */
 volatile int      g_short_vout[MFS_PSE_PORTS];
 
+/* ============ TELEMETRIA: CORRIENTE Y POTENCIA POR SLOT ============
+ * Espejo de la del MPS (`power-switch/src/main.c`, rama mps): el field switch
+ * tampoco tiene pila de red y no le hace falta -- SES_XmitFrame() inyecta una
+ * trama ya montada directamente en el switch, con la cabecera Ethernet a mano.
+ *
+ * Mismo ethertype 0x88B6 que el MPS; se distinguen por el magic. Difusion,
+ * para que la TPU no tenga que conocer ninguna MAC de antemano.
+ *
+ * ⚠️ POR QUE LLEVA dev_id Y EL DEL MPS NO.
+ * La MAC de esta placa SE SORTEA EN CADA ARRANQUE (mas abajo en main():
+ * srand(k_cycle_get_32()); mac_addr[3..5] = rand()). Si la pasarela indexara
+ * por MAC, cada reinicio de un field switch apareceria como un equipo NUEVO;
+ * con 50 en campo el panel se llena de fantasmas en dias.
+ *
+ * Por eso la identidad viaja DENTRO de la trama y sale del USN del MAX32690,
+ * que es unico por chip y sobrevive a reinicios y regrabados. La MAC se manda
+ * igualmente, pero solo como dato informativo.
+ * =================================================================== */
+#define MFS_ETHERTYPE  0x88B6
+#define MFS_MAGIC      0x4D465331u   /* "MFS1" */
+#define MFS_TELE_TICKS 2             /* el bucle es de 1 s -> cada 2 s */
+#define MFS_I_NA       ((int16_t)0x8000)  /* sin dato; espejo del MPS y la ATT */
+
+struct mfs_tele {
+	uint8_t  dst[6];
+	uint8_t  src[6];
+	uint16_t ethertype;
+	uint32_t magic;
+	uint16_t version;
+	uint16_t nports;
+	uint32_t seq;
+	uint32_t uptime_ms;
+	uint64_t dev_id;                  /* identidad ESTABLE, del USN */
+	int16_t  iout_ma[MFS_PSE_PORTS];  /* MFS_I_NA = sin lectura valida */
+	uint16_t pxst[MFS_PSE_PORTS];     /* estado: distingue "no entrega" de 0 mA */
+	/* diagnostico del chip, al final igual que en el MPS */
+	uint16_t gcmd;
+	uint16_t unlocks;
+	int32_t  vin_mv;
+	uint16_t vin_ok;
+	uint16_t disc_n;
+} __packed;
+
+/* ⚠️ CONTRATO CON LA PASARELA. `gateway.py` desempaqueta la carga (sin los 14
+ * bytes de cabecera Ethernet) con:
+ *
+ *     MFS_FMT      = "!IHHIIQ" + "h"*5 + "H"*5     -> 44 bytes
+ *     MFS_FMT_CHIP = "!HHiHH"                      -> 12 bytes
+ *
+ * 14 + 44 + 12 = 70. Si alguien toca esta estructura sin tocar el parser, el
+ * fallo seria SILENCIOSO: tramas que se decodifican y dan corrientes absurdas.
+ * Mejor que no compile. */
+BUILD_ASSERT(sizeof(struct mfs_tele) == 70,
+	     "struct mfs_tele desalineada con MFS_FMT de gateway.py");
+
+volatile int      g_tele_rc;      /* ultimo retorno de SES_XmitFrame */
+volatile unsigned g_tele_n;       /* tramas emitidas */
+volatile uint64_t g_dev_id;       /* identidad de esta placa (0 = sin USN) */
+
+/* Testigos del driver del LTC4296, igual que en el MPS. */
+extern volatile int            g_ltc_vin_mv;
+extern volatile unsigned char  g_ltc_vin_ok;
+extern volatile unsigned short g_ltc_disc_n;
+
+/* Identidad estable de la placa, derivada del USN del MAX32690.
+ *
+ * ⚠️ NO se usa MXC_SYS_GetUSN(): arrastra MXC_FLC_UnlockInfoBlock y MXC_CTB_Init
+ * -- el driver de flash y el motor criptografico -- que este HAL no compila, y
+ * el enlazado falla con "undefined reference". Ademas calcula un checksum por
+ * hardware que aqui no hace ninguna falta.
+ *
+ * Se lee el bloque de informacion directamente. Es la MISMA secuencia que ya
+ * usamos por SWD para inspeccionar la CRK (`FLASHEO.md` §4), aqui en tres
+ * escrituras a `actrl`, sin dependencias de enlazado:
+ *
+ *     0x1234      asegurar bloqueado
+ *     0x3a7f5ca3 / 0xa1e34f20 / 0x9608b2c1   secuencia de desbloqueo
+ *     0xDEADBEEF  volver a bloquear
+ *
+ * ⚠️ SOLO LECTURA, y se re-bloquea SIEMPRE antes de salir. El bloque de
+ * informacion contiene la CRK: dejarlo desbloqueado seria dejar la puerta
+ * abierta a que un fallo posterior lo corrompa y la placa deje de arrancar
+ * para siempre.
+ *
+ * Se pliega a 64 bits con FNV-1a en vez de truncar: los USN de un mismo lote
+ * comparten prefijo, asi que quedarse con los primeros o ultimos bytes podria
+ * colisionar entre placas hermanas -- justo el fallo que este campo existe
+ * para evitar.
+ *
+ * Devuelve 0 si el bloque no da nada creible. La pasarela trata el 0 como "sin
+ * identidad estable" y lo avisa en el panel, en vez de fingir que la tiene. */
+#define MFS_USN_WORDS 4         /* palabras del info block que cubren el USN */
+
+static uint64_t mfs_dev_id(void)
+{
+	volatile uint32_t *info = (volatile uint32_t *)MXC_INFO0_MEM_BASE;
+	uint64_t h = 1469598103934665603ULL;   /* FNV-1a 64, offset basis */
+	uint32_t w[MFS_USN_WORDS];
+	int vacio = 1;
+
+	MXC_FLC0->actrl = 0x1234;
+	MXC_FLC0->actrl = 0x3a7f5ca3;
+	MXC_FLC0->actrl = 0xa1e34f20;
+	MXC_FLC0->actrl = 0x9608b2c1;
+
+	for (int i = 0; i < MFS_USN_WORDS; i++) {
+		w[i] = info[i];
+	}
+
+	MXC_FLC0->actrl = 0xDEADBEEF;          /* re-bloquear SIEMPRE */
+
+	for (int i = 0; i < MFS_USN_WORDS; i++) {
+		/* Un bloque a 0xFFFFFFFF o a 0 no es un numero de serie: es que no
+		 * se pudo leer. Mejor devolver 0 que inventar una identidad. */
+		if (w[i] != 0xFFFFFFFFu && w[i] != 0) {
+			vacio = 0;
+		}
+		for (int b = 0; b < 4; b++) {
+			h ^= (w[i] >> (8 * b)) & 0xFF;
+			h *= 1099511628211ULL;         /* FNV-1a 64, primo */
+		}
+	}
+	return vacio ? 0 : h;
+}
+
+static void mfs_tele_send(const struct device *ltc, const uint8_t mac[6])
+{
+	static uint32_t seq;
+	static const enum ltc4296_port pp[MFS_PSE_PORTS] = {
+		LTC_PORT0, LTC_PORT1, LTC_PORT2, LTC_PORT3, LTC_PORT4 };
+	struct mfs_tele f;
+	SES_transmitFrameData_t tx;
+
+	memset(&f, 0, sizeof(f));
+	memset(f.dst, 0xFF, sizeof(f.dst));            /* difusion */
+	memcpy(f.src, mac, sizeof(f.src));
+	f.ethertype = htons(MFS_ETHERTYPE);
+	f.magic     = htonl(MFS_MAGIC);
+	f.version   = htons(1);
+	f.nports    = htons(MFS_PSE_PORTS);
+	seq++;
+	f.seq       = htonl(seq);
+	f.uptime_ms = htonl((uint32_t)k_uptime_get_32());
+	f.dev_id    = sys_cpu_to_be64(g_dev_id);
+
+	for (int i = 0; i < MFS_PSE_PORTS; i++) {
+		int ima = 0;
+		uint16_t st = 0;
+
+		/* ⚠️ El ADC de puerto solo da dato valido (bit NEW) en los puertos
+		 * que entregan. Si falla se manda el centinela: un 0 seria un dato
+		 * falso perfectamente creible, y en el panel se leeria como
+		 * "conectado y sin consumo". */
+		if (ltc4296_read_port_adc(ltc, pp[i], &ima) == 0) {
+			if (ima >  32000) { ima =  32000; }
+			if (ima < -32000) { ima = -32000; }
+			f.iout_ma[i] = (int16_t)htons((uint16_t)(int16_t)ima);
+		} else {
+			f.iout_ma[i] = (int16_t)htons((uint16_t)MFS_I_NA);
+		}
+
+		if (ltc4296_read_port_status(ltc, pp[i], &st) != 0) { st = 0; }
+		f.pxst[i] = htons(st);
+	}
+
+	f.gcmd    = htons(g_gcmd);
+	f.unlocks = htons(g_unlock_n);
+	f.vin_mv  = (int32_t)htonl((uint32_t)g_ltc_vin_mv);
+	f.vin_ok  = htons(g_ltc_vin_ok);
+	f.disc_n  = htons(g_ltc_disc_n);
+
+	memset(&tx, 0, sizeof(tx));
+	tx.frameType         = SES_standardFrame;
+	tx.data_p            = &f;
+	tx.byteCount         = sizeof(f);
+	tx.ses.generateFcs   = 1;
+	tx.ses.egressPortMap = 0xFF;   /* por todos: la TPU puede colgar de cualquiera */
+
+	g_tele_rc = SES_XmitFrame(&tx);
+	if (g_tele_rc == 0) { g_tele_n++; }
+}
+
 /* Prueba un puerto en modo clasificacion y devuelve el Vout de sondeo.
  * Deja el puerto DESHABILITADO al salir (jamas entrega potencia).
  * Devuelve el Vout en mV (puede ser negativo/absurdo si el ADC del chip
@@ -639,10 +824,21 @@ int main(void)
 	 * se perdian (SES_ReceiveMessage los rechaza sin libreria inicializada). */
 
 	k_sleep(K_MSEC(1));
+	/* ⚠️ La MAC se SORTEA en cada arranque. No se toca aqui para no cambiar el
+	 * comportamiento de red probado en campo, pero es la razon de que la
+	 * telemetria lleve `dev_id`: la identidad de esta placa NO puede ser su
+	 * MAC. Ver el comentario de struct mfs_tele.
+	 *
+	 * (Pendiente de valorar: derivar tambien la MAC del USN, para que deje de
+	 * cambiar en cada arranque en una red puenteada con la de oficina.) */
 	srand(k_cycle_get_32());
 	mac_addr[3] = rand();
 	mac_addr[4] = rand();
 	mac_addr[5] = rand();
+
+	g_dev_id = mfs_dev_id();
+	printf("dev_id (USN): %08x%08x\n",
+	       (unsigned)(g_dev_id >> 32), (unsigned)(g_dev_id & 0xFFFFFFFFu));
 
 	ret = adin6310_enable_pse(ltc4296_dev, switch_op);
 	if (ret){
@@ -818,6 +1014,20 @@ int main(void)
 					ltc4296_reg_read(ltc4296_dev, 0x08, &gc);
 				}
 				g_gcmd = gc;
+			}
+		}
+
+		/* Telemetria de consumo por slot hacia la pasarela.
+		 *
+		 * Va DESPUES del vigilante a proposito: si el chip estaba bloqueado,
+		 * el vigilante acaba de reescribir la llave, asi que las lecturas de
+		 * esta vuelta ya son buenas en vez de ser silenciosamente basura. */
+		{
+			static unsigned mfs_tele_tick;
+
+			if (++mfs_tele_tick >= MFS_TELE_TICKS) {
+				mfs_tele_tick = 0;
+				mfs_tele_send(ltc4296_dev, mac_addr);
 			}
 		}
 
