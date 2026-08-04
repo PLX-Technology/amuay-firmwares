@@ -169,6 +169,56 @@ static int att_en_bateria(void)
 	return BAT_ACTIVO_ALTO ? (v != 0) : (v == 0);
 }
 
+/* ---------------- LEDs del conector RS-485 (D9 y D10) ----------------
+ *
+ * Van CABLEADOS A LAS LINEAS TX/RX del USART2 (confirmado por Mayker), no a un
+ * GPIO propio. Por eso estan encendidos siempre: la linea TX de un UART EN
+ * REPOSO se queda en ALTO, asi que el LED luce aunque no se transmita nada. No
+ * indican actividad, indican que el UART esta inicializado.
+ *
+ * ⚠️ SE SUELTAN A ENTRADA, NUNCA SE FUERZAN A BAJO.
+ * El ADM2587E no tiene linea de habilitacion: la direccion se la conmuta un
+ * comparador ADCMP600 vigilando la propia linea TX. Forzar TX a bajo para
+ * apagar el LED puede hacer que el comparador lo lea como "esta transmitiendo"
+ * y el transceptor se ponga a atacar el bus diferencial de forma permanente.
+ * Con varios Varec en el mismo bus, eso no apaga un LED: DEJA MUDOS A TODOS LOS
+ * DEMAS EQUIPOS. Dejar el pin en alta impedancia quita el ataque del micro sin
+ * afirmar un nivel.
+ *
+ * ⚠️ SOLO SE HACE CUANDO EL PUERTO NO SE USA DE VERDAD: RS-485 deshabilitado
+ * por configuracion, o placa en bateria (donde ya se apaga el Modbus). Con el
+ * puerto habilitado la placa TIENE que seguir escuchando: es esclavo Modbus y
+ * no puede saber si hay un maestro hasta que pregunta.
+ *
+ * ⚠️ ALCANCE REAL, y conviene no prometer de mas: solo el LED de TX depende del
+ * micro. El de RX lo gobierna la salida RO del transceptor, que el firmware no
+ * controla; si ese sigue encendido, es hardware.
+ */
+#define R485_TX_PIN 12
+#define R485_RX_PIN 11
+
+/* ⚠️ ES UN CAMINO DE IDA: no hay vuelta atras sin reiniciar.
+ *
+ * Devolverle los pines al USART2 en caliente exigiria pinctrl_apply_state(), y
+ * su configuracion (PINCTRL_DT_DEV_CONFIG_GET) NO es accesible desde la
+ * aplicacion: vive en la unidad de compilacion del driver. La alternativa
+ * limpia seria CONFIG_PM_DEVICE + pm_device_action_run(), que hoy no esta
+ * activado en esta placa.
+ *
+ * Por eso esto SOLO se llama con el RS-485 deshabilitado por configuracion,
+ * decision que ya es de arranque -- cfg_save() avisa de que "se aplica al
+ * reiniciar". NO se usa al pasar a bateria: soltar alli dejaria el puerto
+ * MUERTO al volver la alimentacion externa, precio absurdo por un LED. */
+static void att_485_soltar(void)
+{
+	/* Alta impedancia: el micro deja de atacar la linea. NO se pone a cero,
+	 * por lo del comparador de direccion explicado arriba. */
+	gpio_pin_configure(gpa, R485_TX_PIN, GPIO_INPUT);
+	gpio_pin_configure(gpa, R485_RX_PIN, GPIO_INPUT);
+	LOG_INF("RS-485 deshabilitado: pines TX/RX en alta impedancia"
+		" (se apaga el LED de TX; el de RX lo gobierna el transceptor)");
+}
+
 /* ---------------- RS-485 (USART2, PA12=TX PA11=RX) ---------------- */
 static volatile uint32_t r485_rx_bytes;
 
@@ -1230,6 +1280,7 @@ int main(void)
 		/* RTU sobre el RS-485, solo si la configuracion lo pide */
 		if (!(cfg.flags & CFG_F_RTU)) {
 			LOG_INF("Modbus RTU: deshabilitado por configuracion");
+			att_485_soltar();
 		} else {
 			mb = modbus_iface_get_by_name("modbus0");
 			if (mb < 0 || modbus_init_server(mb, mb_rtu)) {
