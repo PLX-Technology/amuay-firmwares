@@ -688,9 +688,36 @@ static int mfs_probe_port_vout(const struct device *dev, enum ltc4296_port p)
  * SALTA los puertos que estan DELIVERING (PD real alimentandose): no se
  * deben sondear para no interrumpir la entrega, y obviamente no son corto.
  * Actualiza g_short_mask / g_short_vout y devuelve la mascara. */
+/* ⚠️ SONDEO DE CORTOS Y NEGOCIACION VAN EN PASADAS DISTINTAS.
+ *
+ * ESTE ES EL FALLO QUE HIZO QUE UN SLOT NO SE RECUPERARA NUNCA (2026-08-04).
+ *
+ * mfs_probe_port_vout() mete el puerto en modo CLASIFICACION para medir Vout.
+ * Eso toca la linea SCCP. Llamar a la negociacion inmediatamente despues, sobre
+ * la misma linea que no ha vuelto a reposo, la hace fallar SIEMPRE:
+ *
+ *   Port0 Vin 53338V
+ *   PD classification failed, PD line not HIGH     <- resto del sondeo
+ *   PD detection failed, PD line not LOW           <- la negociacion, ya perdida
+ *   SCCP.. PD Not Present
+ *
+ * Cuatro mensajes de linea en 240 ms = DOS intercambios SCCP pisandose.
+ *
+ * Por eso el arranque siempre funcionaba y el reintento nunca: probe() llama a
+ * do_spoe_sccp() sobre un puerto LIMPIO, sin sondear cortos antes. La diferencia
+ * no estaba en el chip ni en el PD -- estaba aqui.
+ *
+ * Se alternan las pasadas: una sondea cortos, la siguiente reintenta. Nunca las
+ * dos sobre el mismo puerto en la misma vuelta. La deteccion de cortos se
+ * conserva intacta -- existe para no energizar un puerto en cortocircuito -- solo
+ * que ahora corre cada dos ciclos (60 s en vez de 30 s), que sobra.
+ */
 static uint16_t mfs_scan_shorts(const struct device *dev)
 {
-	uint16_t mask = 0;
+	static unsigned pasada;
+	/* false = sondear cortos; true = reintentar negociacion */
+	const bool reintentar = (pasada++ & 1u) != 0;
+	uint16_t mask = reintentar ? g_short_mask : 0;
 	uint16_t gf = 0;
 	/* BIT(0) de GFLTEV. Vive en el .h PRIVADO del driver
 	 * (drivers/sensor/ltc4296/ltc4296.h:70) y no en la cabecera publica,
@@ -738,29 +765,33 @@ static uint16_t mfs_scan_shorts(const struct device *dev)
 			continue;
 		}
 
-		int v = mfs_probe_port_vout(dev, (enum ltc4296_port)p);
-		g_short_vout[p] = v;
+		if (!reintentar) {
+			/* --- PASADA DE SONDEO: solo medir, no negociar --- */
+			int v = mfs_probe_port_vout(dev, (enum ltc4296_port)p);
 
-		/* corto = Vout bajo Y positivo. Un valor <0 o muy grande
-		 * (p.ej. +/-71000 con SPI/ADC mudo) NO es corto: se ignora
-		 * para evitar falsos positivos. */
-		if (v >= 0 && v < MFS_SHORT_VOUT_MV) {
-			mask |= (1u << p);
-			continue;   /* ⚠️ en corto: NO se intenta energizar */
+			g_short_vout[p] = v;
+
+			/* corto = Vout bajo Y positivo. Un valor <0 o muy grande
+			 * (p.ej. +/-71000 con SPI/ADC mudo) NO es corto: se ignora
+			 * para evitar falsos positivos. */
+			if (v >= 0 && v < MFS_SHORT_VOUT_MV) {
+				mask |= (1u << p);
+			}
+			continue;
 		}
 
-		/* --- reintento dentro del escaneo ---------------------------
-		 * Puerto sano y sin entregar: se intenta negociar.
+		/* --- PASADA DE NEGOCIACION: la linea lleva 30 s en reposo ---
 		 *
-		 * ⚠️ VA AQUI Y NO EN UN BLOQUE APARTE, y no es cosmetica:
+		 * ⚠️ Un puerto marcado en corto en la pasada anterior NO se toca:
+		 * negociar es aplicar tension, y sobre un cortocircuito eso es
+		 * justo lo que la deteccion existe para evitar.
+		 *
 		 * do_spoe_sccp() solo negocia en su rama `port_chk ==
-		 * LTC_PORT_DISABLED`; sobre un puerto en BUSCANDO o en error se
-		 * mete por otro camino. mfs_probe_port_vout() acaba de dejar este
-		 * puerto DESHABILITADO, que es justo el estado de partida bueno.
-		 *
-		 * La version anterior lo llamaba cada 5 s sobre los cinco puertos
-		 * en cualquier estado, y la placa entraba en BUCLE DE ARRANQUE.
-		 * ------------------------------------------------------------ */
+		 * LTC_PORT_DISABLED`. Un puerto que no entrega ya esta ahi: el
+		 * propio driver lo deshabilita en todos sus caminos de fallo. */
+		if (mask & (1u << p)) {
+			continue;
+		}
 		{
 			struct ltc4296_vi vi;
 
