@@ -324,10 +324,11 @@ PAGE = r"""<!doctype html>
     </div>
 
     <div class="card">
-      <h2>Consumo por puerto <span class="mut" id="pse_hdr" style="text-transform:none;font-weight:400"></span></h2>
-      <table><thead><tr><th>Slot</th><th>Corriente</th><th>Potencia</th><th>Estado</th></tr></thead>
-        <tbody id="pse_tb"><tr><td colspan="4" class="mut">cargando…</td></tr></tbody></table>
-      <p class="mut" style="margin:10px 0 0">Medido por el LTC4296 del <b>power switch</b>.
+      <h2>Consumo por slot <span class="mut" id="sw_hdr" style="text-transform:none;font-weight:400"></span></h2>
+      <div id="sw_wrap"><p class="mut">cargando…</p></div>
+      <p class="mut" style="margin:10px 0 0">Una seccion por equipo: el <b>power
+        switch</b> y cada <b>field switch</b>, incluidos los encadenados por SPE
+        colgando de otro field switch. Medido por el LTC4296 de cada uno.
         Un guion significa <b>sin lectura</b>, no cero: el ADC de puerto solo da dato
         valido en los puertos que estan entregando.</p>
       <p class="mut" style="margin:6px 0 0">La potencia es <b>estimada</b>: corriente
@@ -495,18 +496,34 @@ async function tanks(){
     // Consumo del PSE. En su propio try: si falla, la tabla de tanques -- que
     // es lo importante -- se sigue pintando igual.
     try{
-      const rp=await fetch('/api/pse'); const p=await rp.json();
-      const ps=p.puertos||[];
-      $('#pse_hdr').textContent = p.vivo ? '' : (p.edad_s==null ? '(sin telemetria)' : `(sin datos hace ${p.edad_s}s)`);
-      $('#pse_tb').innerHTML = ps.length ? ps.map(x=>`<tr>
-        <td>${x.slot}</td>
-        <td><b>${(p.vivo && x.ma!=null) ? x.ma+' mA' : '—'}</b></td>
-        <td><b>${(p.vivo && x.w!=null) ? x.w.toFixed(2)+' W' : '—'}</b></td>
-        <td class="mut">${x.estado}</td></tr>`).join('')
-        + ((p.vivo && p.w_total!=null) ? `<tr><td class="mut">total</td><td></td>
-             <td><b>${p.w_total.toFixed(2)} W</b></td>
-             <td class="mut">a ${(p.w_vin_mv/1000).toFixed(1)} V</td></tr>` : '')
-        : '<tr><td colspan="4" class="mut">sin telemetria del power switch</td></tr>';
+      const rs=await fetch('/api/switches'); const sw=await rs.json();
+      const eq=sw.switches||[];
+      $('#sw_hdr').textContent = eq.length ? (eq.length+' equipo'+(eq.length==1?'':'s')) : '';
+      $('#sw_wrap').innerHTML = eq.length ? eq.map(s=>{
+        const ps=s.puertos||[];
+        const nom = s.tipo==='mps' ? 'Power switch' : 'Field switch';
+        // Sin dev_id la identidad es la MAC, y la MAC del field switch se
+        // sortea en cada arranque: hay que decirlo, o el panel miente.
+        const ident = s.id_estable
+          ? `id ${s.dev_id.toString(16).padStart(16,'0')}`
+          : `<span title="firmware antiguo: sin identidad estable. La MAC cambia en cada arranque, asi que este equipo puede duplicarse en el panel">MAC ${s.mac} ⚠️</span>`;
+        const estado = s.vivo ? '' : (s.edad_s==null ? ' — sin telemetria'
+                                                     : ` — sin datos hace ${s.edad_s}s`);
+        const filas = ps.length ? ps.map(x=>`<tr>
+            <td>${x.slot}</td>
+            <td><b>${(s.vivo && x.ma!=null) ? x.ma+' mA' : '—'}</b></td>
+            <td><b>${(s.vivo && x.w!=null) ? x.w.toFixed(2)+' W' : '—'}</b></td>
+            <td class="mut">${x.estado}</td></tr>`).join('')
+          + ((s.vivo && s.w_total!=null) ? `<tr><td class="mut">total</td><td></td>
+               <td><b>${s.w_total.toFixed(2)} W</b></td>
+               <td class="mut">a ${(s.w_vin_mv/1000).toFixed(1)} V</td></tr>` : '')
+          : '<tr><td colspan="4" class="mut">sin puertos reportados</td></tr>';
+        return `<div style="margin:0 0 18px">
+          <h3 style="margin:0 0 6px;font-size:14px">${nom}
+            <span class="mut" style="font-weight:400">${ident}${estado}</span></h3>
+          <table><thead><tr><th>Slot</th><th>Corriente</th><th>Potencia</th><th>Estado</th></tr></thead>
+            <tbody>${filas}</tbody></table></div>`;
+      }).join('') : '<p class="mut">sin telemetria de ningun switch</p>';
     }catch(e){ /* el panel de tanques manda: no romper por esto */ }
 
     const r=await fetch('/api/tanks'); const d=await r.json();

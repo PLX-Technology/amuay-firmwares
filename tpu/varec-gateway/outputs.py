@@ -245,13 +245,14 @@ class ModbusOut:
 # ============================================================ HTTP / JSON / UI
 class HttpOut:
     def __init__(self, cfg, live, store, stop, full_cfg=None, cfg_path=None,
-                 pse_fn=None):
+                 pse_fn=None, switches_fn=None):
         import http.server
         import webui
         self.live, self.store, self.stop = live, store, stop
         # Se recibe la funcion, no se importa gateway: seria un import circular
         # y ademas gateway corre como __main__, no como modulo importable.
         self.pse_fn = pse_fn
+        self.switches_fn = switches_fn
         self.full_cfg = full_cfg or {}
         self.cfg_path = cfg_path
         outer = self
@@ -433,9 +434,21 @@ class HttpOut:
                 elif p == "/api/pse":
                     # Consumo por puerto del LTC4296 del power switch. Panel de
                     # estado instantaneo, sin historico.
+                    #
+                    # Se conserva tal cual aunque /api/switches lo englobe:
+                    # devuelve UN power switch y hay clientes colgando de ella.
                     if outer.pse_fn is None:
                         return self._send({"error": "sin telemetria del PSE"}, 404)
                     self._send(outer.pse_fn())
+                elif p == "/api/switches":
+                    # Todos los switches vistos -- el power switch y los field
+                    # switches, incluidos los encadenados por SPE -- con
+                    # corriente y potencia por slot.
+                    if outer.switches_fn is None:
+                        return self._send({"error": "sin telemetria de switches"}, 404)
+                    eq = outer.switches_fn()
+                    self._send({"switches": eq, "n": len(eq),
+                                "ts": int(time.time())})
                 elif p.startswith("/api/tank/"):
                     parts = p.split("/")
                     try:
@@ -454,6 +467,7 @@ class HttpOut:
                                    200 if tid in snap else 404)
                 else:
                     self._send({"rutas": ["/  (UI web)", "/api/tanks", "/api/pse",
+                                          "/api/switches",
                                           "/api/tank/<id>",
                                           "/api/tank/<id>/history?res=raw|1m|1h",
                                           "/api/config"]}, 404)
@@ -475,7 +489,7 @@ class HttpOut:
 
 
 # ============================================================ fabrica
-def build_outputs(cfg, live, store, stop, pse_fn=None) -> list:
+def build_outputs(cfg, live, store, stop, pse_fn=None, switches_fn=None) -> list:
     outs = []
     if cfg.get("mqtt", {}).get("enabled"):
         try:
@@ -487,5 +501,6 @@ def build_outputs(cfg, live, store, stop, pse_fn=None) -> list:
     if cfg.get("http", {}).get("enabled"):
         outs.append(HttpOut(cfg["http"], live, store, stop,
                             full_cfg=cfg, cfg_path=cfg.get("_path"),
-                            pse_fn=pse_fn))
+                            pse_fn=pse_fn,
+                            switches_fn=switches_fn))
     return outs

@@ -66,6 +66,77 @@ PSE_ESTADO = {0: "deshabilitado", 1: "durmiendo", 2: "entregando",
               3: "buscando", 4: "error", 5: "inactivo", 6: "pre-deteccion",
               7: "desconocido"}
 
+# --- Telemetria del field switch (MFS) -------------------------------------
+# Mismo ethertype que el MPS: se distinguen por el magic. Un field switch tiene
+# 5 puertos PSE en su LTC4296 (el MPS tiene 4).
+MFS_MAGIC     = 0x4D465331          # "MFS1"
+MFS_PORTS     = 5
+#   magic ver nports seq uptime_ms dev_id   iout[5]  pxst[5]
+MFS_FMT       = "!IHHIIQ" + "h" * MFS_PORTS + "H" * MFS_PORTS
+MFS_LEN       = struct.calcsize(MFS_FMT)
+# Bloque de chip identico al v2 del MPS: gcmd unlocks vin_mv vin_ok disc_n
+MFS_FMT_CHIP  = MPS_FMT_V2
+MFS_LEN_CHIP  = MPS_LEN_V2
+
+# ⚠️ POR QUE LA IDENTIDAD VA DENTRO DE LA TRAMA Y NO ES LA MAC.
+#
+# La MAC del field switch se SORTEA EN CADA ARRANQUE
+# (`field-switch/src/main.c`: srand(k_cycle_get_32()); mac_addr[3..5]=rand()).
+# Indexar por MAC -- que es lo que hace el MPS hoy -- crearia un equipo nuevo
+# en el panel cada vez que un switch se reinicia. Con 50 en campo, el panel se
+# llenaria de fantasmas en dias.
+#
+# El MPS tampoco se salva por otro motivo: su MAC esta CABLEADA en el firmware
+# (02:00:00:AD:4C:01), asi que dos power switches colisionarian entre si.
+#
+# Por eso `dev_id` es un entero de 64 bits derivado del USN del MAX32690
+# (MXC_SYS_GetUSN), que es unico por chip y sobrevive a reinicios y a
+# regrabados. La MAC se sigue guardando, pero solo como dato informativo.
+DEV_SIN_ID = 0                      # firmware antiguo: no manda dev_id
+
+
+def parse_mfs_frame(payload: bytes):
+    """Decodifica la telemetria de un field switch (sin cabecera Ethernet)."""
+    if len(payload) < MFS_LEN:
+        return None
+    f = struct.unpack(MFS_FMT, payload[:MFS_LEN])
+    if f[0] != MFS_MAGIC:
+        return None
+    ver, nports, seq, uptime_ms, dev_id = f[1], f[2], f[3], f[4], f[5]
+    base = 6
+    iout = f[base:base + MFS_PORTS]
+    pxst = f[base + MFS_PORTS:base + 2 * MFS_PORTS]
+    puertos = []
+    for i in range(min(nports, MFS_PORTS)):
+        st = pxst[i] & 0x7
+        puertos.append({
+            "puerto": i,
+            # ⚠️ La serigrafia del MFS empieza en 1 igual que la del MPS, pero
+            # el mapeo NO es trivial: `MAPA-SLOTS.md` documenta que macPort5 es
+            # el slot rotulado "Port 4". Aqui se expone el indice del LTC4296
+            # tal cual y la correspondencia se resuelve en la UI, para no
+            # enterrar un mapeo discutible dentro del parser.
+            "slot": i + 1,
+            "ma": None if iout[i] == MPS_I_NA else iout[i],
+            "estado": PSE_ESTADO.get(st, "?"),
+            "entregando": st == 2,
+            "pxst": pxst[i],
+        })
+    d = {"tipo": "mfs", "ver": ver, "seq": seq, "uptime_s": uptime_ms // 1000,
+         "dev_id": dev_id, "puertos": puertos, "chip": None}
+    if len(payload) >= MFS_LEN + MFS_LEN_CHIP:
+        gcmd, unlocks, vin_mv, vin_ok, disc_n = struct.unpack(
+            MFS_FMT_CHIP, payload[MFS_LEN:MFS_LEN + MFS_LEN_CHIP])
+        d["chip"] = {
+            "gcmd": gcmd,
+            "bloqueado": (gcmd & LTC_UNLOCK_KEY) != LTC_UNLOCK_KEY,
+            "redesbloqueos": unlocks,
+            "vin_mv": None if vin_mv < 0 else vin_mv,
+            "vin_en_rango": bool(vin_ok),
+            "clasif_abandonadas": disc_n,
+        }
+    return d
+
 
 def parse_mps_frame(payload: bytes):
     """Decodifica la telemetria del MPS (sin cabecera Ethernet)."""
@@ -113,6 +184,91 @@ def parse_mps_frame(payload: bytes):
 PSE_LIVE = {"ts": 0, "mac": None, "puertos": [], "chip": None}
 PSE_LOCK = threading.Lock()
 
+# --- Registro de switches (power switch + field switches encadenados) -------
+# Clave: identidad ESTABLE del equipo. Ver el comentario de DEV_SIN_ID sobre
+# por que no puede ser la MAC.
+#
+# En memoria, como PSE_LIVE: es un panel instantaneo. Si algun dia hace falta
+# historico de consumo por slot, va a SQLite, no aqui.
+SWITCHES = {}                       # clave -> dict del equipo
+SW_LOCK = threading.Lock()
+# Un equipo se marca caido pasado esto, pero NO se borra: que un field switch
+# desaparezca del panel es justo lo que no queremos ver en una planta.
+SW_VIVO_S = 15
+# Se olvida solo tras un dia sin dar senales, para que una placa retirada
+# acabe desapareciendo sin intervencion.
+SW_OLVIDO_S = 86400
+
+
+def sw_clave(tipo: str, dev_id: int, mac: str) -> str:
+    """Identidad del equipo en el registro.
+
+    Con `dev_id` (firmware nuevo) la identidad es estable de por vida. Sin el,
+    se cae a la MAC y se marca `id_estable=False` para que el panel pueda
+    avisar: en un field switch antiguo esa MAC cambia en cada arranque.
+    """
+    if dev_id and dev_id != DEV_SIN_ID:
+        return f"{tipo}:{dev_id:016x}"
+    return f"{tipo}:mac:{mac}"
+
+
+def registrar_switch(tipo: str, mac: str, fr: dict):
+    """Guarda/actualiza la telemetria de un switch en el registro."""
+    dev_id = fr.get("dev_id", DEV_SIN_ID)
+    clave = sw_clave(tipo, dev_id, mac)
+    with SW_LOCK:
+        eq = SWITCHES.get(clave)
+        if eq is None:
+            eq = SWITCHES[clave] = {"clave": clave, "tipo": tipo,
+                                    "visto_primero": now()}
+        eq["ts"] = now()
+        eq["mac"] = mac
+        eq["dev_id"] = dev_id
+        eq["id_estable"] = bool(dev_id and dev_id != DEV_SIN_ID)
+        eq["puertos"] = fr["puertos"]
+        eq["chip"] = fr.get("chip")
+        eq["uptime_s"] = fr["uptime_s"]
+        eq["seq"] = fr["seq"]
+        eq["ver"] = fr.get("ver")
+
+
+def _potencia_por_slot(eq: dict):
+    """Rellena `w` por slot y `w_total`. Comparte criterio con pse_snapshot():
+    sin corriente o sin tension el resultado es None, NUNCA 0.0."""
+    vin_mv = (eq.get("chip") or {}).get("vin_mv")
+    total = None
+    for p in eq["puertos"]:
+        ma = p.get("ma")
+        if vin_mv is None or ma is None:
+            p["w"] = None
+        else:
+            p["w"] = round(vin_mv * ma / 1e6, 3)
+            total = (total or 0.0) + p["w"]
+    eq["w_total"] = None if total is None else round(total, 3)
+    eq["w_vin_mv"] = vin_mv
+
+
+def switches_snapshot() -> list:
+    """Lista de switches conocidos, ordenada y con potencia calculada."""
+    t = now()
+    with SW_LOCK:
+        for clave in [k for k, v in SWITCHES.items()
+                      if t - v.get("ts", 0) > SW_OLVIDO_S]:
+            del SWITCHES[clave]
+        equipos = []
+        for eq in SWITCHES.values():
+            c = dict(eq)
+            c["puertos"] = [dict(p) for p in eq.get("puertos", [])]
+            equipos.append(c)
+    for eq in equipos:
+        eq["edad_s"] = t - eq["ts"] if eq.get("ts") else None
+        eq["vivo"] = eq["edad_s"] is not None and eq["edad_s"] <= SW_VIVO_S
+        _potencia_por_slot(eq)
+    # El power switch primero: es la raiz de la cadena de alimentacion.
+    equipos.sort(key=lambda e: (e["tipo"] != "mps", e.get("dev_id") or 0,
+                                e.get("mac") or ""))
+    return equipos
+
 
 def ingest_pse(cfg: dict):
     """Hilo propio para el ethertype del MPS. No toca la ingesta de tanques."""
@@ -136,16 +292,28 @@ def ingest_pse(cfg: dict):
             print(f"[pse] {e}", file=sys.stderr)
             time.sleep(1)
             continue
-        fr = parse_mps_frame(pkt[14:])
-        if fr is None:
+        payload = pkt[14:]
+        mac = ":".join(f"{b:02x}" for b in pkt[6:12])
+
+        fr = parse_mps_frame(payload)
+        if fr is not None:
+            # PSE_LIVE se mantiene ADEMAS del registro: /api/pse es la vista
+            # historica del unico power switch y hay clientes colgando de ella.
+            # Duplicar aqui es barato y evita romperlos.
+            with PSE_LOCK:
+                PSE_LIVE["ts"] = now()
+                PSE_LIVE["mac"] = mac
+                PSE_LIVE["puertos"] = fr["puertos"]
+                PSE_LIVE["uptime_s"] = fr["uptime_s"]
+                PSE_LIVE["seq"] = fr["seq"]
+                PSE_LIVE["chip"] = fr.get("chip")
+            registrar_switch("mps", mac, fr)
             continue
-        with PSE_LOCK:
-            PSE_LIVE["ts"] = now()
-            PSE_LIVE["mac"] = ":".join(f"{b:02x}" for b in pkt[6:12])
-            PSE_LIVE["puertos"] = fr["puertos"]
-            PSE_LIVE["uptime_s"] = fr["uptime_s"]
-            PSE_LIVE["seq"] = fr["seq"]
-            PSE_LIVE["chip"] = fr.get("chip")
+
+        fr = parse_mfs_frame(payload)
+        if fr is not None:
+            registrar_switch("mfs", mac, fr)
+            continue
     s.close()
 
 
@@ -726,7 +894,8 @@ def main():
 
     outs = []
     from outputs import build_outputs           # noqa: E402
-    outs = build_outputs(cfg, live, store, STOP, pse_fn=pse_snapshot)
+    outs = build_outputs(cfg, live, store, STOP, pse_fn=pse_snapshot,
+                         switches_fn=switches_snapshot)
 
     # Ingesta por dos caminos: SPE (tramas L2) y/o Modbus RTU (RS-485).
     # Con el SPE del ATT roto, el RTU es el que trae los datos.
