@@ -58,6 +58,9 @@ MPS_LEN       = struct.calcsize(MPS_FMT)
 #   v2, al final de la trama: gcmd unlocks vin_mv vin_ok disc_n
 MPS_FMT_V2    = "!HHiHH"
 MPS_LEN_V2    = struct.calcsize(MPS_FMT_V2)
+#   v3, DESPUES del bloque v2: dev_id (identidad estable del USN)
+MPS_FMT_V3    = "!Q"
+MPS_LEN_V3    = struct.calcsize(MPS_FMT_V3)
 # Llave de desbloqueo del LTC4296 (GCMD). Con el chip bloqueado, las
 # escrituras se ignoran EN SILENCIO: no hay error que mirar.
 LTC_UNLOCK_KEY = 0x05
@@ -159,8 +162,8 @@ def parse_mps_frame(payload: bytes):
             "entregando": st == 2,
             "pxst": pxst[i],
         })
-    d = {"ver": ver, "seq": seq, "uptime_s": uptime_ms // 1000,
-         "puertos": puertos, "chip": None}
+    d = {"tipo": "mps", "ver": ver, "seq": seq, "uptime_s": uptime_ms // 1000,
+         "puertos": puertos, "chip": None, "dev_id": DEV_SIN_ID}
     # Solo si la version lo anuncia Y los bytes estan: asi un MPS con firmware
     # v1 sigue funcionando contra esta pasarela.
     if ver >= 2 and len(payload) >= MPS_LEN + MPS_LEN_V2:
@@ -176,6 +179,12 @@ def parse_mps_frame(payload: bytes):
             "vin_en_rango": bool(vin_ok),
             "clasif_abandonadas": disc_n,
         }
+    # v3: identidad estable, DESPUES del bloque v2. Mismo criterio que arriba:
+    # solo si la version lo anuncia Y los bytes estan, para que un MPS con
+    # firmware v1 o v2 siga funcionando contra esta pasarela sin tocar nada.
+    off = MPS_LEN + MPS_LEN_V2
+    if ver >= 3 and len(payload) >= off + MPS_LEN_V3:
+        (d["dev_id"],) = struct.unpack(MPS_FMT_V3, payload[off:off + MPS_LEN_V3])
     return d
 
 
