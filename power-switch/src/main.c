@@ -15,6 +15,8 @@ LOG_MODULE_REGISTER(eth_adin6310, CONFIG_LOG_DEFAULT_LEVEL);
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/spi.h>
 #include <zephyr/drivers/sensor/ltc4296.h>
+#include <zephyr/sys/byteorder.h>
+#include <flc_regs.h>                   /* actrl: leer el USN del info block */
 
 #include "SMP_stack_api.h"
 #include "SES_port_api.h"
@@ -516,10 +518,84 @@ struct mps_tele {
 	int32_t  vin_mv;       /* Vin de la ultima clasificacion; -1 = ninguna aun */
 	uint16_t vin_ok;       /* 1 = ese Vin estaba en rango */
 	uint16_t disc_n;       /* clasificaciones abandonadas por Vin fuera de rango */
+	/* --- v3: identidad estable, del USN del MAX32690. -------------------
+	 * ⚠️ VA AL FINAL, DESPUES del bloque v2, y no es capricho: la convencion
+	 * de este proyecto es que cada version ANADE campos al final y jamas
+	 * reordena. Insertarlo en medio dejaria de golpe a toda pasarela v2
+	 * leyendo corrientes desplazadas -- basura perfectamente creible.
+	 *
+	 * Por que hace falta: la MAC del MPS esta CABLEADA en el firmware
+	 * (mps_mac, justo debajo), asi que dos power switches colisionarian en el
+	 * registro de la pasarela. Con dev_id cada uno tiene identidad propia.
+	 * 0 = no se pudo leer; la pasarela lo marca como identidad no estable. */
+	uint64_t dev_id;
 } __packed;
 
+/* ⚠️ CONTRATO CON LA PASARELA. `gateway.py` desempaqueta la carga (sin los 14
+ * bytes de cabecera Ethernet) con:
+ *
+ *     MPS_FMT      = "!IHHII" + "h"*4 + "H"*4   -> 32 bytes
+ *     MPS_FMT_V2   = "!HHiHH"                   -> 12 bytes
+ *     MPS_FMT_V3   = "!Q"                       ->  8 bytes
+ *
+ * 14 + 32 + 12 + 8 = 66. Tocar la estructura sin tocar el parser daria un
+ * fallo SILENCIOSO: tramas que decodifican y dan corrientes absurdas. */
+BUILD_ASSERT(sizeof(struct mps_tele) == 66,
+	     "struct mps_tele desalineada con MPS_FMT de gateway.py");
+
+/* Identidad estable de la placa, derivada del USN del MAX32690.
+ *
+ * ⚠️ NO se usa MXC_SYS_GetUSN(): arrastra MXC_FLC_UnlockInfoBlock y
+ * MXC_CTB_Init -- driver de flash y motor criptografico -- que este HAL no
+ * compila, y el enlazado falla con "undefined reference".
+ *
+ * Se lee el info block directamente, con la misma secuencia que ya usamos por
+ * SWD para inspeccionar la CRK. SOLO LECTURA, y se RE-BLOQUEA SIEMPRE antes de
+ * salir: ahi vive la CRK, y dejarlo abierto seria arriesgar que un fallo
+ * posterior la corrompa y la placa no vuelva a arrancar.
+ *
+ * FNV-1a en vez de truncar: los USN de un mismo lote comparten prefijo y
+ * truncar podria colisionar entre placas hermanas, que es justo el fallo que
+ * este campo existe para evitar.
+ *
+ * Gemela de mfs_dev_id() en `field-switch/src/main.c` (rama mfs). */
+#define MPS_USN_WORDS 4
+
+static uint64_t mps_dev_id(void)
+{
+	volatile uint32_t *info = (volatile uint32_t *)MXC_INFO0_MEM_BASE;
+	uint64_t h = 1469598103934665603ULL;   /* FNV-1a 64, offset basis */
+	uint32_t w[MPS_USN_WORDS];
+	int vacio = 1;
+
+	MXC_FLC0->actrl = 0x1234;
+	MXC_FLC0->actrl = 0x3a7f5ca3;
+	MXC_FLC0->actrl = 0xa1e34f20;
+	MXC_FLC0->actrl = 0x9608b2c1;
+
+	for (int i = 0; i < MPS_USN_WORDS; i++) {
+		w[i] = info[i];
+	}
+
+	MXC_FLC0->actrl = 0xDEADBEEF;          /* re-bloquear SIEMPRE */
+
+	for (int i = 0; i < MPS_USN_WORDS; i++) {
+		if (w[i] != 0xFFFFFFFFu && w[i] != 0) {
+			vacio = 0;
+		}
+		for (int b = 0; b < 4; b++) {
+			h ^= (w[i] >> (8 * b)) & 0xFF;
+			h *= 1099511628211ULL;         /* FNV-1a 64, primo */
+		}
+	}
+	return vacio ? 0 : h;
+}
+
+volatile uint64_t g_dev_id;   /* identidad de esta placa (0 = sin USN) */
+
 /* MAC localmente administrada, misma familia que el resto del banco
- * (la spe0 de la TPU es 02:00:00:AD:11:10). */
+ * (la spe0 de la TPU es 02:00:00:AD:11:10).
+ * ⚠️ Es la MISMA en todas las placas: por eso hace falta dev_id. */
 static const uint8_t mps_mac[6] = { 0x02, 0x00, 0x00, 0xAD, 0x4C, 0x01 };
 
 volatile int g_tele_rc;      /* ultimo retorno de SES_XmitFrame */
@@ -548,7 +624,7 @@ static void mps_tele_send(const struct device *ltc)
 	memcpy(f.src, mps_mac, sizeof(f.src));
 	f.ethertype = htons(MPS_ETHERTYPE);
 	f.magic     = htonl(MPS_MAGIC);
-	f.version   = htons(2);
+	f.version   = htons(3);
 	f.nports    = htons(4);
 	seq++;
 	f.seq       = htonl(seq);
@@ -578,6 +654,7 @@ static void mps_tele_send(const struct device *ltc)
 	f.vin_mv  = (int32_t)htonl((uint32_t)g_ltc_vin_mv);
 	f.vin_ok  = htons(g_ltc_vin_ok);
 	f.disc_n  = htons(g_ltc_disc_n);
+	f.dev_id  = sys_cpu_to_be64(g_dev_id);
 
 	memset(&tx, 0, sizeof(tx));
 	tx.frameType      = SES_standardFrame;
@@ -679,6 +756,10 @@ int main(void)
 	mac_addr[3] = rand();
 	mac_addr[4] = rand();
 	mac_addr[5] = rand();
+
+	/* Identidad de esta placa para la telemetria. Se lee UNA vez: toca el
+	 * bloque de informacion de la flash y no hay motivo para repetirlo. */
+	g_dev_id = mps_dev_id();
 
 	ret = adin6310_enable_pse(ltc4296_dev, switch_op);
 	g_pse_initret = (unsigned int)ret;
