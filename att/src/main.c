@@ -21,6 +21,7 @@
  * puenteado, donde el ADIN2111 ya esta en la linea por hardware.
  */
 #include <zephyr/kernel.h>
+#include <zephyr/sys/reboot.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/uart.h>
@@ -1056,6 +1057,87 @@ static void ota_confirm_check(bool tx_ok)
 #endif
 
 
+/* ============ REINTENTO POR REINICIO: recuperar el SPE desde bateria ============
+ *
+ * EL PROBLEMA (verificado en tank1 el 2026-08-04). La deteccion de un PD en
+ * SPoE se hace con el dispositivo SIN ALIMENTAR: el PSE aplica su tension de
+ * sondeo y espera una firma. Una placa ya viva -- sostenida por la bateria --
+ * no la presenta. Sale un bucle cerrado:
+ *
+ *   bateria mantiene viva la placa -> no parece un PD -> el PSE nunca clasifica
+ *   -> nunca entrega -> la bateria se agota -> tanque perdido en silencio.
+ *
+ * Medido: con la ATT arrancada SIN alimentar, el slot clasifico y entrego
+ * 15 mA. Con la misma placa viva por bateria y el mismo cable, el field switch
+ * sondea cada 30 s y reporta "PD Not Present". Unico cambio: estar alimentada.
+ *
+ * LO QUE INTENTA ESTO: reiniciarse para dejarse clasificar.
+ *
+ * ⚠️ NO ESTA GARANTIZADO QUE FUNCIONE, y conviene decirlo aqui: si la bateria
+ * mantiene alimentado el front-end del PD durante el reinicio, el PSE seguira
+ * sin ver la firma y esto no servira de nada. Es un intento empirico barato
+ * antes de tocar hardware; si no funciona, la solucion es de hardware.
+ *
+ * POR QUE ESTA ACOTADO. Si no funciona, la placa se reiniciaria para siempre:
+ * gastaria mas bateria que estando quieta y ensuciaria el registro. Los
+ * contadores viven en `.noinit`, que SOBREVIVE a sys_reboot() pero se pierde en
+ * un corte real de alimentacion -- justo la semantica que hace falta: como
+ * mucho ATT_BAT_INTENTOS por episodio de bateria, y al volver la alimentacion
+ * externa (corte real) la cuenta empieza de cero.
+ *
+ * Solo se intenta con ENLACE SPE ARRIBA: sin portadora no hay PSE al otro lado
+ * al que dejarse clasificar, y reiniciar seria gasto puro. El enlace funciona
+ * sin potencia PoDL -- verificado hoy -- asi que es una condicion util.
+ * ============================================================================ */
+#define ATT_BAT_MAGIA     0x42415431u   /* "BAT1" */
+#define ATT_BAT_ESPERA_S  90            /* margen antes del 1er intento */
+#define ATT_BAT_INTENTOS  3
+
+static __noinit uint32_t bat_magia;
+static __noinit uint32_t bat_intentos;
+
+static void att_bat_reinicio_init(void)
+{
+	if (bat_magia != ATT_BAT_MAGIA) {   /* arranque en frio: RAM con basura */
+		bat_magia = ATT_BAT_MAGIA;
+		bat_intentos = 0;
+	}
+}
+
+static void att_bat_intento_reinicio(void)
+{
+	static int64_t desde_ms;
+	struct net_if *o = NULL;
+
+	for (int i = 1; i <= 2; i++) {
+		struct net_if *f = net_if_get_by_index(i);
+
+		if (f && net_if_is_carrier_ok(f)) { o = f; break; }
+	}
+	if (o == NULL) {            /* sin enlace: no hay a quien presentarse */
+		desde_ms = 0;
+		return;
+	}
+	if (desde_ms == 0) {
+		desde_ms = k_uptime_get();
+		return;
+	}
+	if ((k_uptime_get() - desde_ms) < (int64_t)ATT_BAT_ESPERA_S * 1000) {
+		return;
+	}
+	if (bat_intentos >= ATT_BAT_INTENTOS) {
+		return;                 /* agotados: quieta, gastando lo minimo */
+	}
+
+	bat_intentos++;
+	LOG_WRN("BATERIA con enlace SPE y sin potencia PoDL: reinicio %u/%u para"
+		" dejarme clasificar por el PSE", bat_intentos, ATT_BAT_INTENTOS);
+	/* La cuenta del encoder PRIMERO: un reinicio no puede costar la medida. */
+	(void)enc_store_write();
+	k_msleep(100);              /* que salga la traza por consola */
+	sys_reboot(SYS_REBOOT_COLD);
+}
+
 int main(void)
 {
 	struct net_if *iface;
@@ -1092,6 +1174,11 @@ int main(void)
 		gpb = NULL;
 		LOG_ERR("GPIOB no listo: no puedo leer la senal de bateria,"
 			" se asume alimentacion externa");
+	}
+	att_bat_reinicio_init();
+	if (bat_intentos) {
+		LOG_WRN("Reintentos por reinicio ya gastados en este episodio: %u/%u",
+			bat_intentos, ATT_BAT_INTENTOS);
 	}
 
 	/* 1) sacar el bypass: mete el ADIN2111 en la linea SPE */
@@ -1248,6 +1335,7 @@ int main(void)
 			}
 		}
 		if (bat) {
+			att_bat_intento_reinicio();
 			continue;
 		}
 #ifndef BENCH_NO_SPE

@@ -515,6 +515,11 @@ struct mfs_tele {
 	int32_t  vin_mv;
 	uint16_t vin_ok;
 	uint16_t disc_n;
+	/* --- v2: registro de fallos globales (GFLTEV). AL FINAL, como manda la
+	 * convencion. Se anade porque NO PODER VERLO desde la pasarela fue lo que
+	 * costo horas el 2026-08-04: un fallo de interruptor de baja enclavado
+	 * impide reclasificar y desde fuera solo se ve "deshabilitado". */
+	uint16_t gfltev;
 } __packed;
 
 /* ⚠️ CONTRATO CON LA PASARELA. `gateway.py` desempaqueta la carga (sin los 14
@@ -522,16 +527,19 @@ struct mfs_tele {
  *
  *     MFS_FMT      = "!IHHIIQ" + "h"*5 + "H"*5     -> 44 bytes
  *     MFS_FMT_CHIP = "!HHiHH"                      -> 12 bytes
+ *     MFS_FMT_V2   = "!H"   (gfltev)               ->  2 bytes
  *
- * 14 + 44 + 12 = 70. Si alguien toca esta estructura sin tocar el parser, el
+ * 14 + 44 + 12 + 2 = 72. Si alguien toca esta estructura sin tocar el parser, el
  * fallo seria SILENCIOSO: tramas que se decodifican y dan corrientes absurdas.
  * Mejor que no compile. */
-BUILD_ASSERT(sizeof(struct mfs_tele) == 70,
+BUILD_ASSERT(sizeof(struct mfs_tele) == 72,
 	     "struct mfs_tele desalineada con MFS_FMT de gateway.py");
 
 volatile int      g_tele_rc;      /* ultimo retorno de SES_XmitFrame */
 volatile unsigned g_tele_n;       /* tramas emitidas */
 volatile uint64_t g_dev_id;       /* identidad de esta placa (0 = sin USN) */
+volatile unsigned short g_gfltev;  /* ultimo GFLTEV leido */
+volatile unsigned short g_ckt_clr_n; /* veces que se limpio el interruptor */
 
 /* Testigos del driver del LTC4296, igual que en el MPS. */
 extern volatile int            g_ltc_vin_mv;
@@ -612,7 +620,7 @@ static void mfs_tele_send(const struct device *ltc, const uint8_t mac[6])
 	memcpy(f.src, mac, sizeof(f.src));
 	f.ethertype = htons(MFS_ETHERTYPE);
 	f.magic     = htonl(MFS_MAGIC);
-	f.version   = htons(1);
+	f.version   = htons(2);
 	f.nports    = htons(MFS_PSE_PORTS);
 	seq++;
 	f.seq       = htonl(seq);
@@ -644,6 +652,7 @@ static void mfs_tele_send(const struct device *ltc, const uint8_t mac[6])
 	f.vin_mv  = (int32_t)htonl((uint32_t)g_ltc_vin_mv);
 	f.vin_ok  = htons(g_ltc_vin_ok);
 	f.disc_n  = htons(g_ltc_disc_n);
+	f.gfltev  = htons(g_gfltev);
 
 	memset(&tx, 0, sizeof(tx));
 	tx.frameType         = SES_standardFrame;
@@ -682,6 +691,42 @@ static int mfs_probe_port_vout(const struct device *dev, enum ltc4296_port p)
 static uint16_t mfs_scan_shorts(const struct device *dev)
 {
 	uint16_t mask = 0;
+	uint16_t gf = 0;
+	/* BIT(0) de GFLTEV. Vive en el .h PRIVADO del driver
+	 * (drivers/sensor/ltc4296/ltc4296.h:70) y no en la cabecera publica,
+	 * asi que se repite aqui en vez de incluir cabeceras internas. */
+	const uint16_t LOW_CKT_BRK = BIT(0);
+
+	/* ⚠️ LIMPIAR EL INTERRUPTOR DE BAJA ANTES DE REINTENTAR.
+	 *
+	 * Con un LTC4296_LOW_CKT_BRK_FAULT enclavado, el puerto NO vuelve a
+	 * clasificar por mucho que se reintente la negociacion: desde fuera solo
+	 * se ve "deshabilitado" para siempre.
+	 *
+	 * Lo dispara que la carga desaparezca de golpe -- exactamente lo que pasa
+	 * cuando una ATT pasa a bateria. Verificado el 2026-08-04 en tank1: el
+	 * slot quedo muerto y NO se recupero en 20 minutos de reintentos; al
+	 * reiniciar SOLO el field switch, clasifico al instante. La unica
+	 * diferencia era que el arranque limpia los fallos y el reintento no.
+	 *
+	 * ⚠️ Se limpia SOLO ese bit, no se llama a ltc4296_chk_global_events():
+	 * esa funcion tiene ramas que hacen ltc4296_reset() y TIRARIAN la entrega
+	 * de los puertos vivos. Escribir un 1 en LOW_CKT_BRK_FAULT es idempotente
+	 * y no molesta a nadie.
+	 *
+	 * (Aqui se corrige un juicio previo: se habia descartado la recuperacion
+	 * del fabricante EN BLOQUE por hacer reset, y eso solo vale para algunas
+	 * de sus ramas.) */
+	if (ltc4296_read_global_faults(dev, &gf) == 0) {
+		g_gfltev = gf;
+		if (gf & LOW_CKT_BRK) {
+			if (ltc4296_clear_ckt_breaker(dev) == 0) {
+				g_ckt_clr_n++;
+				LOG_WRN("LTC4296: interruptor de baja enclavado"
+					" (GFLTEV=0x%04x), limpiado antes de reintentar", gf);
+			}
+		}
+	}
 
 	for (int p = 0; p < MFS_PSE_PORTS; p++) {
 		enum ltc4296_pse_status pwr = LTC_PSE_STATUS_UNKNOWN;

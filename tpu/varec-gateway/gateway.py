@@ -80,6 +80,12 @@ MFS_LEN       = struct.calcsize(MFS_FMT)
 # Bloque de chip identico al v2 del MPS: gcmd unlocks vin_mv vin_ok disc_n
 MFS_FMT_CHIP  = MPS_FMT_V2
 MFS_LEN_CHIP  = MPS_LEN_V2
+#   v2, DESPUES del bloque de chip: GFLTEV (fallos globales del LTC4296)
+MFS_FMT_V2    = "!H"
+MFS_LEN_V2    = struct.calcsize(MFS_FMT_V2)
+# BIT(0) de GFLTEV. Un puerto con esto enclavado NO vuelve a clasificar
+# por mucho que se reintente, y desde fuera solo se ve "deshabilitado".
+LTC_LOW_CKT_BRK = 0x0001
 
 # ⚠️ POR QUE LA IDENTIDAD VA DENTRO DE LA TRAMA Y NO ES LA MAC.
 #
@@ -138,6 +144,13 @@ def parse_mfs_frame(payload: bytes):
             "vin_en_rango": bool(vin_ok),
             "clasif_abandonadas": disc_n,
         }
+        off = MFS_LEN + MFS_LEN_CHIP
+        if ver >= 2 and len(payload) >= off + MFS_LEN_V2:
+            (gfltev,) = struct.unpack(MFS_FMT_V2, payload[off:off + MFS_LEN_V2])
+            d["chip"]["gfltev"] = gfltev
+            # Explicito porque es la diferencia entre "no hay nada conectado" y
+            # "el puerto esta bloqueado y no se va a recuperar solo".
+            d["chip"]["interruptor_baja"] = bool(gfltev & LTC_LOW_CKT_BRK)
     return d
 
 
