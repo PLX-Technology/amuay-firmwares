@@ -108,6 +108,20 @@ static const struct gpio_dt_spec led_b = GPIO_DT_SPEC_GET(DT_ALIAS(led2), gpios)
  * callar -- pero conviene saberlo antes de quedarse mirando por que no
  * contesta.
  *
+ * ⚠️⚠️ Y LA GRANDE, DECIDIDA A PROPOSITO EL 2026-08-04:
+ * UN TANQUE EN BATERIA ES INDISTINGUIBLE DE UN TANQUE AVERIADO desde la TPU.
+ * Se evaluo mandar un latido lento (una trama cada 60 s, ~1 % del gasto) y se
+ * DESCARTO a favor del maximo ahorro. Es una decision consciente, no un olvido:
+ * si algun dia aparece un tanque mudo, mirar aqui antes de buscar averias.
+ *
+ * Duele el doble por un problema de HARDWARE que sigue abierto: con el cable
+ * SPE puesto, la ATT en bateria NO se presenta como PD, asi que el PSE del
+ * field switch sondea cada 30 s, no encuentra nada y NUNCA la vuelve a
+ * alimentar. Verificado el 2026-08-04 sobre tank1: seis ciclos de reintento
+ * sin exito, con el LTC4296 sano y Vin en rango. Es decir: un tanque que cae a
+ * bateria no vuelve solo -- agota la bateria y hay que ir fisicamente.
+ * Pendiente de Mayker.
+ *
  * ✅ POLARIDAD VERIFICADA EN LA PLACA DE TANK1 (2026-08-04): PB11 = 0 con
  * alimentacion externa, 1 en bateria.
  *
