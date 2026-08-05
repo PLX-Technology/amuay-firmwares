@@ -23,6 +23,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/sys/reboot.h>
 #include <stm32_ll_gpio.h>
+#include <zephyr/net/net_pkt.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/uart.h>
@@ -744,7 +745,12 @@ static void att_485_puerto(int encender)
 static int mb_tcp_iface = -1;
 static volatile int mb_tcp_state;   /* 0=sin arrancar 1=escuchando -N=errno */
 static volatile int mb_tcp_conns;
+static volatile unsigned mb_tcp_zombis;  /* conexiones cerradas por silencio */
 static int mb_tcp_client = -1;
+/* Segundos sin recibir nada antes de dar por muerta una conexion. Un SCADA
+ * sondea cada pocos segundos; 30 s no molesta a nadie legitimo y acota lo
+ * que puede bloquear un cliente zombi. */
+#define MB_TCP_IDLE_S 30
 
 /* El callback del nucleo de Modbus SOLO copia y avisa. NO envia por el socket:
  * se ejecuta en el contexto del nucleo de Modbus, y hacer E/S de red ahi (con
@@ -791,7 +797,15 @@ static int mb_tcp_txn(int client)
 	int rc;
 
 	rc = zsock_recv(client, header, sizeof(header), ZSOCK_MSG_WAITALL);
-	if (rc <= 0) { return rc == 0 ? -ENOTCONN : -errno; }
+	if (rc <= 0) {
+		/* EAGAIN = venció el tiempo de espera: cliente callado. Se cierra
+		 * y se vuelve a accept(); NO es un error del que quejarse. */
+		if (rc < 0 && errno == EAGAIN) {
+			mb_tcp_zombis++;
+			LOG_INF("Modbus TCP: cliente callado %d s, se cierra", MB_TCP_IDLE_S);
+		}
+		return rc == 0 ? -ENOTCONN : -errno;
+	}
 
 	modbus_raw_get_header(&tmp_adu, header);
 	if (tmp_adu.length > CONFIG_MODBUS_BUFFER_SIZE) { return -EMSGSIZE; }
@@ -839,10 +853,35 @@ static void mb_tcp_thread(void *a, void *b, void *c)
 		MB_TCP_PORT, cfg.unit_id);
 
 	while (1) {
+		struct zsock_timeval tv = { .tv_sec = MB_TCP_IDLE_S, .tv_usec = 0 };
+
 		mb_tcp_client = zsock_accept(srv, NULL, NULL);
 		if (mb_tcp_client < 0) { k_msleep(200); continue; }
 		mb_tcp_conns++;
-		LOG_INF("Modbus TCP: maestro conectado");
+
+		/* ⚠️ ESTO ES LO QUE EVITA QUE UN CLIENTE MUERTO MATE EL SERVIDOR.
+		 *
+		 * Este servidor atiende UN cliente cada vez. Sin tiempo de espera,
+		 * zsock_recv(MSG_WAITALL) se queda bloqueado PARA SIEMPRE si el
+		 * maestro se va sin cerrar (cable fuera, proceso matado, red que
+		 * se corta). El hilo no vuelve nunca a accept(), las conexiones
+		 * siguientes se apilan y al agotarse los contextos de red la pila
+		 * IP entera deja de responder.
+		 *
+		 * Verificado en tank1 el 2026-08-04, DOS VECES: tras unas pocas
+		 * conexiones la ATT dejaba de aceptar Modbus y de responder a ping,
+		 * seguia enviando por SPE -- asi que el tanque parecia sano -- y NO
+		 * se recuperaba sola: hacia falta ir a reiniciarla.
+		 *
+		 * Con el tiempo de espera, una conexion zombi cuesta como mucho
+		 * MB_TCP_IDLE_S y el servidor sigue vivo. */
+		if (zsock_setsockopt(mb_tcp_client, SOL_SOCKET, SO_RCVTIMEO,
+				     &tv, sizeof(tv)) < 0) {
+			LOG_WRN("Modbus TCP: no pude poner el tiempo de espera (errno=%d)",
+				errno);
+		}
+
+		LOG_INF("Modbus TCP: maestro conectado (%u en total)", mb_tcp_conns);
 		while (mb_tcp_txn(mb_tcp_client) >= 0) {
 			/* siguiente transaccion */
 		}
@@ -1246,6 +1285,77 @@ static void att_bat_intento_reinicio(void)
 	sys_reboot(SYS_REBOOT_COLD);
 }
 
+/* ============ VIGILANTE DE SORDERA: pool de recepcion agotado ============
+ *
+ * ⚠️ EL FALLO QUE ESTO CUBRE (verificado en tank1 el 2026-08-04, tres veces).
+ * Los buferes de recepcion de la pila de red se agotan y NO se recuperan:
+ *
+ *     <err> eth_adin2111: OA RX: cannot allocate packet space, skipping.
+ *
+ * A partir de ahi la placa NO RECIBE NADA -- ni Modbus, ni ARP, ni ping -- pero
+ * SIGUE TRANSMITIENDO por SPE, porque la transmision usa otro pool. Desde la
+ * pasarela el tanque PARECE SANO mientras esta sordo, que es lo peor posible:
+ * nadie se entera hasta que alguien intenta configurarlo.
+ *
+ * Hay una FUGA de fondo sin identificar: al triplicar el pool (36 -> 96
+ * buferes) la placa paso de aguantar 4 conexiones TCP a aguantar 14. Es decir,
+ * cada conexion se queda con buferes que no devuelve. Ampliar el pool solo
+ * retrasa el momento; la causa esta en la pila de red o en el driver del
+ * ADIN2111 y hace falta instrumentarla para encontrarla.
+ *
+ * ⚠️ Mientras tanto, esto ataca la CONSECUENCIA, que es la que duele: con 50
+ * tanques en campo, una placa sorda permanente significa mandar a alguien al
+ * tanque. Reiniciarse cuesta unos segundos y el encoder se conserva.
+ *
+ * COMO SE DETECTA: se intenta reservar un paquete con K_NO_WAIT. Si falla
+ * varias veces seguidas, el pool esta agotado de verdad -- un fallo suelto
+ * seria solo un pico de trafico.
+ * ======================================================================== */
+#define SORDO_PERIODO_S   30    /* cada cuanto se comprueba */
+#define SORDO_FALLOS      6     /* 6 x 30 s = 3 min sordo -> reiniciar */
+
+static volatile unsigned g_sordo_n;      /* fallos seguidos */
+static volatile unsigned g_sordo_total;  /* fallos acumulados, para diagnostico */
+
+static void att_vigilante_sordera(void)
+{
+	/* ⚠️ RX, NO la generica. net_pkt_alloc_with_buffer() reserva del pool de
+	 * TRANSMISION: con la placa sorda seguia teniendo exito y el vigilante no
+	 * saltaba nunca (probado el 2026-08-04). El pool que se agota es el de
+	 * RECEPCION, que es el que usa el driver del ADIN2111. */
+	/* ⚠️ TRAMA COMPLETA (1514 B), no 64.
+	 * Con 64 B basta UN bufer; el driver del ADIN2111 necesita ~12 para una
+	 * trama Ethernet entera. El pool puede estar lo bastante agotado para que
+	 * el driver no reciba NADA y quedar aun un bufer suelto: la sonda pequena
+	 * tenia exito y el vigilante no saltaba nunca (probado dos veces el
+	 * 2026-08-04). Hay que medir con la misma regla que usa el driver. */
+	struct net_pkt *pkt = net_pkt_rx_alloc_with_buffer(NULL, 1514, AF_INET,
+							   IPPROTO_UDP, K_NO_WAIT);
+
+	if (pkt != NULL) {
+		net_pkt_unref(pkt);
+		if (g_sordo_n) {
+			LOG_INF("Pool de recepcion recuperado tras %u fallo(s)", g_sordo_n);
+		}
+		g_sordo_n = 0;
+		return;
+	}
+
+	g_sordo_n++;
+	g_sordo_total++;
+	LOG_WRN("Pool de recepcion AGOTADO (%u/%u): la placa esta sorda",
+		g_sordo_n, SORDO_FALLOS);
+
+	if (g_sordo_n >= SORDO_FALLOS) {
+		LOG_ERR("Sordo %d s seguidos: reiniciando para recuperar la red",
+			SORDO_FALLOS * SORDO_PERIODO_S);
+		/* La medida primero: un reinicio no puede costar la cuenta. */
+		(void)enc_store_write();
+		k_msleep(100);
+		sys_reboot(SYS_REBOOT_COLD);
+	}
+}
+
 int main(void)
 {
 	struct net_if *iface;
@@ -1415,6 +1525,19 @@ int main(void)
 		 *
 		 * Se relee en cada vuelta, no una vez al arrancar: la placa puede
 		 * pasar a bateria en caliente y hay que enterarse. */
+		{
+			/* El vigilante corre SIEMPRE, tambien en bateria: quedarse
+			 * sordo ahi es igual de grave y el coste es una reserva de
+			 * 64 bytes cada 30 s. */
+			static unsigned sordo_tick;
+
+			if (++sordo_tick >= (SORDO_PERIODO_S * 1000u) /
+					    (cfg.push_ms10 * 10u ? cfg.push_ms10 * 10u : 500u)) {
+				sordo_tick = 0;
+				att_vigilante_sordera();
+			}
+		}
+
 		bat = att_en_bateria();
 		if (bat != g_en_bateria) {
 			g_en_bateria = bat;
