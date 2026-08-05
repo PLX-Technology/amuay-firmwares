@@ -150,6 +150,9 @@ static volatile int g_en_bateria;      /* ultimo estado leido, para la traza */
  * Modbus al cambiar la configuracion y lo lee la interrupcion. */
 static volatile int g_enc_leds;
 
+/* Espejo de CFG_F_BAT. Ver att_en_bateria(). */
+static volatile int g_bat_activo;
+
 /* ¿Esta la placa alimentada por bateria?
  *
  * Sin puerto listo se devuelve 0 (= alimentacion externa) A PROPOSITO: ante la
@@ -159,7 +162,13 @@ static int att_en_bateria(void)
 {
 	int v;
 
-	if (gpb == NULL) {
+	/* Sin la bandera, la placa NUNCA se cree en bateria: transmite siempre.
+	 * Ante la duda, hablar -- un falso "en bateria" deja el tanque mudo y sin
+	 * forma de diagnosticarlo en remoto.
+	 *
+	 * Se lee de la copia en cache y no de cfg.flags porque esta funcion se
+	 * define antes que la configuracion (mismo patron que g_enc_leds). */
+	if (!g_bat_activo || gpb == NULL) {
 		return 0;
 	}
 	v = gpio_pin_get_raw(gpb, BAT_PIN);
@@ -320,6 +329,22 @@ struct att_cfg {
  * queda encendido por error, se apaga desde la pasarela; al reves habria que
  * ir al tanque. */
 #define CFG_F_ENC_LEDS BIT(3)
+/* ⚠️ SUSPENDER TRANSMISIONES EN BATERIA. OPT-IN, APAGADO POR DEFECTO.
+ *
+ * NO se activa de fabrica porque la senal PB11 NO SIGNIFICA LO MISMO EN TODAS
+ * LAS PLACAS. Verificado el 2026-08-04: en la ATT de tank1 vale 0 con
+ * alimentacion externa; en la de tank21, con alimentacion normal, vale 1 -- y
+ * el firmware la dio por bateria y la dejo MUDA al arrancar, 13 minutos, hasta
+ * que se miro la consola.
+ *
+ * Ese es el peor modo de fallo que puede tener esta placa: se dispara SOLO AL
+ * ARRANCAR, deja el tanque sin reportar, y desde la pasarela es
+ * indistinguible de un sensor averiado.
+ *
+ * Con 50 tanques, activarlo por defecto seria repartir esa loteria por toda la
+ * planta. Se enciende POR UNIDAD, y solo despues de comprobar en esa placa
+ * concreta que PB11 = 0 con alimentacion externa. */
+#define CFG_F_BAT    BIT(4)
 
 static const struct device *const eep = DEVICE_DT_GET(DT_NODELABEL(eeprom0));
 static struct att_cfg cfg;
@@ -331,6 +356,10 @@ static struct att_cfg cfg;
  * Se llama al arrancar y cada vez que la pasarela toca HR 0. */
 static void enc_leds_aplicar(void)
 {
+	/* Aqui se refrescan TODAS las banderas cacheadas: esta funcion ya se
+	 * llama al arrancar y en cada escritura de HR 0, que son justo los dos
+	 * momentos en que cfg.flags puede cambiar. */
+	g_bat_activo = (cfg.flags & CFG_F_BAT) != 0;
 	g_enc_leds = (cfg.flags & CFG_F_ENC_LEDS) != 0;
 	if (!g_enc_leds) {
 		if (gpio_is_ready_dt(&led_a)) { gpio_pin_set_dt(&led_a, 0); }
@@ -606,6 +635,8 @@ static int mb_input_reg_rd(uint16_t addr, uint16_t *reg)
 
 /* --- HOLDING REGISTERS = configuracion (FC 03 leer / FC 06 escribir) ---
  *   HR 0 : flags (bit0 = push L2, bit1 = Modbus RTU, bit2 = NO energizar K1,
+ *          bit4 = suspender transmisiones en bateria (OPT-IN: PB11 no vale lo
+ *          mismo en todas las placas, comprobarlo antes de activarlo),
  *          bit3 = LEDs de canal del encoder, DIAGNOSTICO, apagados por
  *          defecto; surten efecto al instante, sin guardar ni reiniciar)
  *   HR 1 : unit id Modbus (1..247)
@@ -647,7 +678,7 @@ static int mb_holding_wr(uint16_t addr, uint16_t reg)
 		const uint16_t antes = cfg.flags;
 
 		cfg.flags = reg & (CFG_F_PUSH | CFG_F_RTU | CFG_F_NO_K1 |
-				   CFG_F_ENC_LEDS);
+				   CFG_F_ENC_LEDS | CFG_F_BAT);
 
 		/* El RS-485 se enciende y se apaga EN CALIENTE desde la pasarela.
 		 * Antes solo se leia al arrancar, asi que apagarlo exigia un
@@ -1090,8 +1121,28 @@ static int spe_tx_init(struct net_if *iface)
 	/* OJO: Zephyr SOLO acepta proto = 0 | ETH_P_ALL | ETH_P_ECAT | ETH_P_IEEE802154
 	 * en SOCK_RAW (ver packet_is_supported() en sockets_packet.c). Un ethertype
 	 * propio da EAFNOSUPPORT (errno 106). El proto del socket solo filtra el RX;
-	 * el ethertype real (ATT_ETHERTYPE) va en la cabecera de la trama. */
-	tx_sock = zsock_socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
+	 * el ethertype real (ATT_ETHERTYPE) va en la cabecera de la trama.
+	 *
+	 * ★ PROTO = 0, NO ETH_P_ALL. ESTA ERA LA FUGA DE BUFERES (2026-08-04).
+	 *
+	 * ETH_P_ALL significa literalmente "entregame TODAS las tramas de la red"
+	 * (sockets_packet.c:94). Este socket es SOLO PARA TRANSMITIR -- nadie lee
+	 * nunca de el -- pero la pila le clonaba y encolaba cada trama que pasaba
+	 * por el segmento, y esos buferes no volvian jamas al pool.
+	 *
+	 * El sintoma: la placa se quedaba SORDA -- ni Modbus, ni ARP, ni ping --
+	 * mientras SEGUIA TRANSMITIENDO por SPE (otro pool), asi que desde la
+	 * pasarela parecia sana. No se recuperaba sola.
+	 *
+	 * Y explica por que empeoraba con el trafico: el segmento SPE esta
+	 * PUENTEADO con la red de oficina (ver tpu/red-spe/README.md), o sea
+	 * difusion constante. Tambien por que en su dia "se arreglo" aislando la
+	 * red: se le quito trafico, pero el socket seguia tragandoselo todo.
+	 *
+	 * Con proto = 0 el socket no casa con ninguna trama entrante: no hay
+	 * clonado, no hay encolado y no hay fuga. La transmision no se ve afectada
+	 * -- el proto solo filtra el RX. */
+	tx_sock = zsock_socket(AF_PACKET, SOCK_RAW, 0);
 	if (tx_sock < 0) {
 		LOG_ERR("SPE: socket(AF_PACKET,SOCK_RAW) FALLO: ret=%d errno=%d", tx_sock, errno);
 		return -errno;
@@ -1230,9 +1281,10 @@ int main(void)
 		int ret = gpio_pin_configure(gpb, BAT_PIN, GPIO_INPUT);
 
 		g_en_bateria = att_en_bateria();
-		LOG_INF("Alimentacion: PB11 = %d -> %s (ret=%d)",
+		LOG_INF("Alimentacion: PB11 = %d, funcion %s -> %s (ret=%d)",
 			gpio_pin_get_raw(gpb, BAT_PIN),
-			g_en_bateria ? "BATERIA (se suspenden transmisiones)" : "externa",
+			(cfg.flags & CFG_F_BAT) ? "ACTIVA" : "desactivada (HR 0 bit4)",
+			g_en_bateria ? "BATERIA (se suspenden transmisiones)" : "transmite",
 			ret);
 	} else {
 		gpb = NULL;

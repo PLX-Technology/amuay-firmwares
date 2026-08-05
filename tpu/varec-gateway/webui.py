@@ -282,6 +282,15 @@ PAGE = r"""<!doctype html>
  .up{background:var(--ok)} .down{background:var(--bad)}
  .row{display:grid;grid-template-columns:150px 1fr;gap:10px;align-items:center;
       margin-bottom:9px}
+ /* ⚠️ Estas reglas SOLO estaban en la hoja de la pantalla de acceso
+    (LOGIN_PAGE), no aqui. Sin display:flex el <span> era inline y el boton
+    "Leer" se iba debajo del campo en vez de quedar al lado. */
+ .calpt{border:1px solid var(--line);border-radius:8px;padding:4px 12px 10px;margin:14px 0}
+ .calpt h3{margin:10px 0 4px;font-size:12px;letter-spacing:.06em;
+      text-transform:uppercase;color:var(--mut)}
+ .calin{display:flex;gap:8px;align-items:center}
+ .calin input{flex:1;min-width:0}
+ .mini{padding:7px 14px;font-size:13px;white-space:nowrap;flex:0 0 auto}
  label{color:var(--mut);font-size:13px}
  input[type=text],input[type=number],select{width:100%;padding:7px 9px;border-radius:6px;
       border:1px solid var(--line);background:var(--bg);color:var(--fg);font:inherit}
@@ -357,8 +366,8 @@ PAGE = r"""<!doctype html>
 </main>
 <div id="calbg" style="display:none;position:fixed;inset:0;background:#000a;z-index:50;
      align-items:center;justify-content:center;padding:16px">
-  <div class="card" style="width:min(94vw,430px);margin:0;max-height:92vh;overflow:auto">
-    <h2 style="margin-top:0">Calibrar <span id="caltit"></span></h2>
+  <div class="card" style="width:min(94vw,620px);margin:0;max-height:92vh;overflow:auto">
+    <h2 style="margin-top:0">Configurar <span id="caltit"></span></h2>
     <p class="mut" style="margin:0 0 12px;font-size:13px">Dos puntos bastan: la cinta
       avanza sobre un pi&ntilde;&oacute;n, as&iacute; que los mm por pulso son constantes.
       <b>Sep&aacute;ralos todo lo que puedas.</b> Un tercer punto sirve para
@@ -381,6 +390,23 @@ PAGE = r"""<!doctype html>
     </div>
     <div class="row"><label>Unidad</label><input type="text" id="c_u" value="mm"></div>
     <p id="calc" class="mut" style="margin:10px 0"></p>
+
+    <!-- ⚠️ VA DENTRO DEL DIALOGO, no en la fila de la tabla: la tabla se
+         redibuja con CADA trama (~1 s) y cualquier control abierto en una fila
+         se destruia al instante. El dialogo esta a salvo porque el refresco se
+         salta mientras esta abierto. -->
+    <div class="calpt">
+      <h3>Diagn&oacute;stico</h3>
+      <p class="mut" style="margin:2px 0 8px;font-size:13px">Los LEDs de canal del
+        encoder parpadean con cada pulso. Se encienden para <b>comprobar el
+        cableado</b> estando junto al tanque. <b>No se guardan</b>: un reinicio
+        del sensor los deja apagados.</p>
+      <div style="display:flex;gap:8px">
+        <button id="led_on"  class="mini" style="flex:1;background:#2b3846">Encender LEDs</button>
+        <button id="led_off" class="mini" style="flex:1;background:#2b3846">Apagar LEDs</button>
+      </div>
+      <p id="ledm" class="mut" style="margin:8px 0 0;font-size:13px"></p>
+    </div>
     <div style="display:flex;gap:8px;margin-top:6px">
       <button id="calsave" style="flex:1">Guardar</button>
       <button id="calclose" style="flex:0 0 auto;background:#2b3846">Cancelar</button>
@@ -543,13 +569,7 @@ async function tanks(){
       <td style="white-space:nowrap"><button class="sid" data-id="${t.tank_id}"
            style="padding:5px 10px;font-size:13px" disabled>Guardar</button>
         <button class="cal" data-id="${t.tank_id}"
-           style="padding:5px 10px;font-size:13px;background:#2b3846">Calibrar</button>
-        <select class="acc" data-id="${t.tank_id}"
-           style="padding:5px 8px;font-size:13px;background:#2b3846;margin-left:4px">
-          <option value="">Acciones…</option>
-          <option value="ledson">LEDs encoder: ver</option>
-          <option value="ledsoff">LEDs encoder: apagar</option>
-        </select></td>
+           style="padding:5px 10px;font-size:13px;background:#2b3846">Config</button></td>
       </tr>`).join('') :
       '<tr><td colspan="11" class="mut">ningún tanque dado de alta todavía</td></tr>';
     // El boton solo se activa si el valor cambio: evita escrituras accidentales
@@ -561,7 +581,6 @@ async function tanks(){
     document.querySelectorAll('.sid').forEach(b=>b.onclick=()=>saveId(b));
     CALT = d.tanks;
     document.querySelectorAll('.cal').forEach(b=>b.onclick=()=>calOpen(+b.dataset.id));
-    document.querySelectorAll('.acc').forEach(x=>x.onchange=()=>accion(x));
     document.querySelectorAll('.pms').forEach(x=>x.onchange=()=>setPeriodo(x));
   }catch(e){ $('#hdr').textContent='sin conexión'; }
 }
@@ -570,10 +589,9 @@ async function tanks(){
 // interruptor de estado: la pasarela NO conoce hoy el valor de esas banderas
 // -- no viajan en la trama de telemetria -- y un interruptor tendria que
 // adivinar la posicion, que es peor que no mostrarla.
-async function accion(sel){
-  const id = +sel.dataset.id, v = sel.value;
-  sel.value = '';
-  if(!v) return;
+async function accion(v){
+  const id = CALID;
+  if(!id) return;
   // El RS-485 se quito del panel a proposito: apagarlo deja al sensor sin
   // responder por Modbus RTU, y cada accion cuesta una conexion TCP contra una
   // placa con fuga de buferes conocida. La capacidad sigue en la API
@@ -585,9 +603,10 @@ async function accion(sel){
     const r = await fetch('/api/tank/'+id+'/config',{method:'POST',
       headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
     const d = await r.json();
-    if(!r.ok){ alert('No se pudo '+txt+':\n'+(d.error||r.status)); return; }
-    await tanks();
-  }catch(e){ alert('No se pudo '+txt+': '+e); }
+    const m = $c('ledm');
+    if(m){ m.textContent = r.ok ? ('Hecho: '+txt)
+                                : ('No se pudo '+txt+': '+(d.error||r.status)); }
+  }catch(e){ const m=$c('ledm'); if(m){ m.textContent='No se pudo '+txt+': '+e; } }
 }
 
 let CALT = [], CALID = null;
@@ -628,6 +647,8 @@ function calNow(campo){
 ['ca_c','ca_l','cb_c','cb_l','c_u'].forEach(id=>{ const e=$c(id); if(e) e.oninput=calCalc; });
 if($c('ca_now')) $c('ca_now').onclick=()=>calNow('ca_c');
 if($c('cb_now')) $c('cb_now').onclick=()=>calNow('cb_c');
+if($c('led_on'))  $c('led_on').onclick  = ()=>accion('ledson');
+if($c('led_off')) $c('led_off').onclick = ()=>accion('ledsoff');
 if($c('calclose')) $c('calclose').onclick=()=>{ $c('calbg').style.display='none'; };
 if($c('calbg')) $c('calbg').onclick=e=>{ if(e.target===$c('calbg')) $c('calbg').style.display='none'; };
 if($c('calsave')) $c('calsave').onclick=async()=>{
