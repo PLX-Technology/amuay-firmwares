@@ -458,7 +458,11 @@ class HttpOut:
                     # corriente y potencia por slot.
                     if outer.switches_fn is None:
                         return self._send({"error": "sin telemetria de switches"}, 404)
-                    eq = outer.switches_fn()
+                    # Las MAC de los tanques permiten nombrar las ATT en el
+                    # arbol; el switch solo aprende direcciones, no identidades.
+                    macs = {r["mac"]: r["tank_id"] for r in snap.values()
+                            if r.get("mac")}
+                    eq = outer.switches_fn(macs)
                     self._send({"switches": eq, "n": len(eq),
                                 "ts": int(time.time())})
                 elif p.startswith("/api/tank/"):

@@ -525,31 +525,57 @@ async function tanks(){
       const rs=await fetch('/api/switches'); const sw=await rs.json();
       const eq=sw.switches||[];
       $('#sw_hdr').textContent = eq.length ? (eq.length+' equipo'+(eq.length==1?'':'s')) : '';
-      $('#sw_wrap').innerHTML = eq.length ? eq.map(s=>{
-        const ps=s.puertos||[];
-        const nom = s.tipo==='mps' ? 'Power switch' : 'Field switch';
-        // Sin dev_id la identidad es la MAC, y la MAC del field switch se
-        // sortea en cada arranque: hay que decirlo, o el panel miente.
-        const ident = s.id_estable
-          ? `id ${s.dev_id.toString(16).padStart(16,'0')}`
-          : `<span title="firmware antiguo: sin identidad estable. La MAC cambia en cada arranque, asi que este equipo puede duplicarse en el panel">MAC ${s.mac} ⚠️</span>`;
-        const estado = s.vivo ? '' : (s.edad_s==null ? ' — sin telemetria'
-                                                     : ` — sin datos hace ${s.edad_s}s`);
-        const filas = ps.length ? ps.map(x=>`<tr>
-            <td>${x.slot}</td>
+      const porClave = {}; eq.forEach(e=>porClave[e.clave]=e);
+
+      // Tabla de slots de un equipo, con lo que cuelga de cada uno.
+      // El rotulo lo da la pasarela: en el field switch los numeros de
+      // potencia y de datos NO coinciden con la serigrafia (MAPA-SLOTS.md).
+      const filas = s => {
+        const ps = s.puertos||[];
+        if(!ps.length) return '<tr><td colspan="5" class="mut">sin puertos</td></tr>';
+        return ps.map(x=>{
+          const hijos = (s.hijos_por_puerto||{})[x.rotulo]||[];
+          const cuelga = hijos.length ? hijos.map(h=> h.tipo==='tanque'
+              ? ('tanque '+h.id)
+              : ((porClave[h.id]?(porClave[h.id].tipo==='mps'?'power switch':'field switch'):'equipo')
+                 +' '+String(h.id).split(':').pop().slice(0,8))).join(', ')
+            : '<span class="mut">—</span>';
+          return `<tr>
+            <td>${x.rotulo||x.slot}</td>
             <td><b>${(s.vivo && x.ma!=null) ? x.ma+' mA' : '—'}</b></td>
             <td><b>${(s.vivo && x.w!=null) ? x.w.toFixed(2)+' W' : '—'}</b></td>
-            <td class="mut">${x.estado}</td></tr>`).join('')
-          + ((s.vivo && s.w_total!=null) ? `<tr><td class="mut">total</td><td></td>
-               <td><b>${s.w_total.toFixed(2)} W</b></td>
-               <td class="mut">a ${(s.w_vin_mv/1000).toFixed(1)} V</td></tr>` : '')
-          : '<tr><td colspan="4" class="mut">sin puertos reportados</td></tr>';
-        return `<div style="margin:0 0 18px">
+            <td class="mut">${x.estado}</td>
+            <td>${cuelga}</td></tr>`;
+        }).join('');
+      };
+
+      // Render recursivo: cada equipo y, anidados debajo, los que cuelgan de el.
+      const nodo = (s, nivel) => {
+        const nom = s.tipo==='mps' ? 'Power switch' : 'Field switch';
+        const ident = s.id_estable
+          ? `id ${s.dev_id.toString(16).padStart(16,'0')}`
+          : `<span title="firmware antiguo: la MAC cambia en cada arranque">MAC ${s.mac} ⚠️</span>`;
+        const est = s.vivo ? '' : (s.edad_s==null ? ' — sin telemetria' : ` — sin datos hace ${s.edad_s}s`);
+        const tot = (s.vivo && s.w_total!=null)
+          ? `<tr><td class="mut">total</td><td></td><td><b>${s.w_total.toFixed(2)} W</b></td>
+             <td class="mut" colspan="2">a ${(s.w_vin_mv/1000).toFixed(1)} V</td></tr>` : '';
+        const hijosSw = [];
+        Object.values(s.hijos_por_puerto||{}).forEach(l=>l.forEach(h=>{
+          if(h.tipo==='switch' && porClave[h.id]) hijosSw.push(porClave[h.id]);
+        }));
+        return `<div style="margin:0 0 18px 0;${nivel?'padding-left:18px;border-left:2px solid var(--line)':''}">
           <h3 style="margin:0 0 6px;font-size:14px">${nom}
-            <span class="mut" style="font-weight:400">${ident}${estado}</span></h3>
-          <table><thead><tr><th>Slot</th><th>Corriente</th><th>Potencia</th><th>Estado</th></tr></thead>
-            <tbody>${filas}</tbody></table></div>`;
-      }).join('') : '<p class="mut">sin telemetria de ningun switch</p>';
+            <span class="mut" style="font-weight:400">${ident}${est}</span></h3>
+          <table><thead><tr><th>Slot</th><th>Corriente</th><th>Potencia</th>
+            <th>Estado</th><th>Conectado</th></tr></thead>
+            <tbody>${filas(s)}${tot}</tbody></table>
+        </div>` + hijosSw.map(h=>nodo(h, nivel+1)).join('');
+      };
+
+      const raices = eq.filter(e=>!e.padre);
+      $('#sw_wrap').innerHTML = eq.length
+        ? (raices.length ? raices : eq).map(e=>nodo(e,0)).join('')
+        : '<p class="mut">sin telemetria de ningun switch</p>';
     }catch(e){ /* el panel de tanques manda: no romper por esto */ }
 
     const r=await fetch('/api/tanks'); const d=await r.json();

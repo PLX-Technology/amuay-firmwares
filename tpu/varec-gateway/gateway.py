@@ -86,6 +86,11 @@ MFS_LEN_V2    = struct.calcsize(MFS_FMT_V2)
 # BIT(0) de GFLTEV. Un puerto con esto enclavado NO vuelve a clasificar
 # por mucho que se reintente, y desde fuera solo se ve "deshabilitado".
 LTC_LOW_CKT_BRK = 0x0001
+#   v3, DESPUES de gfltev: VECINOS. Quien se ve por cada puerto del switch.
+#   vec_total(H) vec_idx0(H) vec_n(B) pad(B) + 8 x { mac[6] port pad }
+MFS_VEC_N     = 8
+MFS_FMT_V3    = "!HHBB"
+MFS_LEN_V3    = struct.calcsize(MFS_FMT_V3) + MFS_VEC_N * 8
 
 # ⚠️ POR QUE LA IDENTIDAD VA DENTRO DE LA TRAMA Y NO ES LA MAC.
 #
@@ -102,6 +107,25 @@ LTC_LOW_CKT_BRK = 0x0001
 # (MXC_SYS_GetUSN), que es unico por chip y sobrevive a reinicios y a
 # regrabados. La MAC se sigue guardando, pero solo como dato informativo.
 DEV_SIN_ID = 0                      # firmware antiguo: no manda dev_id
+
+# --- ⚠️ SERIGRAFIA DEL FIELD SWITCH: los numeros NO coinciden --------------
+# De `field-switch/MAPA-SLOTS.md`, leido del esquematico:
+#
+#   Rotulo   datos (macPort)   potencia (LTC port)
+#   Port 1        2            (uplink: recibe PoDL, no es PSE)
+#   Port 2        1                  0
+#   Port 3        0                  1
+#   Port 4        5                  2
+#   Port 5        4                  3
+#   Port 6        3                  4
+#
+# El panel enseñaba el indice del LTC como si fuera el rotulo, con lo que
+# habia un desplazamiento: la ATT conectada al "Port 4" aparecia como slot 3.
+# Aqui se traduce TODO al rotulo, que es lo que el operario lee en la placa, y
+# ademas permite juntar potencia (LTC) y vecinos (macPort) en la misma fila.
+MFS_ROTULO_LTC = {0: "Port 2", 1: "Port 3", 2: "Port 4", 3: "Port 5", 4: "Port 6"}
+MFS_ROTULO_MAC = {2: "Port 1", 1: "Port 2", 0: "Port 3", 5: "Port 4",
+                  4: "Port 5", 3: "Port 6"}
 
 
 def parse_mfs_frame(payload: bytes):
@@ -126,6 +150,7 @@ def parse_mfs_frame(payload: bytes):
             # tal cual y la correspondencia se resuelve en la UI, para no
             # enterrar un mapeo discutible dentro del parser.
             "slot": i + 1,
+            "rotulo": MFS_ROTULO_LTC.get(i, "LTC %d" % i),
             "ma": None if iout[i] == MPS_I_NA else iout[i],
             "estado": PSE_ESTADO.get(st, "?"),
             "entregando": st == 2,
@@ -151,6 +176,19 @@ def parse_mfs_frame(payload: bytes):
             # Explicito porque es la diferencia entre "no hay nada conectado" y
             # "el puerto esta bloqueado y no se va a recuperar solo".
             d["chip"]["interruptor_baja"] = bool(gfltev & LTC_LOW_CKT_BRK)
+            off += MFS_LEN_V2
+            if ver >= 3 and len(payload) >= off + MFS_LEN_V3:
+                tot, idx0, n, _ = struct.unpack(
+                    MFS_FMT_V3, payload[off:off + struct.calcsize(MFS_FMT_V3)])
+                b = off + struct.calcsize(MFS_FMT_V3)
+                vec = []
+                for i in range(min(n, MFS_VEC_N)):
+                    e = payload[b + i * 8:b + i * 8 + 8]
+                    vec.append({"mac": ":".join("%02x" % x for x in e[:6]),
+                                "puerto": e[6]})
+                # ⚠️ Es un TROZO de la tabla, no la tabla entera: el switch la
+                # recorre en tramas sucesivas. Quien lo consuma debe ACUMULAR.
+                d["vecinos"] = {"total": tot, "idx0": idx0, "trozo": vec}
     return d
 
 
@@ -169,6 +207,7 @@ def parse_mps_frame(payload: bytes):
         puertos.append({
             "puerto": i,
             "slot": i + 1,                  # serigrafia del MPS: slot = puerto + 1
+            "rotulo": "Slot %d" % (i + 1),
             # None = sin lectura valida. NO es cero.
             "ma": None if iout[i] == MPS_I_NA else iout[i],
             "estado": PSE_ESTADO.get(st, "?"),
@@ -222,6 +261,65 @@ SW_VIVO_S = 15
 SW_OLVIDO_S = 86400
 
 
+# --- Jerarquia: quien cuelga de quien ---------------------------------------
+# Cada field switch reporta, a trozos, la tabla de MACs aprendidas de su switch
+# y por que puerto ve cada una. Aqui se acumulan y se resuelve el arbol.
+#
+# ⚠️ SE ACUMULA CON CADUCIDAD, no se reemplaza: cada trama trae solo 8 entradas
+# y la tabla se recorre en varias. Reemplazar dejaria el arbol parpadeando.
+VEC = {}            # clave de equipo -> { mac: {"puerto": n, "ts": t} }
+VEC_OLVIDO_S = 300  # una MAC no vista en 5 min se descarta
+
+
+def vecinos_acumular(clave: str, trozo: list):
+    t = now()
+    d = VEC.setdefault(clave, {})
+    for e in trozo:
+        d[e["mac"]] = {"puerto": e["puerto"], "ts": t}
+    for m in [m for m, v in d.items() if t - v["ts"] > VEC_OLVIDO_S]:
+        del d[m]
+
+
+def jerarquia(equipos: list, macs_tanque: dict) -> list:
+    """Anota en cada equipo quien cuelga de sus puertos.
+
+    `macs_tanque`: mac -> tank_id, para poder nombrar las ATT.
+
+    ⚠️ Se resuelve por MAC porque es lo unico que el switch aprende. La
+    identidad estable (dev_id) la aporta la pasarela, que ve la MAC de origen
+    de cada trama de telemetria. Sin esa traduccion, un arbol construido sobre
+    MACs que se sortean en cada arranque no valdria para nada.
+    """
+    por_mac = {e.get("mac"): e for e in equipos if e.get("mac")}
+    for e in equipos:
+        vistos = VEC.get(e["clave"], {})
+        hijos = {}
+        for mac, v in vistos.items():
+            otro = por_mac.get(mac)
+            if otro is not None and otro is not e:
+                q = ("switch", otro["clave"], otro["tipo"])
+            elif mac in macs_tanque:
+                q = ("tanque", macs_tanque[mac], None)
+            else:
+                continue
+            rot = (MFS_ROTULO_MAC.get(v["puerto"], "macPort %d" % v["puerto"])
+                   if e["tipo"] == "mfs" else "slot %d" % (v["puerto"] + 1))
+            hijos.setdefault(rot, []).append(
+                {"tipo": q[0], "id": q[1], "clase": q[2], "mac": mac})
+        e["hijos_por_puerto"] = dict(sorted(hijos.items()))
+        e["n_vecinos"] = len(vistos)
+    # Padre = el equipo que ve a este por alguno de sus puertos.
+    for e in equipos:
+        e["padre"] = None
+        for otro in equipos:
+            if otro is e:
+                continue
+            for lst in otro.get("hijos_por_puerto", {}).values():
+                if any(h["tipo"] == "switch" and h["id"] == e["clave"] for h in lst):
+                    e["padre"] = otro["clave"]
+    return equipos
+
+
 def sw_clave(tipo: str, dev_id: int, mac: str) -> str:
     """Identidad del equipo en el registro.
 
@@ -252,6 +350,9 @@ def registrar_switch(tipo: str, mac: str, fr: dict):
         eq["uptime_s"] = fr["uptime_s"]
         eq["seq"] = fr["seq"]
         eq["ver"] = fr.get("ver")
+    v = fr.get("vecinos")
+    if v:
+        vecinos_acumular(clave, v.get("trozo") or [])
 
 
 def _potencia_por_slot(eq: dict):
@@ -270,8 +371,12 @@ def _potencia_por_slot(eq: dict):
     eq["w_vin_mv"] = vin_mv
 
 
-def switches_snapshot() -> list:
-    """Lista de switches conocidos, ordenada y con potencia calculada."""
+def switches_snapshot(macs_tanque: dict = None) -> list:
+    """Lista de switches conocidos, ordenada, con potencia y jerarquia.
+
+    `macs_tanque` (mac -> tank_id) permite nombrar las ATT en el arbol. Se pasa
+    desde la capa HTTP, que es la que tiene el estado vivo de los tanques.
+    """
     t = now()
     with SW_LOCK:
         for clave in [k for k, v in SWITCHES.items()
@@ -289,7 +394,7 @@ def switches_snapshot() -> list:
     # El power switch primero: es la raiz de la cadena de alimentacion.
     equipos.sort(key=lambda e: (e["tipo"] != "mps", e.get("dev_id") or 0,
                                 e.get("mac") or ""))
-    return equipos
+    return jerarquia(equipos, macs_tanque or {})
 
 
 def ingest_pse(cfg: dict):
