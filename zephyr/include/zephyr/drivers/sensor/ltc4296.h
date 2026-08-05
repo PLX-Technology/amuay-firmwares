@@ -138,6 +138,12 @@ int ltc4296_is_port_deliver_pwr(const struct device *dev, enum ltc4296_port port
 				enum ltc4296_pse_status *pwr_status);
 int ltc4296_is_port_pwr_stable(const struct device *dev, enum ltc4296_port port_no, bool *pwr_status);
 int ltc4296_read_port_adc(const struct device *dev, enum ltc4296_port port_no, int *port_i_out_ma);
+/* Cuenta CRUDA del ADC de puerto (12 bits, offset 2048) y el shunt con el que
+ * hay que convertirla. La conversion a mA de la funcion de arriba es una
+ * DIVISION ENTERA que trunca hacia cero: quien necesite el valor exacto lee
+ * esto y hace la cuenta en coma flotante. */
+int ltc4296_read_port_adc_raw(const struct device *dev, enum ltc4296_port port_no,
+			      uint16_t *code, uint16_t *hs_resistor);
 int ltc4296_port_prebias(const struct device *dev, enum ltc4296_port port_no, enum ltc4296_config mode);
 int ltc4296_port_en(const struct device *dev, enum ltc4296_port port_no);
 int ltc4296_port_en_and_classification(const struct device *dev, enum ltc4296_port port_no);

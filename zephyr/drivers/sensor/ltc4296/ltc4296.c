@@ -22,6 +22,14 @@
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(LTC4296, CONFIG_SENSOR_LOG_LEVEL);
 
+/* Instrumentacion del arranque en frio: el Vin que midio la ultima
+ * clasificacion, incluida la que hace probe() con el rail aun subiendo.
+ * Volatiles porque los lee la aplicacion (telemetria) sin sincronizacion:
+ * son testigos de diagnostico, no estado compartido. */
+volatile int      g_ltc_vin_mv = -1;  /* -1 = todavia no se ha medido ninguna */
+volatile unsigned char  g_ltc_vin_ok;   /* 1 = estaba dentro de rango */
+volatile unsigned short g_ltc_disc_n;   /* clasificaciones abandonadas por Vin */
+
 int ltc4296_spoe_vol_range_mv[12][2] = { {20000,30000},  /* SPoE Class 10         */
 						{20000,30000},  /* SPoE Class 11         */
 						{20000,30000},  /* SPoE Class 12         */
@@ -441,6 +449,47 @@ int ltc4296_read_port_adc(const struct device *dev, enum ltc4296_port port_no, i
 		return ADI_LTC_INVALID_ADC_PORT_CURRENT;
 	}
 
+	return 0;
+}
+
+int ltc4296_read_port_adc_raw(const struct device *dev, enum ltc4296_port port_no,
+			      uint16_t *code, uint16_t *hs_resistor)
+{
+	/* Igual que ltc4296_read_port_adc() pero SIN convertir.
+	 *
+	 * Por que hace falta: la conversion de arriba es una DIVISION ENTERA de
+	 * C, que trunca hacia cero. Con el shunt de estas placas cada cuenta del
+	 * ADC vale ~0.37 mA (270) o ~0.40 mA (250), asi que truncar tira hasta
+	 * una cuenta entera y SIEMPRE hacia abajo: es un sesgo sistematico, no
+	 * ruido, y se acumula al sumar la potencia de todos los puertos.
+	 *
+	 * Se entrega la cuenta cruda Y el shunt con el que hay que convertirla,
+	 * para que la trama sea autodescriptiva: si algun dia una placa lleva
+	 * otro shunt, la pasarela no necesita saberlo de antemano ni hay forma
+	 * de que un config desactualizado produzca corrientes falsas creibles.
+	 */
+	int ret;
+	uint8_t port_addr = 0;
+	uint16_t val16;
+	struct ltc4296_dev_config *config = dev->config;
+
+	ret = ltc4296_get_port_addr(port_no, LTC_PORT_ADCDAT, &port_addr);
+	if (ret != 0) {
+		return ret;
+	}
+	ret = ltc4296_reg_read(dev, port_addr, &val16);
+	if (ret != 0) {
+		return ret;
+	}
+	if ((val16 & LTC4296_NEW_MSK) != LTC4296_NEW_MSK) {
+		return ADI_LTC_INVALID_ADC_PORT_CURRENT;
+	}
+	if (code != NULL) {
+		*code = (uint16_t)(val16 & 0x0FFF);
+	}
+	if (hs_resistor != NULL) {
+		*hs_resistor = (uint16_t)config->port_config[port_no].hs_resistor;
+	}
 	return 0;
 }
 
@@ -965,6 +1014,14 @@ int ltc4296_do_spoe_sccp(const struct device *dev, enum ltc4296_board_class boar
 		ret = ltc4296_is_vin_valid(dev, port_vin_mv, board_class, &vin_valid);
 		if (ret != 0) {
 			return ret;
+		}
+
+		/* Testigo del arranque en frio: este es el numero que decide si el
+		 * puerto llega a clasificar, y sin esto no se ve desde ningun lado. */
+		g_ltc_vin_mv = port_vin_mv;
+		g_ltc_vin_ok = (vin_valid ? 1 : 0);
+		if (!vin_valid) {
+			g_ltc_disc_n++;
 		}
 		if(vin_valid == true) {
 			if(ltc4296_vi->ltc4296_print_vin == true) {

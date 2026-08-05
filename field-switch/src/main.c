@@ -545,6 +545,21 @@ struct mfs_tele {
 		uint8_t port;                /* portMap del switch */
 		uint8_t pad;
 	} vec[MFS_VEC_POR_TRAMA];
+	/* --- v4: CORRIENTE SIN CONVERTIR. ------------------------------------
+	 * `iout_ma` de arriba sale de una DIVISION ENTERA de C dentro del driver,
+	 * que trunca hacia cero. Con el shunt de esta placa cada cuenta del ADC
+	 * vale ~0.40 mA, asi que truncar tira hasta una cuenta entera y SIEMPRE
+	 * hacia abajo: es un sesgo sistematico, no ruido, y se acumula al sumar
+	 * la potencia de los cinco puertos.
+	 *
+	 * Se manda la cuenta cruda y el shunt; la conversion exacta la hace la
+	 * pasarela en coma flotante. Mandar tambien el shunt vuelve la trama
+	 * autodescriptiva: una placa con otro shunt no obliga a tocar la pasarela
+	 * y un valor desactualizado no puede dar corrientes falsas creibles.
+	 *
+	 * `iout_ma` SE MANTIENE: un consumidor v3 sigue funcionando igual. */
+	uint16_t adc_code[MFS_PSE_PORTS];  /* 12 bits, offset 2048; 0xFFFF = sin dato */
+	uint16_t hs_res[MFS_PSE_PORTS];    /* shunt del puerto, como en el overlay */
 } __packed;
 
 /* ⚠️ CONTRATO CON LA PASARELA. `gateway.py` desempaqueta la carga (sin los 14
@@ -556,8 +571,13 @@ struct mfs_tele {
  *
  * 14 + 44 + 12 + 2 = 72. Si alguien toca esta estructura sin tocar el parser, el
  * fallo seria SILENCIOSO: tramas que se decodifican y dan corrientes absurdas.
- * Mejor que no compile. */
-BUILD_ASSERT(sizeof(struct mfs_tele) == 72 + 6 + 8 * MFS_VEC_POR_TRAMA,
+ * Mejor que no compile.
+ *
+ *     v3: 6 + 8 * MFS_VEC_POR_TRAMA           (vecinos)
+ *     v4: 4 * MFS_PSE_PORTS                   (adc_code + hs_res)
+ */
+BUILD_ASSERT(sizeof(struct mfs_tele) ==
+		     72 + 6 + 8 * MFS_VEC_POR_TRAMA + 4 * MFS_PSE_PORTS,
 	     "struct mfs_tele desalineada con MFS_FMT de gateway.py");
 
 volatile int      g_tele_rc;      /* ultimo retorno de SES_XmitFrame */
@@ -647,7 +667,7 @@ static void mfs_tele_send(const struct device *ltc, const uint8_t mac[6])
 	memcpy(f.src, mac, sizeof(f.src));
 	f.ethertype = htons(MFS_ETHERTYPE);
 	f.magic     = htonl(MFS_MAGIC);
-	f.version   = htons(3);
+	f.version   = htons(4);
 	f.nports    = htons(MFS_PSE_PORTS);
 	seq++;
 	f.seq       = htonl(seq);
@@ -672,6 +692,21 @@ static void mfs_tele_send(const struct device *ltc, const uint8_t mac[6])
 
 		if (ltc4296_read_port_status(ltc, pp[i], &st) != 0) { st = 0; }
 		f.pxst[i] = htons(st);
+
+		/* v4: la misma medida SIN convertir, para que la pasarela pueda
+		 * dar el valor exacto en vez del truncado. 0xFFFF = sin lectura
+		 * valida, mismo criterio que el centinela de iout_ma. */
+		{
+			uint16_t code = 0, res = 0;
+
+			if (ltc4296_read_port_adc_raw(ltc, pp[i], &code, &res) == 0) {
+				f.adc_code[i] = htons(code);
+				f.hs_res[i]   = htons(res);
+			} else {
+				f.adc_code[i] = htons(0xFFFF);
+				f.hs_res[i]   = htons(0);
+			}
+		}
 	}
 
 	f.gcmd    = htons(g_gcmd);
