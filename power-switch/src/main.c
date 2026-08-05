@@ -499,6 +499,7 @@ int adin6310_enable_pse(struct device *ltc4296, uint8_t switch_op)
 #define MPS_MAGIC      0x4D505331u   /* "MPS1" */
 #define MPS_TELE_TICKS 2             /* el bucle es de 1 s -> cada 2 s */
 #define MPS_I_NA       ((int16_t)0x8000)  /* sin dato; espejo del ATT_NA */
+#define MPS_VEC_POR_TRAMA 8   /* vecinos por trama; la tabla se recorre */
 
 struct mps_tele {
 	uint8_t  dst[6];
@@ -529,6 +530,30 @@ struct mps_tele {
 	 * registro de la pasarela. Con dev_id cada uno tiene identidad propia.
 	 * 0 = no se pudo leer; la pasarela lo marca como identidad no estable. */
 	uint64_t dev_id;
+	/* --- v4: VECINOS. Quien se ve por cada puerto del switch. ------------
+	 * Gemelo del bloque v3 de `struct mfs_tele` (rama mfs). El MPS es la RAIZ
+	 * del arbol: sin esto la pasarela sabe que field switch cuelga de cual,
+	 * pero no de que SLOT del power switch cuelga la rama entera, y el panel
+	 * enseña dos arboles sueltos en vez de uno.
+	 *
+	 * ⚠️ NO SE MANDA LA TABLA ENTERA: detras de cada slot puede haber decenas
+	 * de MACs. Se mandan MFS_VEC_POR_TRAMA entradas y se RECORRE la tabla en
+	 * tramas sucesivas (idx0 dice por donde va). La pasarela acumula y
+	 * envejece las entradas.
+	 *
+	 * ⚠️ `port` es el `portMap` CRUDO del switch, que es una MASCARA DE BITS
+	 * (bit N = macPort N), no un indice. Se manda tal cual y lo decodifica la
+	 * pasarela; mandarlo ya decodificado obligaria a reflashear para corregir
+	 * un mapeo. Tomarlo por indice fue el fallo del 2026-08-05. */
+	uint16_t vec_total;                  /* entradas validas en la tabla */
+	uint16_t vec_idx0;                   /* indice de la primera enviada */
+	uint8_t  vec_n;                      /* cuantas van en ESTA trama */
+	uint8_t  vec_pad;
+	struct {
+		uint8_t mac[6];
+		uint8_t port;                /* portMap del switch (mascara) */
+		uint8_t pad;
+	} vec[MPS_VEC_POR_TRAMA];
 } __packed;
 
 /* ⚠️ CONTRATO CON LA PASARELA. `gateway.py` desempaqueta la carga (sin los 14
@@ -539,8 +564,12 @@ struct mps_tele {
  *     MPS_FMT_V3   = "!Q"                       ->  8 bytes
  *
  * 14 + 32 + 12 + 8 = 66. Tocar la estructura sin tocar el parser daria un
- * fallo SILENCIOSO: tramas que decodifican y dan corrientes absurdas. */
-BUILD_ASSERT(sizeof(struct mps_tele) == 66,
+ * fallo SILENCIOSO: tramas que decodifican y dan corrientes absurdas.
+ *
+ *     MPS_FMT_V4   = "!HHBB"  (vec_total, idx0, n, pad) -> 6 bytes
+ *                    + MPS_VEC_POR_TRAMA * "!6sBB"      -> 8 cada uno
+ */
+BUILD_ASSERT(sizeof(struct mps_tele) == 66 + 6 + 8 * MPS_VEC_POR_TRAMA,
 	     "struct mps_tele desalineada con MPS_FMT de gateway.py");
 
 /* Identidad estable de la placa, derivada del USN del MAX32690.
@@ -600,6 +629,8 @@ static const uint8_t mps_mac[6] = { 0x02, 0x00, 0x00, 0xAD, 0x4C, 0x01 };
 
 volatile int g_tele_rc;      /* ultimo retorno de SES_XmitFrame */
 volatile unsigned g_tele_n;  /* tramas emitidas */
+volatile unsigned short g_vec_total; /* tamano observado de la tabla dinamica */
+static sesID_t g_ses_dev;            /* id del switch, para leer su tabla */
 
 /* Vigilante de bloqueo del LTC4296 */
 volatile unsigned short g_gcmd;      /* ultimo GCMD leido */
@@ -624,7 +655,7 @@ static void mps_tele_send(const struct device *ltc)
 	memcpy(f.src, mps_mac, sizeof(f.src));
 	f.ethertype = htons(MPS_ETHERTYPE);
 	f.magic     = htonl(MPS_MAGIC);
-	f.version   = htons(3);
+	f.version   = htons(4);
 	f.nports    = htons(4);
 	seq++;
 	f.seq       = htonl(seq);
@@ -655,6 +686,42 @@ static void mps_tele_send(const struct device *ltc)
 	f.vin_ok  = htons(g_ltc_vin_ok);
 	f.disc_n  = htons(g_ltc_disc_n);
 	f.dev_id  = sys_cpu_to_be64(g_dev_id);
+
+	/* --- vecinos: un trozo de la tabla dinamica del switch --------------
+	 * ⚠️ El indice de partida AVANZA en cada trama, para que a lo largo de
+	 * varias se cubra la tabla entera sin engordar ninguna. */
+	{
+		static uint16_t vec_cursor;
+		SES_dynTblEntry_t ent[MPS_VEC_POR_TRAMA];
+		uint16_t validas = 0;
+		int32_t rc;
+
+		memset(ent, 0, sizeof(ent));
+		rc = SES_MX_ReadDynamicTable(g_ses_dev, vec_cursor,
+					     vec_cursor + MPS_VEC_POR_TRAMA - 1,
+					     ent, &validas);
+		if (rc != 0) {
+			validas = 0;
+		}
+		if (validas > MPS_VEC_POR_TRAMA) {
+			validas = MPS_VEC_POR_TRAMA;
+		}
+		f.vec_idx0  = htons(vec_cursor);
+		f.vec_n     = (uint8_t)validas;
+		f.vec_total = htons(g_vec_total);
+		for (uint16_t i = 0; i < validas; i++) {
+			memcpy(f.vec[i].mac, ent[i].macAddress, 6);
+			f.vec[i].port = ent[i].portMap;
+		}
+		/* Si esta pasada devolvio menos de las pedidas, se acabo la tabla:
+		 * se anota su tamano y se vuelve al principio. */
+		if (validas < MPS_VEC_POR_TRAMA) {
+			g_vec_total = vec_cursor + validas;
+			vec_cursor = 0;
+		} else {
+			vec_cursor += validas;
+		}
+	}
 
 	memset(&tx, 0, sizeof(tx));
 	tx.frameType      = SES_standardFrame;
@@ -964,6 +1031,10 @@ int main(void)
 		printf("SES_AddDevice() error %d\n", ret);
 		return ret;
 	}
+
+	/* Para leer la tabla dinamica desde la telemetria (los vecinos por
+	 * puerto, base de la jerarquia). Igual que en el field switch. */
+	g_ses_dev = dev_id;
 
 	ret = SES_MX_InitializePorts(dev_id, 6, initializePorts_p);
 	if (ret) {
