@@ -61,6 +61,13 @@ MPS_LEN_V2    = struct.calcsize(MPS_FMT_V2)
 #   v3, DESPUES del bloque v2: dev_id (identidad estable del USN)
 MPS_FMT_V3    = "!Q"
 MPS_LEN_V3    = struct.calcsize(MPS_FMT_V3)
+#   v4, DESPUES de dev_id: VECINOS, gemelo del v3 del MFS. Con esto la raiz
+#   del arbol dice de que SLOT cuelga cada rama; sin ello el panel enseña el
+#   power switch y la rama de field switches como dos arboles sueltos.
+#   vec_total(H) vec_idx0(H) vec_n(B) pad(B) + 8 x { mac[6] port pad }
+MPS_VEC_N     = 8
+MPS_FMT_V4    = "!HHBB"
+MPS_LEN_V4    = struct.calcsize(MPS_FMT_V4) + MPS_VEC_N * 8
 # Llave de desbloqueo del LTC4296 (GCMD). Con el chip bloqueado, las
 # escrituras se ignoran EN SILENCIO: no hay error que mirar.
 LTC_UNLOCK_KEY = 0x05
@@ -126,6 +133,22 @@ DEV_SIN_ID = 0                      # firmware antiguo: no manda dev_id
 MFS_ROTULO_LTC = {0: "Port 2", 1: "Port 3", 2: "Port 4", 3: "Port 5", 4: "Port 6"}
 MFS_ROTULO_MAC = {2: "Port 1", 1: "Port 2", 0: "Port 3", 5: "Port 4",
                   4: "Port 5", 3: "Port 6"}
+
+
+# Rotulos de los macPort del MPS. Los dos extremos son seguros (del
+# devicetree y de initializePorts_p): macPort 0 es el RGMII al LAN7431 -> TPU,
+# macPort 5 es el RJ45 del ADIN1300.
+#
+# ⚠️ Los macPort 1..4 son los cuatro slots SPE, pero SU ORDEN NO SE CONOCE:
+# initializePorts_p les da direcciones de PHY 5, 2, 3 y 7 — cruzadas, igual que
+# en el MFS. Se dejan sin rotular a proposito en vez de suponer que macPort N
+# es el slot N: un rotulo inventado que cuadre por casualidad es peor que no
+# tener rotulo, porque nadie lo vuelve a mirar. Se van rellenando segun se
+# comprueben contra el hardware (que slot entrega y que MAC aparece por ahi).
+# macPort 4 = Slot 4: COMPROBADO en hardware el 2026-08-05, no supuesto. El
+# unico slot que entregaba era el 4 (80 mA, alimentando por PDM al field switch
+# en servicio) y los cuatro descendientes aparecieron todos por macPort 4.
+MPS_ROTULO_MAC = {0: "TPU (RGMII)", 4: "Slot 4", 5: "RJ45"}
 
 
 def puerto_de_portmap(pm: int):
@@ -257,6 +280,22 @@ def parse_mps_frame(payload: bytes):
     off = MPS_LEN + MPS_LEN_V2
     if ver >= 3 and len(payload) >= off + MPS_LEN_V3:
         (d["dev_id"],) = struct.unpack(MPS_FMT_V3, payload[off:off + MPS_LEN_V3])
+        off += MPS_LEN_V3
+        if ver >= 4 and len(payload) >= off + MPS_LEN_V4:
+            tot, idx0, n, _ = struct.unpack(
+                MPS_FMT_V4, payload[off:off + struct.calcsize(MPS_FMT_V4)])
+            b = off + struct.calcsize(MPS_FMT_V4)
+            vec = []
+            for i in range(min(n, MPS_VEC_N)):
+                e = payload[b + i * 8:b + i * 8 + 8]
+                p = puerto_de_portmap(e[6])
+                if p is None:
+                    continue
+                vec.append({"mac": ":".join("%02x" % x for x in e[:6]),
+                            "puerto": p, "portmap": e[6]})
+            # ⚠️ Es un TROZO de la tabla, no la tabla entera: el switch la
+            # recorre en tramas sucesivas. Quien lo consuma debe ACUMULAR.
+            d["vecinos"] = {"total": tot, "idx0": idx0, "trozo": vec}
     return d
 
 
@@ -327,12 +366,22 @@ def jerarquia(equipos: list, macs_tanque: dict) -> list:
         # El puerto de subida es aquel por el que se ve la RAIZ (el power
         # switch). Si no se ve ninguna, se usa el puerto con mas direcciones:
         # el de subida agrega todo lo de arriba, asi que casi siempre gana.
+        #
+        # ⚠️ EL POWER SWITCH NO TIENE SUBIDA: es la raiz. Y para el NO vale la
+        # heuristica del "puerto con mas direcciones": por su slot 4 ve los dos
+        # field switches y sus tres tanques, mientras que por el RGMII solo ve
+        # a la TPU. La heuristica elegiria el slot 4 y borraria de un plumazo
+        # la rama entera, que es EXACTAMENTE la inversion que ya se corrigio en
+        # los field switches.
+        es_raiz = e["tipo"] == "mps"
         subida = None
         for mac, v in vistos.items():
-            if mac in raiz_macs:
+            if mac in raiz_macs and not es_raiz:
                 subida = v["puerto"]
                 break
-        if subida is None and vistos:
+        if es_raiz:
+            vistos = dict(vistos)   # la raiz no descarta nada por subida
+        if subida is None and vistos and not es_raiz:
             cuenta = {}
             for v in vistos.values():
                 cuenta[v["puerto"]] = cuenta.get(v["puerto"], 0) + 1
@@ -355,12 +404,42 @@ def jerarquia(equipos: list, macs_tanque: dict) -> list:
                 q = ("tanque", macs_tanque[mac], None)
             else:
                 continue
-            rot = (MFS_ROTULO_MAC.get(v["puerto"], "macPort %d" % v["puerto"])
-                   if e["tipo"] == "mfs" else "slot %d" % (v["puerto"] + 1))
+            mapa = MFS_ROTULO_MAC if e["tipo"] == "mfs" else MPS_ROTULO_MAC
+            rot = mapa.get(v["puerto"], "macPort %d" % v["puerto"])
             hijos.setdefault(rot, []).append(
                 {"tipo": q[0], "id": q[1], "clase": q[2], "mac": mac})
         e["hijos_por_puerto"] = dict(sorted(hijos.items()))
         e["n_vecinos"] = len(vistos)
+
+    # ⚠️ ANIDAR DE VERDAD: quitar de cada equipo lo que ya cuelga de un switch
+    # suyo. La tabla de direcciones ve TODO lo que hay detras de un puerto, no
+    # solo al vecino inmediato: el power switch lista por su slot 4 los DOS
+    # field switches Y los tres tanques (comprobado en hardware, 2026-08-05).
+    # Sin esta poda cada tanque sale dos veces --colgando del MPS y de su field
+    # switch-- y eso no es un arbol anidado, es una lista con sangria.
+    #
+    # `bajo[S]` = todo lo que S ve por puertos que no son el de subida, o sea
+    # todo lo que tiene detras, ya transitivo: por eso basta una pasada.
+    bajo = {}
+    for e in equipos:
+        sub = e.get("puerto_subida")
+        bajo[e["clave"]] = {m for m, v in VEC.get(e["clave"], {}).items()
+                            if sub is None or v["puerto"] != sub}
+    for e in equipos:
+        for rot, lst in list(e.get("hijos_por_puerto", {}).items()):
+            detras = set()
+            for h in lst:
+                if h["tipo"] == "switch":
+                    detras |= bajo.get(h["id"], set())
+            if not detras:
+                continue
+            queda = [h for h in lst if h["mac"] not in detras]
+            # Si la poda se lo llevaria TODO, no se poda: eso solo pasa si dos
+            # equipos del mismo puerto se ven el uno al otro (un lazo), y en
+            # ese caso es mejor enseñar de mas que dejar el puerto vacio.
+            if queda:
+                e["hijos_por_puerto"][rot] = queda
+
     # Padre = el equipo que ve a este por alguno de sus puertos.
     for e in equipos:
         e["padre"] = None
