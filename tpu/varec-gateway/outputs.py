@@ -59,7 +59,7 @@ def tank_regs(rec: dict) -> list:
 
 # ============================================================ MQTT
 class MqttOut:
-    def __init__(self, cfg, live, stop):
+    def __init__(self, cfg, live, stop, arbol_fn=None):
         try:
             import paho.mqtt.client as mqtt
         except ImportError:
@@ -70,6 +70,14 @@ class MqttOut:
         self.prefix = cfg.get("topic_prefix", "varec")
         self.qos = cfg.get("qos", 1)
         self.retain = cfg.get("retain", True)
+        self.arbol_fn = arbol_fn
+        self.arbol_topic = cfg.get("arbol_topic") or f"{self.prefix}/topologia"
+        # Un documento entero cada 2 s (el ritmo de la telemetria) seria mucho
+        # ruido para algo que cambia poco: la topologia solo se mueve cuando se
+        # conecta o cae un equipo. 10 s da reaccion de sobra.
+        # `or 10` y no un default de .get(): en el config.yaml desplegado la
+        # clave puede existir con valor nulo, y float(None) revienta.
+        self.arbol_periodo = float(cfg.get("arbol_periodo_s") or 10)
         # La clave nunca en el config si se puede evitar.
         pw = os.environ.get("VAREC_MQTT_PASS") or cfg.get("password") or ""
         self.c = mqtt.Client()
@@ -81,6 +89,32 @@ class MqttOut:
         self.c.loop_start()
         self.c.publish(f"{self.prefix}/gateway/status", "online", qos=1, retain=True)
         print(f"[mqtt] publicando en {self.prefix}/<tank_id>/...")
+        if self.arbol_fn is not None:
+            threading.Thread(target=self._bucle_arbol, daemon=True,
+                             name="mqtt-arbol").start()
+            print(f"[mqtt] arbol en {self.arbol_topic} cada {self.arbol_periodo:g}s")
+
+    def _bucle_arbol(self):
+        """Publica el arbol completo de la instalacion cada N segundos.
+
+        RETENIDO a proposito: un consumidor que se suscribe a mitad de partida
+        recibe la topologia entera al instante, sin esperar al siguiente ciclo
+        ni tener que preguntar por HTTP.
+        """
+        while not self.stop.is_set():
+            try:
+                doc = self.arbol_fn()
+                self.c.publish(self.arbol_topic, json.dumps(doc),
+                               self.qos, True)
+            except Exception as e:
+                # Que falle una foto no puede tumbar el hilo: el siguiente
+                # ciclo lo reintenta. Se registra para no ocultarlo.
+                print(f"[mqtt] no pude publicar el arbol: {e}", file=sys.stderr)
+            # Espera troceada para salir rapido al parar el servicio.
+            for _ in range(max(1, int(self.arbol_periodo * 10))):
+                if self.stop.is_set():
+                    return
+                time.sleep(0.1)
 
     def on_sample(self, rec):
         t = f"{self.prefix}/{rec['tank_id']}"
@@ -245,7 +279,7 @@ class ModbusOut:
 # ============================================================ HTTP / JSON / UI
 class HttpOut:
     def __init__(self, cfg, live, store, stop, full_cfg=None, cfg_path=None,
-                 pse_fn=None, switches_fn=None):
+                 pse_fn=None, switches_fn=None, arbol_fn=None):
         import http.server
         import webui
         self.live, self.store, self.stop = live, store, stop
@@ -253,6 +287,7 @@ class HttpOut:
         # y ademas gateway corre como __main__, no como modulo importable.
         self.pse_fn = pse_fn
         self.switches_fn = switches_fn
+        self.arbol_fn = arbol_fn
         self.full_cfg = full_cfg or {}
         self.cfg_path = cfg_path
         outer = self
@@ -465,6 +500,13 @@ class HttpOut:
                     eq = outer.switches_fn(macs)
                     self._send({"switches": eq, "n": len(eq),
                                 "ts": int(time.time())})
+                elif p == "/api/arbol":
+                    # EXACTAMENTE el mismo documento que se publica por MQTT.
+                    # Compartir la funcion y no reimplementarla es lo que evita
+                    # que el panel y el MQTT digan cosas distintas.
+                    if outer.arbol_fn is None:
+                        return self._send({"error": "sin arbol disponible"}, 404)
+                    self._send(outer.arbol_fn())
                 elif p.startswith("/api/tank/"):
                     parts = p.split("/")
                     try:
@@ -505,11 +547,12 @@ class HttpOut:
 
 
 # ============================================================ fabrica
-def build_outputs(cfg, live, store, stop, pse_fn=None, switches_fn=None) -> list:
+def build_outputs(cfg, live, store, stop, pse_fn=None, switches_fn=None,
+                  arbol_fn=None) -> list:
     outs = []
     if cfg.get("mqtt", {}).get("enabled"):
         try:
-            outs.append(MqttOut(cfg["mqtt"], live, stop))
+            outs.append(MqttOut(cfg["mqtt"], live, stop, arbol_fn=arbol_fn))
         except Exception as e:
             print(f"[mqtt] deshabilitado: {e}", file=sys.stderr)
     if cfg.get("modbus_tcp", {}).get("enabled") or cfg.get("modbus_rtu", {}).get("enabled"):
@@ -518,5 +561,6 @@ def build_outputs(cfg, live, store, stop, pse_fn=None, switches_fn=None) -> list
         outs.append(HttpOut(cfg["http"], live, store, stop,
                             full_cfg=cfg, cfg_path=cfg.get("_path"),
                             pse_fn=pse_fn,
-                            switches_fn=switches_fn))
+                            switches_fn=switches_fn,
+                            arbol_fn=arbol_fn))
     return outs

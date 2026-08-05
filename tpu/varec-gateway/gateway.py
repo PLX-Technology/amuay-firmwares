@@ -319,6 +319,10 @@ SW_VIVO_S = 15
 # acabe desapareciendo sin intervencion.
 SW_OLVIDO_S = 86400
 
+# Momento de arranque del proceso, para poder decir la marcha de la pasarela en
+# el arbol que se publica por MQTT.
+ARRANQUE = time.time()
+
 
 # --- Jerarquia: quien cuelga de quien ---------------------------------------
 # Cada field switch reporta, a trozos, la tabla de MACs aprendidas de su switch
@@ -527,6 +531,260 @@ def switches_snapshot(macs_tanque: dict = None) -> list:
     equipos.sort(key=lambda e: (e["tipo"] != "mps", e.get("dev_id") or 0,
                                 e.get("mac") or ""))
     return jerarquia(equipos, macs_tanque or {})
+
+
+# ======================================================== arbol para publicar
+# Version del esquema del documento que se publica por MQTT. MISMA CONVENCION
+# que las tramas de las placas: cada version ANADE campos y jamas reordena ni
+# quita, para que un consumidor viejo siga funcionando. Si algun dia hay que
+# romperla de verdad, se sube este numero y se avisa.
+ARBOL_ESQUEMA = 1
+
+# Nombres legibles por identificador de equipo, del config.yaml. Con 50 tanques
+# nadie lee "mfs:881e316fef38f712" en una pantalla.
+#
+# ⚠️ Se indexa por el ID ESTABLE (el dev_id del USN del micro), no por MAC ni
+# por posicion: es lo unico que sobrevive a un reinicio y a un recableado. Un
+# alias colgado de la MAC de un field switch se despegaria solo, porque esa MAC
+# se sortea en cada arranque.
+#
+# `id` NUNCA cambia en el documento publicado: el alias va en `nombre`. Asi un
+# consumidor correlaciona por `id` y enseña `nombre`, y renombrar un equipo no
+# le rompe el historico.
+ALIAS = {}
+
+
+def _nodo_tanque(rec: dict) -> dict:
+    """Hoja del arbol: una ATT sobre su tanque."""
+    avisos = []
+    if not rec.get("online"):
+        avisos.append("sin_telemetria")
+    # ⚠️ `value` es None cuando la ATT no tiene referencia de calibracion. Se
+    # publica null y se avisa, en vez de mandar el crudo como si fuera un nivel.
+    if rec.get("value") is None or not rec.get("ref_ok", True):
+        avisos.append("sin_referencia")
+    if rec.get("errors"):
+        avisos.append("errores_encoder")
+    tid = "tanque:%s" % rec.get("tank_id")
+    return {
+        "tipo": "tanque",
+        "id": tid,
+        "nombre": ALIAS.get(tid) or rec.get("name"),
+        "tank_id": rec.get("tank_id"),
+        "mac": rec.get("mac"),
+        "vivo": bool(rec.get("online")),
+        "edad_s": rec.get("age_s"),
+        "uptime_s": rec.get("uptime_s"),
+        "nivel": rec.get("value"),          # null si no hay referencia
+        "unidad": rec.get("unit"),
+        "ref_ok": rec.get("ref_ok"),
+        "pulsos": rec.get("count"),
+        "flancos": rec.get("edges"),
+        "errores": rec.get("errors"),
+        "temp_c": rec.get("temp_c"),
+        "humi_rh": rec.get("humi_rh"),
+        "avisos": avisos,
+        "puertos": [],                      # una ATT es hoja: nunca tiene hijos
+    }
+
+
+def _avisos_switch(eq: dict) -> list:
+    """Problemas del equipo en texto fijo, para que el consumidor no tenga que
+    re-deducirlos de los registros crudos del LTC4296."""
+    av = []
+    if not eq.get("vivo"):
+        av.append("sin_telemetria")
+    ch = eq.get("chip") or {}
+    if ch.get("bloqueado"):
+        av.append("chip_bloqueado")
+    if ch.get("interruptor_baja"):
+        # GFLTEV bit 0 enclavado: ese equipo NO vuelve a clasificar solo.
+        av.append("interruptor_baja")
+    if ch.get("vin_mv") is not None and not ch.get("vin_en_rango", True):
+        av.append("vin_fuera_de_rango")
+    if not eq.get("id_estable", True):
+        # Firmware viejo sin dev_id: su MAC se sortea en cada arranque, asi que
+        # su identidad en este arbol NO es de fiar entre reinicios.
+        av.append("id_no_estable")
+    return av
+
+
+def _nodo_switch(eq: dict, por_clave: dict, tanques: dict, vistos: set) -> dict:
+    """Nodo de un power switch o field switch, con sus puertos y lo que cuelga.
+
+    `vistos` corta un ciclo si la topologia llegara mal: un equipo no puede
+    aparecer dos veces en la misma rama.
+    """
+    hijos_por_rotulo = eq.get("hijos_por_puerto") or {}
+    puertos = []
+    usados = set()
+
+    def _cuelga(rotulo):
+        """Nodos que cuelgan de un rotulo, resolviendo switches y tanques."""
+        out = []
+        for h in hijos_por_rotulo.get(rotulo, []):
+            if h["tipo"] == "switch":
+                otro = por_clave.get(h["id"])
+                if otro is not None and h["id"] not in vistos:
+                    out.append(_nodo_switch(otro, por_clave, tanques,
+                                            vistos | {h["id"]}))
+            else:
+                rec = tanques.get(h["id"])
+                if rec is not None:
+                    out.append(_nodo_tanque(rec))
+        return out
+
+    # Primero los puertos PSE: salen SIEMPRE, tengan algo o no. Un slot vacio
+    # es informacion -- distingue "no hay nada" de "hay algo y no arranca".
+    for p in eq.get("puertos", []):
+        rot = p.get("rotulo")
+        usados.add(rot)
+        puertos.append({
+            "rotulo": rot,
+            "estado": p.get("estado"),
+            "entregando": p.get("entregando"),
+            "ma": p.get("ma"),
+            "w": p.get("w"),
+            "hijos": _cuelga(rot),
+        })
+    # ...y luego los puertos SIN PSE por los que se ve algo (el de subida, el
+    # RJ45, el RGMII). Si no se anadieran, un field switch encadenado por un
+    # puerto sin PSE DESAPARECERIA del arbol.
+    for rot in hijos_por_rotulo:
+        if rot in usados:
+            continue
+        puertos.append({
+            "rotulo": rot,
+            "estado": "sin PSE",
+            "entregando": False,
+            "ma": None,
+            "w": None,
+            "hijos": _cuelga(rot),
+        })
+
+    return {
+        "tipo": eq.get("tipo"),
+        "id": eq.get("clave"),
+        "nombre": ALIAS.get(eq.get("clave")) or eq.get("clave"),
+        "mac": eq.get("mac"),
+        "vivo": eq.get("vivo"),
+        "edad_s": eq.get("edad_s"),
+        "uptime_s": eq.get("uptime_s"),
+        "ver_trama": eq.get("ver"),
+        "id_estable": eq.get("id_estable"),
+        "w_total": eq.get("w_total"),
+        "vin_mv": (eq.get("chip") or {}).get("vin_mv"),
+        "puerto_subida": eq.get("puerto_subida"),
+        "avisos": _avisos_switch(eq),
+        "puertos": puertos,
+    }
+
+
+def arbol(equipos: list, tanques: dict) -> dict:
+    """Documento JERARQUICO de toda la instalacion, para publicar por MQTT.
+
+    TPU -> power switch -> field switches encadenados -> tanques.
+
+    `equipos` es lo que devuelve switches_snapshot() (ya trae la jerarquia
+    resuelta) y `tanques` el snapshot vivo, {tank_id: registro}.
+
+    ⚠️ La forma la fija ARBOL_ESQUEMA y solo CRECE. Quien consuma esto no
+    deberia asumir que conoce todos los campos, solo los que necesita.
+    """
+    por_clave = {e["clave"]: e for e in equipos}
+    # Un tanque puede colgar de un field switch por su tank_id; la jerarquia
+    # los identifica por id, no por MAC.
+    por_tanque = {r.get("tank_id"): r for r in (tanques or {}).values()}
+
+    # Raiz de la cadena = equipo sin padre. Normalmente el power switch; si un
+    # field switch aparece suelto (aun sin resolver de quien cuelga) tambien
+    # sale aqui, colgado de la TPU, que es donde de verdad se le ve.
+    raices = [e for e in equipos if not e.get("padre")]
+    nodos = [_nodo_switch(e, por_clave, por_tanque, {e["clave"]})
+             for e in raices]
+
+    # ⚠️ TANQUES SIN UBICAR. Un tanque caido hace rato ya no esta en la tabla de
+    # direcciones de ningun switch, asi que no cuelga de ninguna rama y
+    # DESAPARECERIA del arbol -- justo lo que un sistema de monitoreo no puede
+    # hacer: que lo que se cae se vuelva invisible. Se sabe que existen, no se
+    # sabe donde cuelgan, y eso es lo que se dice. (Visto con tank24 el
+    # 2026-08-05: 8 dias caido y fuera del arbol, pero contado en el resumen.)
+    colocados = set()
+
+    def _recoger(n):
+        if n.get("tipo") == "tanque":
+            colocados.add(n.get("tank_id"))
+        for p in n.get("puertos", []):
+            for h in p.get("hijos", []):
+                _recoger(h)
+
+    for n in nodos:
+        _recoger(n)
+    huerfanos = [_nodo_tanque(r) for tid, r in sorted((por_tanque or {}).items(),
+                                                      key=lambda kv: kv[0])
+                 if tid not in colocados]
+    for h in huerfanos:
+        h["avisos"] = list(h["avisos"]) + ["sin_ubicar"]
+
+    n_tanques = sum(1 for r in (tanques or {}).values())
+    en_linea = sum(1 for r in (tanques or {}).values() if r.get("online"))
+    doc = {
+        "esquema": ARBOL_ESQUEMA,
+        "ts": now(),
+        "generado_por": "varec-gateway",
+        "resumen": {
+            "equipos": len(equipos),
+            "equipos_vivos": sum(1 for e in equipos if e.get("vivo")),
+            "tanques": n_tanques,
+            "tanques_en_linea": en_linea,
+            "tanques_sin_ubicar": len(huerfanos),
+        },
+        "raiz": {
+            "tipo": "tpu",
+            "id": "tpu:%s" % socket.gethostname(),
+            "nombre": (ALIAS.get("tpu:%s" % socket.gethostname())
+                       or socket.gethostname()),
+            "mac": None,
+            "vivo": True,           # si no lo estuviera, esto no se publicaria
+            "edad_s": 0,
+            "uptime_s": int(time.time() - ARRANQUE),
+            "avisos": [],
+            # Un solo puerto logico: la TPU ve la red SPE por el RGMII del
+            # power switch. Los equipos sin padre resuelto cuelgan aqui.
+            "puertos": [{
+                "rotulo": "SPE",
+                "estado": "enlace",
+                "entregando": None,
+                "ma": None,
+                "w": None,
+                "hijos": nodos,
+            }] + ([{
+                # Puerto ficticio, y se nota en el rotulo. Existe para que un
+                # consumidor que solo recorra el arbol NO se pierda un tanque.
+                "rotulo": "sin ubicar",
+                "estado": "desconocido",
+                "entregando": None,
+                "ma": None,
+                "w": None,
+                "hijos": huerfanos,
+            }] if huerfanos else []),
+        },
+    }
+
+    # Alias que no corresponden a ningun equipo del arbol. Sin esto, un id mal
+    # escrito en el config.yaml no hace NADA y no se entera nadie: el equipo
+    # sigue saliendo con su clave cruda y parece que el alias "no funciona".
+    ids = set()
+
+    def _ids(n):
+        ids.add(n.get("id"))
+        for p in n.get("puertos", []):
+            for h in p.get("hijos", []):
+                _ids(h)
+
+    _ids(doc["raiz"])
+    doc["resumen"]["alias_sin_usar"] = sorted(k for k in ALIAS if k not in ids)
+    return doc
 
 
 def ingest_pse(cfg: dict):
@@ -1153,8 +1411,30 @@ def main():
 
     outs = []
     from outputs import build_outputs           # noqa: E402
+    # Alias legibles. Se cargan aqui y no en cada foto: cambiarlos exige
+    # reiniciar el servicio, que es lo razonable para algo que se toca una vez.
+    ALIAS.update({str(k): str(v) for k, v in (cfg.get("alias") or {}).items()})
+    if ALIAS:
+        print(f"[alias] {len(ALIAS)} nombre(s) legible(s) cargado(s)")
+
+    def arbol_fn():
+        """Arbol completo de la instalacion, ya resuelto. Se pasa como funcion
+        y no como dato porque quien lo publica (MQTT) corre en su propio hilo y
+        necesita una foto FRESCA en cada envio, no la de cuando arranco.
+
+        ⚠️ Los tanques salen de store.roster(), NO de live.snapshot(): el vivo
+        solo tiene lo visto desde que arranco el proceso, asi que un reinicio
+        de la pasarela borraria del arbol justo los sensores caidos, que son
+        los que hay que ir a revisar. Es la misma razon por la que /api/tanks
+        usa el registro persistente.
+        """
+        snap = live.snapshot()
+        macs = {r["mac"]: r["tank_id"] for r in snap.values() if r.get("mac")}
+        tanques = {r["tank_id"]: r for r in store.roster(snap)}
+        return arbol(switches_snapshot(macs), tanques)
+
     outs = build_outputs(cfg, live, store, STOP, pse_fn=pse_snapshot,
-                         switches_fn=switches_snapshot)
+                         switches_fn=switches_snapshot, arbol_fn=arbol_fn)
 
     # Ingesta por dos caminos: SPE (tramas L2) y/o Modbus RTU (RS-485).
     # Con el SPE del ATT roto, el RTU es el que trae los datos.

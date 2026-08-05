@@ -1,6 +1,30 @@
 # Pasarela Varec — configuracion.
 # Copiar a /etc/varec-gateway/config.yaml y ajustar.
 
+# ------------------------------------------------------- nombres legibles
+# Alias que se enseñan en el arbol publicado (MQTT y /api/arbol) en lugar del
+# identificador crudo. Con 50 tanques nadie lee "mfs:881e316fef38f712".
+#
+# ⚠️ La clave es el ID ESTABLE del equipo, que sale del numero de serie del
+# micro y NO cambia entre reinicios ni al recablear. NO uses la MAC: la de un
+# field switch se sortea en cada arranque y el alias se despegaria solo.
+#
+# Los ids se sacan tal cual del propio arbol:
+#     curl -s localhost:8080/api/arbol | grep -o '"id": "[^"]*"' | sort -u
+#
+# El campo `id` del documento NO cambia al poner un alias -- este solo afecta a
+# `nombre`. Asi un consumidor correlaciona por `id` y enseña `nombre`, y
+# renombrar un equipo no le rompe el historico.
+#
+# Un alias cuyo id no exista se ignora en silencio, pero sale listado en
+# `resumen.alias_sin_usar` del arbol para que se note el error de escritura.
+alias: {}
+# alias:
+#   "tpu:flcon01":            "TPU principal"
+#   "mps:d708b5c9fd629c57":   "MPS sala de bombas"
+#   "mfs:881e316fef38f712":   "MFS muelle 3"
+#   "tanque:21":              "Tanque 21 - diesel"
+
 # --------------------------------------------------------------- ingesta
 ingest:
   # La interfaz SPE se detecta por DRIVER (adin1110), NUNCA por nombre:
@@ -55,6 +79,13 @@ mqtt:
   # publica en:  varec/<tank_id>/value  |  /status  |  /raw
   retain: true
   qos: 1
+  # Arbol jerarquico de TODA la instalacion (TPU -> power switch -> field
+  # switches encadenados -> tanques) en UN documento JSON, para que otro
+  # software monitorice el conjunto sin recomponer la topologia por su cuenta.
+  # Se publica RETENIDO: quien se suscriba a mitad lo recibe al instante.
+  # El MISMO documento esta en HTTP en /api/arbol.
+  arbol_topic: ""             # vacio = <topic_prefix>/topologia
+  arbol_periodo_s: 10         # la topologia cambia poco; 10 s da reaccion de sobra
 
 modbus_tcp:
   enabled: true
