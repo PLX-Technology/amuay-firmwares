@@ -452,6 +452,47 @@ int ltc4296_read_port_adc(const struct device *dev, enum ltc4296_port port_no, i
 	return 0;
 }
 
+int ltc4296_read_port_adc_raw(const struct device *dev, enum ltc4296_port port_no,
+			      uint16_t *code, uint16_t *hs_resistor)
+{
+	/* Igual que ltc4296_read_port_adc() pero SIN convertir.
+	 *
+	 * Por que hace falta: la conversion de arriba es una DIVISION ENTERA de
+	 * C, que trunca hacia cero. Con el shunt de estas placas cada cuenta del
+	 * ADC vale ~0.37 mA (270) o ~0.40 mA (250), asi que truncar tira hasta
+	 * una cuenta entera y SIEMPRE hacia abajo: es un sesgo sistematico, no
+	 * ruido, y se acumula al sumar la potencia de todos los puertos.
+	 *
+	 * Se entrega la cuenta cruda Y el shunt con el que hay que convertirla,
+	 * para que la trama sea autodescriptiva: si algun dia una placa lleva
+	 * otro shunt, la pasarela no necesita saberlo de antemano ni hay forma
+	 * de que un config desactualizado produzca corrientes falsas creibles.
+	 */
+	int ret;
+	uint8_t port_addr = 0;
+	uint16_t val16;
+	struct ltc4296_dev_config *config = dev->config;
+
+	ret = ltc4296_get_port_addr(port_no, LTC_PORT_ADCDAT, &port_addr);
+	if (ret != 0) {
+		return ret;
+	}
+	ret = ltc4296_reg_read(dev, port_addr, &val16);
+	if (ret != 0) {
+		return ret;
+	}
+	if ((val16 & LTC4296_NEW_MSK) != LTC4296_NEW_MSK) {
+		return ADI_LTC_INVALID_ADC_PORT_CURRENT;
+	}
+	if (code != NULL) {
+		*code = (uint16_t)(val16 & 0x0FFF);
+	}
+	if (hs_resistor != NULL) {
+		*hs_resistor = (uint16_t)config->port_config[port_no].hs_resistor;
+	}
+	return 0;
+}
+
 int ltc4296_port_prebias(const struct device *dev, enum ltc4296_port port_no, enum ltc4296_config mode)
 {
 	int ret;

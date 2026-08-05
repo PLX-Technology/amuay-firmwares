@@ -554,6 +554,17 @@ struct mps_tele {
 		uint8_t port;                /* portMap del switch (mascara) */
 		uint8_t pad;
 	} vec[MPS_VEC_POR_TRAMA];
+	/* --- v5: CORRIENTE SIN CONVERTIR. Gemelo del bloque v4 del MFS. -------
+	 * `iout_ma` de arriba sale de una DIVISION ENTERA de C dentro del driver,
+	 * que trunca hacia cero. Con el shunt de esta placa (270) cada cuenta del
+	 * ADC vale ~0.37 mA, asi que truncar tira hasta una cuenta entera y
+	 * SIEMPRE hacia abajo: sesgo sistematico, no ruido.
+	 *
+	 * Se manda la cuenta cruda MAS el shunt con el que convertirla; la cuenta
+	 * exacta la hace la pasarela en coma flotante. `iout_ma` se mantiene: un
+	 * consumidor v4 sigue funcionando igual. */
+	uint16_t adc_code[4];   /* 12 bits, offset 2048; 0xFFFF = sin dato */
+	uint16_t hs_res[4];     /* shunt del puerto, como en el overlay */
 } __packed;
 
 /* ⚠️ CONTRATO CON LA PASARELA. `gateway.py` desempaqueta la carga (sin los 14
@@ -569,7 +580,7 @@ struct mps_tele {
  *     MPS_FMT_V4   = "!HHBB"  (vec_total, idx0, n, pad) -> 6 bytes
  *                    + MPS_VEC_POR_TRAMA * "!6sBB"      -> 8 cada uno
  */
-BUILD_ASSERT(sizeof(struct mps_tele) == 66 + 6 + 8 * MPS_VEC_POR_TRAMA,
+BUILD_ASSERT(sizeof(struct mps_tele) == 66 + 6 + 8 * MPS_VEC_POR_TRAMA + 4 * 4,
 	     "struct mps_tele desalineada con MPS_FMT de gateway.py");
 
 /* Identidad estable de la placa, derivada del USN del MAX32690.
@@ -655,7 +666,7 @@ static void mps_tele_send(const struct device *ltc)
 	memcpy(f.src, mps_mac, sizeof(f.src));
 	f.ethertype = htons(MPS_ETHERTYPE);
 	f.magic     = htonl(MPS_MAGIC);
-	f.version   = htons(4);
+	f.version   = htons(5);
 	f.nports    = htons(4);
 	seq++;
 	f.seq       = htonl(seq);
@@ -678,6 +689,21 @@ static void mps_tele_send(const struct device *ltc)
 
 		if (ltc4296_read_port_status(ltc, pp[i], &st) != 0) { st = 0; }
 		f.pxst[i] = htons(st);
+
+		/* v5: la misma medida SIN convertir, para que la pasarela pueda
+		 * dar el valor exacto en vez del truncado. 0xFFFF = sin lectura
+		 * valida, mismo criterio que el centinela de iout_ma. */
+		{
+			uint16_t code = 0, res = 0;
+
+			if (ltc4296_read_port_adc_raw(ltc, pp[i], &code, &res) == 0) {
+				f.adc_code[i] = htons(code);
+				f.hs_res[i]   = htons(res);
+			} else {
+				f.adc_code[i] = htons(0xFFFF);
+				f.hs_res[i]   = htons(0);
+			}
+		}
 	}
 
 	f.gcmd    = htons(g_gcmd);
