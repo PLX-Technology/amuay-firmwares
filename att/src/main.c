@@ -21,6 +21,7 @@
  * puenteado, donde el ADIN2111 ya esta en la linea por hardware.
  */
 #include <zephyr/kernel.h>
+#include <zephyr/sys/reboot.h>   /* vigilante de silencio */
 #include <stm32_ll_gpio.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
@@ -144,6 +145,41 @@ static int g_mb_rtu = -1;
 
 static const struct device *gpb;
 static volatile int g_en_bateria;      /* ultimo estado leido, para la traza */
+
+/* ---------------- Vigilante de silencio ----------------
+ *
+ * POR QUE EXISTE (2026-08-05, visto dos veces en una tarde):
+ * tras un corte de alimentacion SPE la placa se quedaba VIVA, contando y
+ * alimentada, pero SIN TRANSMITIR NUNCA MAS. Solo volvia reiniciandola a mano.
+ * Con 50 tanques en una refineria eso significa ir tanque por tanque despues
+ * de cualquier intervencion electrica, que no es aceptable.
+ *
+ * El bucle solo transmite si encuentra una iface CON PORTADORA:
+ *
+ *     if ((cfg.flags & CFG_F_PUSH) && tx_sock >= 0 && o != NULL)
+ *
+ * Si el carrier del ADIN2111 no se recupera tras caerse el enlace, `o` es NULL
+ * para siempre y la placa calla EN SILENCIO, sin error y sin aviso.
+ *
+ * Dos niveles, del mas barato al mas drastico:
+ *   1) al minuto: reinicializar el socket y bajar/subir las ifaces, que es lo
+ *      que fuerza al driver a redetectar la portadora. No pierde nada.
+ *   2) a los 15 minutos: reiniciar la placa. Es SEGURO para la medida porque
+ *      enc_count se restaura del punto de control en EEPROM al arrancar
+ *      (ver enc_store_*); por eso los niveles sobreviven a un reinicio.
+ *
+ * ⚠️ EN BATERIA NO CUENTA: ahi el silencio es deliberado. Ademas se reinicia
+ * el reloj, para que al volver la alimentacion externa no salte de inmediato.
+ *
+ * ⚠️ SE TRAZA SIEMPRE, no solo al actuar. El vigilante que se intento por la
+ * mañana solo registraba al fallar, asi que cuando no saltaba era imposible
+ * distinguir "se ejecuta y no detecta" de "no se esta ejecutando". */
+#define SILENCIO_SUAVE_MS  (60 * 1000)
+#define SILENCIO_RESET_MS  (15 * 60 * 1000)
+
+static int64_t  g_ultimo_tx_ok;      /* k_uptime_get() del ultimo push con exito */
+static int64_t  g_ultima_recup;      /* para no repetir la suave cada vuelta */
+static unsigned g_recup_n;           /* recuperaciones suaves intentadas */
 
 /* Espejo de CFG_F_ENC_LEDS. Cache en vez de mirar cfg.flags: lo consulta la
  * ISR del encoder en cada flanco. `volatile` porque lo escribe el hilo de
@@ -1460,9 +1496,43 @@ int main(void)
 			}
 			if ((cfg.flags & CFG_F_PUSH) && tx_sock >= 0 && o != NULL) {
 				int r = spe_tx(o, ++seq);
-				if (r > 0) { sent++; } else { failed++; }
+				if (r > 0) { sent++; g_ultimo_tx_ok = k_uptime_get(); }
+				else { failed++; }
 				/* solo confirmamos la imagen si el SPE transmite de verdad */
 				ota_confirm_check(r > 0);
+			}
+		}
+
+		/* --- vigilante de silencio (ver arriba) --- */
+		if (bat) {
+			/* silencio deliberado: no cuenta, y se reinicia el reloj */
+			g_ultimo_tx_ok = k_uptime_get();
+		} else {
+			int64_t ahora = k_uptime_get();
+			int64_t mudo;
+
+			if (g_ultimo_tx_ok == 0) { g_ultimo_tx_ok = ahora; }
+			mudo = ahora - g_ultimo_tx_ok;
+
+			if (mudo >= SILENCIO_RESET_MS) {
+				LOG_ERR("VIGILANTE: %lld s sin transmitir tras %u recuperaciones."
+				        " REINICIANDO (la cuenta se restaura del punto de control).",
+				        mudo / 1000, g_recup_n);
+				k_msleep(200);   /* que salga la traza por consola */
+				sys_reboot(SYS_REBOOT_COLD);
+			} else if (mudo >= SILENCIO_SUAVE_MS &&
+				   (ahora - g_ultima_recup) >= SILENCIO_SUAVE_MS) {
+				g_ultima_recup = ahora;
+				g_recup_n++;
+				LOG_WRN("VIGILANTE: %lld s sin transmitir -> recuperacion suave %u",
+				        mudo / 1000, g_recup_n);
+				/* Bajar y subir las ifaces es lo que fuerza al driver a
+				 * redetectar la portadora; el socket se rehace por si acaso. */
+				for (int i = 1; i <= 2; i++) {
+					struct net_if *f = net_if_get_by_index(i);
+					if (f) { net_if_down(f); k_msleep(50); net_if_up(f); }
+				}
+				spe_tx_init(iface);
 			}
 		}
 #else
@@ -1476,6 +1546,8 @@ int main(void)
 			enc_store_tick();
 			{ struct hb { int n; } h = { 0 }; net_if_foreach(hb_cb, &h.n); }
 			LOG_INF("PD14 = %d", gpio_pin_get_raw(gpd, BYPASS_EN_PIN));
+			LOG_INF("vigilante: mudo=%lld s recuperaciones=%u bat=%d",
+				(k_uptime_get() - g_ultimo_tx_ok) / 1000, g_recup_n, g_en_bateria);
 			att_phy_dump();
 #endif
 		}
