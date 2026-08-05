@@ -128,6 +128,23 @@ MFS_ROTULO_MAC = {2: "Port 1", 1: "Port 2", 0: "Port 3", 5: "Port 4",
                   4: "Port 5", 3: "Port 6"}
 
 
+def puerto_de_portmap(pm: int):
+    """`portMap` de la tabla dinamica es una MASCARA DE BITS, no un indice.
+
+    Bit N = macPort N. Se vio en hardware (2026-08-05): llegaban puertos 16 y
+    32, imposibles en un ADIN6310 de seis puertos. Eran los bits 4 y 5. Al
+    decodificarlos, cada vecino cayo en un puerto que si estaba entregando
+    potencia, que es la comprobacion que lo confirma.
+
+    Con VARIOS bits activos la direccion se aprendio por mas de un puerto y no
+    se puede atribuir a ninguno: se descarta antes que colgarla del equivocado
+    y torcer el arbol.
+    """
+    if pm <= 0 or (pm & (pm - 1)):
+        return None
+    return pm.bit_length() - 1
+
+
 def parse_mfs_frame(payload: bytes):
     """Decodifica la telemetria de un field switch (sin cabecera Ethernet)."""
     if len(payload) < MFS_LEN:
@@ -184,8 +201,11 @@ def parse_mfs_frame(payload: bytes):
                 vec = []
                 for i in range(min(n, MFS_VEC_N)):
                     e = payload[b + i * 8:b + i * 8 + 8]
+                    p = puerto_de_portmap(e[6])
+                    if p is None:
+                        continue
                     vec.append({"mac": ":".join("%02x" % x for x in e[:6]),
-                                "puerto": e[6]})
+                                "puerto": p, "portmap": e[6]})
                 # ⚠️ Es un TROZO de la tabla, no la tabla entera: el switch la
                 # recorre en tramas sucesivas. Quien lo consuma debe ACUMULAR.
                 d["vecinos"] = {"total": tot, "idx0": idx0, "trozo": vec}
