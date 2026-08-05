@@ -547,8 +547,6 @@ async function tanks(){
         <select class="acc" data-id="${t.tank_id}"
            style="padding:5px 8px;font-size:13px;background:#2b3846;margin-left:4px">
           <option value="">Acciones…</option>
-          <option value="485off">Apagar RS-485</option>
-          <option value="485on">Encender RS-485</option>
           <option value="ledson">LEDs encoder: ver</option>
           <option value="ledsoff">LEDs encoder: apagar</option>
         </select></td>
@@ -576,14 +574,13 @@ async function accion(sel){
   const id = +sel.dataset.id, v = sel.value;
   sel.value = '';
   if(!v) return;
-  const body = {'485off':{rs485:false}, '485on':{rs485:true},
-                'ledson':{enc_leds:true}, 'ledsoff':{enc_leds:false}}[v];
-  const txt  = {'485off':'apagar el RS-485', '485on':'encender el RS-485',
-                'ledson':'encender los LEDs del encoder',
+  // El RS-485 se quito del panel a proposito: apagarlo deja al sensor sin
+  // responder por Modbus RTU, y cada accion cuesta una conexion TCP contra una
+  // placa con fuga de buferes conocida. La capacidad sigue en la API
+  // (/api/tank/<id>/config con {"rs485":false}) para quien sepa lo que hace.
+  const body = {'ledson':{enc_leds:true}, 'ledsoff':{enc_leds:false}}[v];
+  const txt  = {'ledson':'encender los LEDs del encoder',
                 'ledsoff':'apagar los LEDs del encoder'}[v];
-  if(v==='485off' && !confirm('¿Apagar el puerto RS-485 del tanque '+id+'?\n\n'
-      +'Deja de responder por Modbus RTU hasta que se vuelva a encender. '
-      +'El enlace por SPE no se ve afectado.')) return;
   try{
     const r = await fetch('/api/tank/'+id+'/config',{method:'POST',
       headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});

@@ -21,9 +21,7 @@
  * puenteado, donde el ADIN2111 ya esta en la linea por hardware.
  */
 #include <zephyr/kernel.h>
-#include <zephyr/sys/reboot.h>
 #include <stm32_ll_gpio.h>
-#include <zephyr/net/net_pkt.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/uart.h>
@@ -1204,158 +1202,6 @@ static void ota_confirm_check(bool tx_ok)
 #endif
 
 
-/* ============ REINTENTO POR REINICIO: recuperar el SPE desde bateria ============
- *
- * EL PROBLEMA (verificado en tank1 el 2026-08-04). La deteccion de un PD en
- * SPoE se hace con el dispositivo SIN ALIMENTAR: el PSE aplica su tension de
- * sondeo y espera una firma. Una placa ya viva -- sostenida por la bateria --
- * no la presenta. Sale un bucle cerrado:
- *
- *   bateria mantiene viva la placa -> no parece un PD -> el PSE nunca clasifica
- *   -> nunca entrega -> la bateria se agota -> tanque perdido en silencio.
- *
- * Medido: con la ATT arrancada SIN alimentar, el slot clasifico y entrego
- * 15 mA. Con la misma placa viva por bateria y el mismo cable, el field switch
- * sondea cada 30 s y reporta "PD Not Present". Unico cambio: estar alimentada.
- *
- * LO QUE INTENTA ESTO: reiniciarse para dejarse clasificar.
- *
- * ⚠️ NO ESTA GARANTIZADO QUE FUNCIONE, y conviene decirlo aqui: si la bateria
- * mantiene alimentado el front-end del PD durante el reinicio, el PSE seguira
- * sin ver la firma y esto no servira de nada. Es un intento empirico barato
- * antes de tocar hardware; si no funciona, la solucion es de hardware.
- *
- * POR QUE ESTA ACOTADO. Si no funciona, la placa se reiniciaria para siempre:
- * gastaria mas bateria que estando quieta y ensuciaria el registro. Los
- * contadores viven en `.noinit`, que SOBREVIVE a sys_reboot() pero se pierde en
- * un corte real de alimentacion -- justo la semantica que hace falta: como
- * mucho ATT_BAT_INTENTOS por episodio de bateria, y al volver la alimentacion
- * externa (corte real) la cuenta empieza de cero.
- *
- * Solo se intenta con ENLACE SPE ARRIBA: sin portadora no hay PSE al otro lado
- * al que dejarse clasificar, y reiniciar seria gasto puro. El enlace funciona
- * sin potencia PoDL -- verificado hoy -- asi que es una condicion util.
- * ============================================================================ */
-#define ATT_BAT_MAGIA     0x42415431u   /* "BAT1" */
-#define ATT_BAT_ESPERA_S  90            /* margen antes del 1er intento */
-#define ATT_BAT_INTENTOS  3
-
-static __noinit uint32_t bat_magia;
-static __noinit uint32_t bat_intentos;
-
-static void att_bat_reinicio_init(void)
-{
-	if (bat_magia != ATT_BAT_MAGIA) {   /* arranque en frio: RAM con basura */
-		bat_magia = ATT_BAT_MAGIA;
-		bat_intentos = 0;
-	}
-}
-
-static void att_bat_intento_reinicio(void)
-{
-	static int64_t desde_ms;
-	struct net_if *o = NULL;
-
-	for (int i = 1; i <= 2; i++) {
-		struct net_if *f = net_if_get_by_index(i);
-
-		if (f && net_if_is_carrier_ok(f)) { o = f; break; }
-	}
-	if (o == NULL) {            /* sin enlace: no hay a quien presentarse */
-		desde_ms = 0;
-		return;
-	}
-	if (desde_ms == 0) {
-		desde_ms = k_uptime_get();
-		return;
-	}
-	if ((k_uptime_get() - desde_ms) < (int64_t)ATT_BAT_ESPERA_S * 1000) {
-		return;
-	}
-	if (bat_intentos >= ATT_BAT_INTENTOS) {
-		return;                 /* agotados: quieta, gastando lo minimo */
-	}
-
-	bat_intentos++;
-	LOG_WRN("BATERIA con enlace SPE y sin potencia PoDL: reinicio %u/%u para"
-		" dejarme clasificar por el PSE", bat_intentos, ATT_BAT_INTENTOS);
-	/* La cuenta del encoder PRIMERO: un reinicio no puede costar la medida. */
-	(void)enc_store_write();
-	k_msleep(100);              /* que salga la traza por consola */
-	sys_reboot(SYS_REBOOT_COLD);
-}
-
-/* ============ VIGILANTE DE SORDERA: pool de recepcion agotado ============
- *
- * ⚠️ EL FALLO QUE ESTO CUBRE (verificado en tank1 el 2026-08-04, tres veces).
- * Los buferes de recepcion de la pila de red se agotan y NO se recuperan:
- *
- *     <err> eth_adin2111: OA RX: cannot allocate packet space, skipping.
- *
- * A partir de ahi la placa NO RECIBE NADA -- ni Modbus, ni ARP, ni ping -- pero
- * SIGUE TRANSMITIENDO por SPE, porque la transmision usa otro pool. Desde la
- * pasarela el tanque PARECE SANO mientras esta sordo, que es lo peor posible:
- * nadie se entera hasta que alguien intenta configurarlo.
- *
- * Hay una FUGA de fondo sin identificar: al triplicar el pool (36 -> 96
- * buferes) la placa paso de aguantar 4 conexiones TCP a aguantar 14. Es decir,
- * cada conexion se queda con buferes que no devuelve. Ampliar el pool solo
- * retrasa el momento; la causa esta en la pila de red o en el driver del
- * ADIN2111 y hace falta instrumentarla para encontrarla.
- *
- * ⚠️ Mientras tanto, esto ataca la CONSECUENCIA, que es la que duele: con 50
- * tanques en campo, una placa sorda permanente significa mandar a alguien al
- * tanque. Reiniciarse cuesta unos segundos y el encoder se conserva.
- *
- * COMO SE DETECTA: se intenta reservar un paquete con K_NO_WAIT. Si falla
- * varias veces seguidas, el pool esta agotado de verdad -- un fallo suelto
- * seria solo un pico de trafico.
- * ======================================================================== */
-#define SORDO_PERIODO_S   30    /* cada cuanto se comprueba */
-#define SORDO_FALLOS      6     /* 6 x 30 s = 3 min sordo -> reiniciar */
-
-static volatile unsigned g_sordo_n;      /* fallos seguidos */
-static volatile unsigned g_sordo_total;  /* fallos acumulados, para diagnostico */
-
-static void att_vigilante_sordera(void)
-{
-	/* ⚠️ RX, NO la generica. net_pkt_alloc_with_buffer() reserva del pool de
-	 * TRANSMISION: con la placa sorda seguia teniendo exito y el vigilante no
-	 * saltaba nunca (probado el 2026-08-04). El pool que se agota es el de
-	 * RECEPCION, que es el que usa el driver del ADIN2111. */
-	/* ⚠️ TRAMA COMPLETA (1514 B), no 64.
-	 * Con 64 B basta UN bufer; el driver del ADIN2111 necesita ~12 para una
-	 * trama Ethernet entera. El pool puede estar lo bastante agotado para que
-	 * el driver no reciba NADA y quedar aun un bufer suelto: la sonda pequena
-	 * tenia exito y el vigilante no saltaba nunca (probado dos veces el
-	 * 2026-08-04). Hay que medir con la misma regla que usa el driver. */
-	struct net_pkt *pkt = net_pkt_rx_alloc_with_buffer(NULL, 1514, AF_INET,
-							   IPPROTO_UDP, K_NO_WAIT);
-
-	if (pkt != NULL) {
-		net_pkt_unref(pkt);
-		if (g_sordo_n) {
-			LOG_INF("Pool de recepcion recuperado tras %u fallo(s)", g_sordo_n);
-		}
-		g_sordo_n = 0;
-		return;
-	}
-
-	g_sordo_n++;
-	g_sordo_total++;
-	LOG_WRN("Pool de recepcion AGOTADO (%u/%u): la placa esta sorda",
-		g_sordo_n, SORDO_FALLOS);
-
-	if (g_sordo_n >= SORDO_FALLOS) {
-		LOG_ERR("Sordo %d s seguidos: reiniciando para recuperar la red",
-			SORDO_FALLOS * SORDO_PERIODO_S);
-		/* La medida primero: un reinicio no puede costar la cuenta. */
-		(void)enc_store_write();
-		k_msleep(100);
-		sys_reboot(SYS_REBOOT_COLD);
-	}
-}
-
 int main(void)
 {
 	struct net_if *iface;
@@ -1392,11 +1238,6 @@ int main(void)
 		gpb = NULL;
 		LOG_ERR("GPIOB no listo: no puedo leer la senal de bateria,"
 			" se asume alimentacion externa");
-	}
-	att_bat_reinicio_init();
-	if (bat_intentos) {
-		LOG_WRN("Reintentos por reinicio ya gastados en este episodio: %u/%u",
-			bat_intentos, ATT_BAT_INTENTOS);
 	}
 
 	/* 1) sacar el bypass: mete el ADIN2111 en la linea SPE */
@@ -1525,19 +1366,6 @@ int main(void)
 		 *
 		 * Se relee en cada vuelta, no una vez al arrancar: la placa puede
 		 * pasar a bateria en caliente y hay que enterarse. */
-		{
-			/* El vigilante corre SIEMPRE, tambien en bateria: quedarse
-			 * sordo ahi es igual de grave y el coste es una reserva de
-			 * 64 bytes cada 30 s. */
-			static unsigned sordo_tick;
-
-			if (++sordo_tick >= (SORDO_PERIODO_S * 1000u) /
-					    (cfg.push_ms10 * 10u ? cfg.push_ms10 * 10u : 500u)) {
-				sordo_tick = 0;
-				att_vigilante_sordera();
-			}
-		}
-
 		bat = att_en_bateria();
 		if (bat != g_en_bateria) {
 			g_en_bateria = bat;
@@ -1564,7 +1392,6 @@ int main(void)
 			}
 		}
 		if (bat) {
-			att_bat_intento_reinicio();
 			continue;
 		}
 #ifndef BENCH_NO_SPE
