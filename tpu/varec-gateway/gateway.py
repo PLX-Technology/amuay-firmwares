@@ -291,10 +291,43 @@ def jerarquia(equipos: list, macs_tanque: dict) -> list:
     MACs que se sortean en cada arranque no valdria para nada.
     """
     por_mac = {e.get("mac"): e for e in equipos if e.get("mac")}
+    raiz_macs = {e.get("mac") for e in equipos if e["tipo"] == "mps"}
+
     for e in equipos:
         vistos = VEC.get(e["clave"], {})
+
+        # ⚠️ EL PUERTO DE SUBIDA VE TODO LO QUE HAY AGUAS ARRIBA.
+        #
+        # La tabla de direcciones del switch NO distingue arriba de abajo: por
+        # el puerto por el que sube, este equipo ve el power switch, la TPU y
+        # todos los tanques de las demas ramas. Tomar eso por "hijos" invierte
+        # el arbol -- un field switch de banco llego a declararse padre del
+        # power switch (2026-08-05).
+        #
+        # El puerto de subida es aquel por el que se ve la RAIZ (el power
+        # switch). Si no se ve ninguna, se usa el puerto con mas direcciones:
+        # el de subida agrega todo lo de arriba, asi que casi siempre gana.
+        subida = None
+        for mac, v in vistos.items():
+            if mac in raiz_macs:
+                subida = v["puerto"]
+                break
+        if subida is None and vistos:
+            cuenta = {}
+            for v in vistos.values():
+                cuenta[v["puerto"]] = cuenta.get(v["puerto"], 0) + 1
+            if cuenta:
+                mx = max(cuenta.values())
+                # Solo si destaca de verdad; con empate no se adivina.
+                cands = [p for p, c in cuenta.items() if c == mx]
+                if len(cands) == 1 and mx > 1:
+                    subida = cands[0]
+        e["puerto_subida"] = subida
+
         hijos = {}
         for mac, v in vistos.items():
+            if subida is not None and v["puerto"] == subida:
+                continue        # aguas arriba: no es hijo
             otro = por_mac.get(mac)
             if otro is not None and otro is not e:
                 q = ("switch", otro["clave"], otro["tipo"])
