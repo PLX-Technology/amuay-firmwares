@@ -98,6 +98,62 @@ LTC_LOW_CKT_BRK = 0x0001
 MFS_VEC_N     = 8
 MFS_FMT_V3    = "!HHBB"
 MFS_LEN_V3    = struct.calcsize(MFS_FMT_V3) + MFS_VEC_N * 8
+#   v4, DESPUES de los vecinos: la corriente SIN CONVERTIR.
+#   adc_code[5] + hs_res[5], uint16 big-endian.
+MFS_FMT_V4    = "!" + "H" * MFS_PORTS * 2
+MFS_LEN_V4    = struct.calcsize(MFS_FMT_V4)
+#   v5 del MPS: lo mismo con 4 puertos.
+MPS_FMT_V5    = "!" + "H" * 4 * 2
+MPS_LEN_V5    = struct.calcsize(MPS_FMT_V5)
+# Lo que manda el firmware cuando el ADC no dio lectura valida (bit NEW a 0).
+ADC_SIN_DATO  = 0xFFFF
+
+
+def ma_exacto(code, hs_res):
+    """Corriente EXACTA en mA a partir de la cuenta cruda del ADC.
+
+    Misma cuenta que hace el driver, pero en coma flotante:
+
+        ma = (code - 2048) * 1000 / (10 * hs_resistor)
+
+    En C eso es una DIVISION ENTERA que trunca hacia cero. Con el shunt de
+    estas placas cada cuenta vale ~0.37 mA (270, power switch) o ~0.40 mA (250,
+    field switch), asi que truncar tira hasta una cuenta entera y SIEMPRE hacia
+    abajo: es un sesgo sistematico, no ruido, y se acumula al sumar la potencia
+    de todos los puertos.
+
+    ⚠️ Dos decimales NO son precision de centesima de mA: el ADC no resuelve
+    por debajo de una cuenta. Lo que se gana es no tirar la parte fraccionaria
+    de la conversion, que si es exacta para una cuenta dada.
+    """
+    if code is None or code == ADC_SIN_DATO or not hs_res:
+        return None
+    return round((code - 2048) * 1000.0 / (10.0 * hs_res), 2)
+
+
+def aplicar_ma_exacto(puertos: list, codigos, resistencias):
+    """Sustituye la corriente truncada por la exacta, puerto a puerto.
+
+    El indice coincide porque firmware y pasarela recorren los puertos del
+    LTC4296 en el mismo orden.
+
+    Se guardan tambien `adc_code` y `hs_res`: sin ellos, si algun dia una
+    corriente parece rara, no habria forma de saber si el problema esta en la
+    medida o en la conversion.
+
+    ⚠️ Solo se pisa `ma` cuando hay lectura VALIDA. Si el ADC no tenia dato,
+    se respeta lo que decidio el parser (None), que no es lo mismo que 0.
+    """
+    for i, p in enumerate(puertos):
+        if i >= len(codigos) or i >= len(resistencias):
+            break
+        code, res = codigos[i], resistencias[i]
+        p["adc_code"] = None if code == ADC_SIN_DATO else code
+        p["hs_res"] = res or None
+        exacto = ma_exacto(code, res)
+        if exacto is not None:
+            p["ma"] = exacto
+
 
 # ⚠️ POR QUE LA IDENTIDAD VA DENTRO DE LA TRAMA Y NO ES LA MAC.
 #
@@ -232,6 +288,11 @@ def parse_mfs_frame(payload: bytes):
                 # ⚠️ Es un TROZO de la tabla, no la tabla entera: el switch la
                 # recorre en tramas sucesivas. Quien lo consuma debe ACUMULAR.
                 d["vecinos"] = {"total": tot, "idx0": idx0, "trozo": vec}
+                off = b + MFS_VEC_N * 8
+                if ver >= 4 and len(payload) >= off + MFS_LEN_V4:
+                    v4 = struct.unpack(MFS_FMT_V4, payload[off:off + MFS_LEN_V4])
+                    aplicar_ma_exacto(d["puertos"], v4[:MFS_PORTS],
+                                      v4[MFS_PORTS:])
     return d
 
 
@@ -296,6 +357,10 @@ def parse_mps_frame(payload: bytes):
             # ⚠️ Es un TROZO de la tabla, no la tabla entera: el switch la
             # recorre en tramas sucesivas. Quien lo consuma debe ACUMULAR.
             d["vecinos"] = {"total": tot, "idx0": idx0, "trozo": vec}
+            off = b + MPS_VEC_N * 8
+            if ver >= 5 and len(payload) >= off + MPS_LEN_V5:
+                v5 = struct.unpack(MPS_FMT_V5, payload[off:off + MPS_LEN_V5])
+                aplicar_ma_exacto(d["puertos"], v5[:4], v5[4:])
     return d
 
 
@@ -645,6 +710,10 @@ def _nodo_switch(eq: dict, por_clave: dict, tanques: dict, vistos: set) -> dict:
             "entregando": p.get("entregando"),
             "ma": p.get("ma"),
             "w": p.get("w"),
+            # Trazabilidad de la medida: si una corriente parece rara, esto
+            # dice si el problema esta en el ADC o en la conversion.
+            "adc_code": p.get("adc_code"),
+            "hs_res": p.get("hs_res"),
             "hijos": _cuelga(rot),
         })
     # ...y luego los puertos SIN PSE por los que se ve algo (el de subida, el
