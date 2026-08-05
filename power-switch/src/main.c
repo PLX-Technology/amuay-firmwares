@@ -673,37 +673,36 @@ static void mps_tele_send(const struct device *ltc)
 	f.uptime_ms = htonl((uint32_t)k_uptime_get_32());
 
 	for (int i = 0; i < 4; i++) {
-		int ima = 0;
 		uint16_t st = 0;
+		uint16_t code = 0, res = 0;
 
-		/* ⚠️ El ADC de puerto solo tiene dato valido (bit NEW) en los
-		 * puertos que entregan. Si falla se manda el centinela: un 0
-		 * seria un dato falso perfectamente creible. */
-		if (ltc4296_read_port_adc(ltc, pp[i], &ima) == 0) {
+		/* ⚠️ UNA SOLA LECTURA DEL ADC POR PUERTO. El bit NEW del registro se
+		 * BORRA AL LEERLO, asi que pedir primero el valor convertido y luego
+		 * el crudo deja el crudo vacio casi siempre: medido en el field switch
+		 * el 2026-08-05, solo 1 de 3 puertos traia cuenta, y de casualidad.
+		 *
+		 * Se lee el CRUDO y de ahi se deriva tambien el entero de
+		 * compatibilidad, repitiendo la misma division entera que hacia el
+		 * driver, para que un consumidor viejo vea exactamente lo de siempre.
+		 *
+		 * Si falla se manda el centinela: un 0 seria un dato falso
+		 * perfectamente creible y se leeria como "conectado y sin consumo". */
+		if (ltc4296_read_port_adc_raw(ltc, pp[i], &code, &res) == 0 && res != 0) {
+			int ima = ((int)code - 2048) * 1000 / (10 * (int)res);
+
 			if (ima >  32000) { ima =  32000; }
 			if (ima < -32000) { ima = -32000; }
-			f.iout_ma[i] = (int16_t)htons((uint16_t)(int16_t)ima);
+			f.iout_ma[i]  = (int16_t)htons((uint16_t)(int16_t)ima);
+			f.adc_code[i] = htons(code);
+			f.hs_res[i]   = htons(res);
 		} else {
-			f.iout_ma[i] = (int16_t)htons((uint16_t)MPS_I_NA);
+			f.iout_ma[i]  = (int16_t)htons((uint16_t)MPS_I_NA);
+			f.adc_code[i] = htons(0xFFFF);
+			f.hs_res[i]   = htons(0);
 		}
 
 		if (ltc4296_read_port_status(ltc, pp[i], &st) != 0) { st = 0; }
 		f.pxst[i] = htons(st);
-
-		/* v5: la misma medida SIN convertir, para que la pasarela pueda
-		 * dar el valor exacto en vez del truncado. 0xFFFF = sin lectura
-		 * valida, mismo criterio que el centinela de iout_ma. */
-		{
-			uint16_t code = 0, res = 0;
-
-			if (ltc4296_read_port_adc_raw(ltc, pp[i], &code, &res) == 0) {
-				f.adc_code[i] = htons(code);
-				f.hs_res[i]   = htons(res);
-			} else {
-				f.adc_code[i] = htons(0xFFFF);
-				f.hs_res[i]   = htons(0);
-			}
-		}
 	}
 
 	f.gcmd    = htons(g_gcmd);
