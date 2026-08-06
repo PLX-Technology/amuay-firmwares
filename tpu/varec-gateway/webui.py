@@ -326,6 +326,11 @@ PAGE = r"""<!doctype html>
 <main>
   <div id="dash">
     <div class="card">
+      <h2>TPU <span class="mut" id="tpu_hdr" style="text-transform:none;font-weight:400"></span></h2>
+      <div id="tpu_wrap"><p class="mut">cargando…</p></div>
+    </div>
+
+    <div class="card">
       <h2>Tanques</h2>
       <table><thead><tr><th>ID</th><th>Nombre</th><th>MAC</th><th>Valor</th><th>Pulsos</th><th>Temp.</th><th>Errores</th><th>Envío</th>
         <th>Última conexión</th><th>Estado</th><th></th></tr></thead><tbody id="tb">
@@ -742,6 +747,49 @@ $('#save').onclick=async()=>{
     $('#save').disabled=false; }
 };
 
-tanks(); setInterval(tanks,5000); load();
+// ---- card de la TPU -------------------------------------------------
+// Sale del mismo /api/arbol que se publica por MQTT: una sola fuente, para que
+// el panel y el consumidor externo no puedan contar cosas distintas.
+async function tpu(){
+  try{
+    const r = await fetch('/api/arbol'); const d = await r.json();
+    const t = d.tpu||{}, al = d.almacenamiento||{}, amb = t.ambiente||{};
+    const v = (x,u) => (x===null||x===undefined) ? '<span class="mut">—</span>' : x+u;
+    const cal = c => (c===null||c===undefined) ? '' :
+        (c>=75 ? ' style="color:#e5534b;font-weight:600"' :
+         c>=65 ? ' style="color:#d29922"' : '');
+    $('#tpu_hdr').textContent = d.raiz && d.raiz.nombre ? d.raiz.nombre : '';
+    const alm = al.disponible === false
+      ? '<span style="color:#e5534b;font-weight:600">SIN ALMACENAMIENTO</span>'
+        + (al.muestras_perdidas ? ' <span class="mut">('+al.muestras_perdidas+' muestras perdidas)</span>' : '')
+      : (al.disponible === true ? '<span style="color:#3fb950">guardando</span>'
+                                : '<span class="mut">—</span>');
+    $('#tpu_wrap').innerHTML = `<table><thead><tr>
+        <th>SoC</th><th>NVMe</th><th>RP1</th><th>Ventilador</th><th>Tension</th>
+        <th>Ambiente</th><th>eth0 (planta)</th><th>Historico</th></tr></thead><tbody><tr>
+        <td${cal(t.soc_c)}>${v(t.soc_c,' °C')}</td>
+        <td${cal(t.nvme_c)}>${v(t.nvme_c,' °C')}</td>
+        <td${cal(t.rp1_c)}>${v(t.rp1_c,' °C')}</td>
+        <td>${v(t.ventilador_rpm,' rpm')}</td>
+        <td>${t.subtension === true
+              ? '<span style="color:#e5534b;font-weight:600">SUBTENSION</span>'
+              : (t.subtension === false ? '<span style="color:#3fb950">OK</span>'
+                                        : '<span class="mut">—</span>')}</td>
+        <td>${(amb.temp_c===null||amb.temp_c===undefined)
+              ? '<span class="mut">sin sensor</span>'
+              : amb.temp_c+' °C / '+amb.humi_rh+' %'}</td>
+        <td>${(()=>{ const e=(t.red||{}).eth0||{};
+              if(e.ip) return e.ip + (e.mbps?' <span class="mut">('+e.mbps+' Mbps)</span>':'');
+              return e.enlace ? '<span class="mut">enlace sin IP</span>'
+                              : '<span class="mut">sin enlace</span>'; })()}</td>
+        <td>${alm}</td></tr></tbody></table>`;
+  }catch(e){
+    $('#tpu_wrap').innerHTML = '<p class="mut">sin datos de la TPU</p>';
+  }
+}
+
+tanks(); setInterval(tanks,5000);
+tpu();   setInterval(tpu,10000);
+load();
 </script></body></html>
 """

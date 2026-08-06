@@ -773,6 +773,43 @@ def _hwmon(nombre: str, fichero: str = "temp1_input"):
     return None
 
 
+def _red_iface(nombre: str) -> dict:
+    """Direccion IPv4, MAC y estado de enlace de una interfaz.
+
+    Se usa el ioctl SIOCGIFADDR en vez de lanzar `ip addr`: esto se llama en
+    cada foto del arbol (cada 10 s) y no merece un proceso nuevo cada vez.
+
+    `ip` a None significa SIN DIRECCION, que es un estado legitimo: eth0 se
+    dejo sin IP a proposito para el switch industrial de planta.
+    """
+    ip = None
+    try:
+        import fcntl
+        s_ = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            ip = socket.inet_ntoa(fcntl.ioctl(
+                s_.fileno(), 0x8915,                      # SIOCGIFADDR
+                struct.pack("256s", nombre[:15].encode()))[20:24])
+        except OSError:
+            ip = None
+        finally:
+            s_.close()
+    except Exception:
+        ip = None
+
+    def leer(f):
+        try:
+            with open("/sys/class/net/%s/%s" % (nombre, f)) as fh:
+                return fh.read().strip()
+        except OSError:
+            return None
+
+    vel = leer("speed")
+    return {"ip": ip, "mac": leer("address"),
+            "enlace": leer("carrier") == "1",
+            "mbps": int(vel) if (vel or "").lstrip("-").isdigit() and int(vel) > 0 else None}
+
+
 def tpu_salud() -> dict:
     """Estado fisico de la propia TPU, para publicarlo junto al resto.
 
@@ -788,15 +825,23 @@ def tpu_salud() -> dict:
     def c(v):
         return None if v is None else round(v / 1000.0, 1)
 
-    mv = _hwmon("rpi_volt", "in1_input")
+    # ⚠️ `rpi_volt` NO da una tension: expone in0_lcrit_alarm, la alarma de
+    # SUBTENSION del firmware (0 = bien, 1 = la fuente no da lo suficiente). Los
+    # in1..in4 del rp1_adc son canales del conversor analogico, no la
+    # alimentacion -- confundirlos fue un error mio al montar esto.
+    sub = _hwmon("rpi_volt", "in0_lcrit_alarm")
     return {
         "soc_c": c(_hwmon("cpu_thermal")),
         "nvme_c": c(_hwmon("nvme")),
         "rp1_c": c(_hwmon("rp1_adc")),
         "ventilador_rpm": _hwmon("pwmfan", "fan1_input"),
-        "alim_v": None if mv is None else round(mv / 1000.0, 3),
+        "subtension": None if sub is None else bool(sub),
         # Sensor de ambiente de la TPU: pendiente de identificar y declarar.
         "ambiente": {"temp_c": None, "humi_rh": None},
+        # Red. `eth0` es el puerto de PLANTA: hoy sin IP a proposito, la
+        # recibira del switch industrial. La MAC es la que hay que reservar
+        # ahi para que el MQTT y el panel tengan siempre la misma direccion.
+        "red": {n: _red_iface(n) for n in ("eth0", "pcie0", "wlan0")},
     }
 
 
