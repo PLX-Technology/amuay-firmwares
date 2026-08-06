@@ -1277,6 +1277,45 @@ static int spe_tx(struct net_if *iface, uint32_t seq)
 
 /* Vuelca los registros del PHY, los mismos que se leen en el MFS, para poder
  * comparar los dos extremos del enlace con el mismo criterio. */
+/* Duerme o despierta los dos PHY del ADIN2111.
+ *
+ * POR QUE: net_if_down() baja la interfaz de RED, pero NO apaga el PHY. El
+ * ADIN2111 se queda alimentado intentando enlazar -- se ve porque el LED de
+ * SPE SIGUE PARPADEANDO con la placa "callada" -- y eso es justo el consumo
+ * que se queria eliminar en bateria.
+ *
+ * Se usa el bit ESTANDAR de IEEE 802.3, no un registro propietario: PMA/PMD
+ * control 1 (MMD 1, registro 0x0000), bit 11 = Low Power. Asi no depende de
+ * particularidades del ADIN1100 ni de la version del driver.
+ *
+ * ⚠️ Al despertar hay que limpiarlo ANTES de levantar las interfaces: un PHY
+ * en bajo consumo no enlaza, y net_if_up() sobre el se quedaria esperando un
+ * carrier que no va a llegar.
+ */
+static void att_phy_dormir(bool dormir)
+{
+	for (int i = 0; i < 2; i++) {
+		uint16_t v = 0;
+
+		if (!device_is_ready(attphy[i])) {
+			continue;
+		}
+		if (phy_read_c45(attphy[i], 1, 0x0000, &v) != 0) {
+			LOG_WRN("PHY%d: no pude leer PMA/PMD ctrl1", i + 1);
+			continue;
+		}
+		if (dormir) {
+			v |= BIT(11);
+		} else {
+			v &= ~BIT(11);
+		}
+		if (phy_write_c45(attphy[i], 1, 0x0000, v) != 0) {
+			LOG_WRN("PHY%d: no pude %s", i + 1, dormir ? "dormir" : "despertar");
+		}
+	}
+	LOG_INF("PHY del ADIN2111: %s", dormir ? "EN BAJO CONSUMO" : "despiertos");
+}
+
 static void att_phy_dump(void)
 {
 	for (int i = 0; i < 2; i++) {
@@ -1541,8 +1580,10 @@ int main(void)
 					struct net_if *f = net_if_get_by_index(i);
 					if (f) { net_if_down(f); }
 				}
+				att_phy_dormir(true);   /* y el PHY, o el LED sigue parpadeando */
 				LOG_INF("SPE abajo por bateria: sin trafico con el ADIN");
 			} else {
+				att_phy_dormir(false);  /* primero el PHY: dormido no enlaza */
 				/* Vuelve la alimentacion externa: levantar el SPE y rehacer el
 				 * socket. El orden importa -- primero las ifaces, que el socket
 				 * necesita una interfaz viva. */
