@@ -793,7 +793,23 @@ int main(void)
 		 * LAN7431 MAC_RGMII_ID=0x2: TXC delay enabled, RXC delay disabled.
 		 * Add only the complementary ADIN6310 TX delay. Px_LINK is active low.
 		 */
-		{ 1, SES_rgmiiMode, { 0, 1, 0 }, 1, SES_phyUnmanaged, {true, 1, 0, SES_phySpeed1000, SES_phyDuplexModeFull, SES_autoMdix}},
+		/* ★ enableRxDelay = 1 (2026-08-06). MEDIDO: el enlace RGMII funcionaba en UN
+		 * SOLO SENTIDO. El ADIN6310 -> LAN7431 iba perfecto (toda la telemetria
+		 * llegaba), pero lo que la CM5 transmitia NO ENTRABA en el tejido: el
+		 * switch nunca aprendio la MAC de pcie0 pese a estar dnsmasq minutos
+		 * enviando ofertas por ahi, mientras que si tenia la de eth0 en el
+		 * macPort 5. Prueba A/B con un minuto de diferencia:
+		 *
+		 *   DISCOVER(pcie0) -> OFFER(pcie0) -> nada
+		 *   DISCOVER(eth0)  -> OFFER -> REQUEST -> ACK
+		 *
+		 * El sentido que falla es la RECEPCION del switch, y justo ahi no habia
+		 * retardo. El comentario de abajo asumia que el LAN7431 aportaba el suyo
+		 * en ese sentido; la medida dice que no basta.
+		 *
+		 * Tocar enableRxDelay solo afecta al sentido roto: el que funciona
+		 * (enableTxDelay) no se toca. */
+		{ 1, SES_rgmiiMode, { 1, 1, 0 }, 1, SES_phyUnmanaged, {true, 1, 0, SES_phySpeed1000, SES_phyDuplexModeFull, SES_autoMdix}},
 		{ 1, SES_rmiiMode, { 0, 0, 0 }, 1, SES_phyADIN1100, {true, 1, 5, SES_phySpeed10, SES_phyDuplexModeFull, SES_autoMdix}},
 		{ 1, SES_rmiiMode, { 0, 0, 0 }, 1, SES_phyADIN1100, {true, 1, 2, SES_phySpeed10, SES_phyDuplexModeFull, SES_autoMdix}},
 		{ 1, SES_rmiiMode, { 0, 0, 0 }, 1, SES_phyADIN1100, {true, 1, 3, SES_phySpeed10, SES_phyDuplexModeFull, SES_autoMdix}},
