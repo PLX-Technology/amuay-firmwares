@@ -750,6 +750,56 @@ def _nodo_switch(eq: dict, por_clave: dict, tanques: dict, vistos: set) -> dict:
     }
 
 
+def _hwmon(nombre: str, fichero: str = "temp1_input"):
+    """Lee un valor de hwmon por NOMBRE de dispositivo, no por numero.
+
+    ⚠️ Los hwmonN se renumeran entre arranques segun el orden en que registran
+    los drivers; atarse a hwmon1 daria la temperatura del chip equivocado sin
+    avisar. Por eso se busca por `name`.
+    """
+    try:
+        for d in sorted(os.listdir("/sys/class/hwmon")):
+            base = "/sys/class/hwmon/" + d
+            try:
+                with open(base + "/name") as f:
+                    if f.read().strip() != nombre:
+                        continue
+                with open(base + "/" + fichero) as f:
+                    return int(f.read().strip())
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return None
+
+
+def tpu_salud() -> dict:
+    """Estado fisico de la propia TPU, para publicarlo junto al resto.
+
+    Hasta ahora el arbol contaba el estado del CAMPO pero no el del equipo que
+    lo vigila. La temperatura del SoC y la del NVMe importan de verdad aqui: el
+    disco se ha caido dos veces en un dia y el calor es uno de los sospechosos,
+    asi que conviene tener la serie y no solo la anecdota.
+
+    `ambiente` queda preparado para el sensor de temperatura y humedad de la
+    TPU; hoy vale None porque ese sensor NO esta declarado en el sistema (sin
+    overlay, sin IIO y con los buses i2c vacios).
+    """
+    def c(v):
+        return None if v is None else round(v / 1000.0, 1)
+
+    mv = _hwmon("rpi_volt", "in1_input")
+    return {
+        "soc_c": c(_hwmon("cpu_thermal")),
+        "nvme_c": c(_hwmon("nvme")),
+        "rp1_c": c(_hwmon("rp1_adc")),
+        "ventilador_rpm": _hwmon("pwmfan", "fan1_input"),
+        "alim_v": None if mv is None else round(mv / 1000.0, 3),
+        # Sensor de ambiente de la TPU: pendiente de identificar y declarar.
+        "ambiente": {"temp_c": None, "humi_rh": None},
+    }
+
+
 def arbol(equipos: list, tanques: dict, almacen: dict = None) -> dict:
     """Documento JERARQUICO de toda la instalacion, para publicar por MQTT.
 
@@ -806,6 +856,8 @@ def arbol(equipos: list, tanques: dict, almacen: dict = None) -> dict:
         # el SSD se cayo fue un fallo SILENCIOSO: los niveles seguian llegando y
         # el panel se veia normal mientras no se guardaba nada.
         "almacenamiento": almacen or {"disponible": None},
+        # Estado fisico de la propia TPU. Ver tpu_salud().
+        "tpu": tpu_salud(),
         "resumen": {
             "equipos": len(equipos),
             "equipos_vivos": sum(1 for e in equipos if e.get("vivo")),
