@@ -442,7 +442,16 @@ static void enc_leds_aplicar(void)
 static void cfg_defaults(void)
 {
 	cfg.magic = CFG_MAGIC;
-	cfg.flags = CFG_F_PUSH | CFG_F_RTU;   /* el push L2 es el modo PRINCIPAL */
+	/* ★ CFG_F_BAT ACTIVA DE FABRICA (2026-08-06, decision del usuario).
+	 * Antes venia apagada porque PB11 no significaba lo mismo en todas las
+	 * placas y una lectura invertida deja el tanque MUDO. El convenio queda
+	 * fijado -- 0 = alimentado por SPE, 1 = bateria -- y Mayker corrige las
+	 * placas que no lo cumplan.
+	 *
+	 * ⚠️ Hasta ese rework, una placa invertida (medido: la de tank21) se
+	 * creera en bateria con alimentacion externa y no transmitira. En esas
+	 * hay que APAGAR la bandera por Modbus hasta que se corrija. */
+	cfg.flags = CFG_F_PUSH | CFG_F_RTU | CFG_F_BAT;
 	cfg.unit_id = 1;
 	cfg.baud_div = 192;                   /* 19200 = default del estandar Modbus */
 	cfg.parity = 1;                       /* even */
@@ -1515,9 +1524,41 @@ int main(void)
 				 * ademas el LED de TX, que en bateria es consumo puro. */
 				att_485_puerto(0);
 				LOG_INF("RS-485 apagado por bateria");
-			} else if (cfg.flags & CFG_F_RTU) {
-				att_485_puerto(1);
-				LOG_INF("RS-485 reactivado");
+
+				/* ★ Y EL ADIN2111 TAMBIEN (2026-08-06, pedido explicito).
+				 * No basta con dejar de transmitir: con las interfaces arriba
+				 * el PHY mantiene el enlace 10BASE-T1L y sigue gastando aunque
+				 * nadie hable. En bateria NO debe haber comunicacion de ningun
+				 * tipo con el ADIN, este el cable conectado o no.
+				 *
+				 * Se cierra el socket ANTES de bajar las interfaces: al revés,
+				 * quedaria un socket atado a una iface caida. */
+				if (tx_sock >= 0) {
+					zsock_close(tx_sock);
+					tx_sock = -1;
+				}
+				for (int i = 1; i <= 2; i++) {
+					struct net_if *f = net_if_get_by_index(i);
+					if (f) { net_if_down(f); }
+				}
+				LOG_INF("SPE abajo por bateria: sin trafico con el ADIN");
+			} else {
+				/* Vuelve la alimentacion externa: levantar el SPE y rehacer el
+				 * socket. El orden importa -- primero las ifaces, que el socket
+				 * necesita una interfaz viva. */
+				for (int i = 1; i <= 2; i++) {
+					struct net_if *f = net_if_get_by_index(i);
+					if (f) { net_if_up(f); }
+				}
+				spe_tx_init(iface);
+				LOG_INF("SPE arriba: alimentacion externa recuperada");
+
+				/* ⚠️ Solo se reactiva si la configuracion lo pedia: volver de
+				 * bateria no debe encender un RS-485 deshabilitado a proposito. */
+				if (cfg.flags & CFG_F_RTU) {
+					att_485_puerto(1);
+					LOG_INF("RS-485 reactivado");
+				}
 			}
 		}
 		if (bat) {

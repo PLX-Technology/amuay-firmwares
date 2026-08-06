@@ -750,7 +750,7 @@ def _nodo_switch(eq: dict, por_clave: dict, tanques: dict, vistos: set) -> dict:
     }
 
 
-def arbol(equipos: list, tanques: dict) -> dict:
+def arbol(equipos: list, tanques: dict, almacen: dict = None) -> dict:
     """Documento JERARQUICO de toda la instalacion, para publicar por MQTT.
 
     TPU -> power switch -> field switches encadenados -> tanques.
@@ -802,6 +802,10 @@ def arbol(equipos: list, tanques: dict) -> dict:
         "esquema": ARBOL_ESQUEMA,
         "ts": now(),
         "generado_por": "varec-gateway",
+        # ★ Salud del historiador. Va en el documento porque la primera vez que
+        # el SSD se cayo fue un fallo SILENCIOSO: los niveles seguian llegando y
+        # el panel se veia normal mientras no se guardaba nada.
+        "almacenamiento": almacen or {"disponible": None},
         "resumen": {
             "equipos": len(equipos),
             "equipos_vivos": sum(1 for e in equipos if e.get("vivo")),
@@ -818,7 +822,8 @@ def arbol(equipos: list, tanques: dict) -> dict:
             "vivo": True,           # si no lo estuviera, esto no se publicaria
             "edad_s": 0,
             "uptime_s": int(time.time() - ARRANQUE),
-            "avisos": [],
+            "avisos": ([] if (almacen or {}).get("disponible", True)
+                       else ["sin_almacenamiento"]),
             # Un solo puerto logico: la TPU ve la red SPE por el RGMII del
             # power switch. Los equipos sin padre resuelto cuelgan aqui.
             "puertos": [{
@@ -1040,13 +1045,67 @@ class Store:
     lock; los lectores usan sus propias conexiones en modo WAL."""
 
     def __init__(self, path: str, retention: dict):
-        os.makedirs(os.path.dirname(path), exist_ok=True)
         self.path = path
         self.retention = retention
         self.q: "queue.Queue" = queue.Queue(maxsize=10000)
-        self._init_schema()
+        # ★ EL HISTORIADOR NO PUEDE TUMBAR LA MEDIDA (2026-08-06).
+        #
+        # Antes, si la base no se podia abrir, Store() lanzaba y el proceso
+        # entero moria: con el SSD caido se perdian TAMBIEN el MQTT, el Modbus,
+        # el panel y la ingesta. Ocurrio de verdad -- el NVMe de esta CM5 se cae
+        # a los ~20 min de cada arranque (D3cold del que no vuelve, con el
+        # ahorro ya desactivado en cmdline) y dejo la planta sin pasarela.
+        #
+        # Ahora arranca igualmente en modo DEGRADADO: se sirve el dato en vivo,
+        # se cuenta lo que se pierde y se reintenta abrir la base sola. Un
+        # historiador caido es un problema; que ademas apague la instrumentacion
+        # es inaceptable.
+        self.disponible = False
+        self.perdidas = 0            # muestras tiradas por no haber base
+        self.ultimo_error = None
+        self._probar()
         threading.Thread(target=self._writer, daemon=True, name="store").start()
         threading.Thread(target=self._roller, daemon=True, name="roll").start()
+        threading.Thread(target=self._reintentar, daemon=True, name="store-re").start()
+
+    def _probar(self) -> bool:
+        """Intenta dejar la base utilizable. Devuelve si lo consiguio."""
+        try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            self._init_schema()
+        except Exception as e:
+            if self.disponible or self.ultimo_error is None:
+                print(f"[store] ⛔ SIN ALMACENAMIENTO: {e}. La pasarela sigue "
+                      f"sirviendo el dato en VIVO, pero NO se guarda historico.",
+                      file=sys.stderr)
+            self.disponible = False
+            self.ultimo_error = str(e)
+            return False
+        if not self.disponible:
+            print(f"[store] almacenamiento disponible en {self.path}"
+                  + (f" (se perdieron {self.perdidas} muestras)"
+                     if self.perdidas else ""))
+        self.disponible = True
+        self.ultimo_error = None
+        return True
+
+    def _reintentar(self):
+        """Reintenta abrir la base cada 30 s: si el disco vuelve, el historico
+        se reanuda solo sin reiniciar el servicio."""
+        while not STOP.is_set():
+            for _ in range(30):
+                if STOP.is_set():
+                    return
+                time.sleep(1)
+            if not self.disponible:
+                self._probar()
+
+    def estado(self) -> dict:
+        """Salud del almacenamiento, para publicarla. Un fallo de disco fue
+        SILENCIOSO la primera vez: los niveles seguian llegando y el panel se
+        veia normal mientras no se guardaba nada."""
+        return {"disponible": self.disponible, "ruta": self.path,
+                "muestras_perdidas": self.perdidas, "error": self.ultimo_error}
 
     def _conn(self):
         c = sqlite3.connect(self.path, timeout=10)
@@ -1071,6 +1130,9 @@ class Store:
         c.close()
 
     def put(self, rec: dict):
+        if not self.disponible:
+            self.perdidas += 1       # se cuenta, no se oculta
+            return
         try:
             self.q.put_nowait(rec)
         except queue.Full:
@@ -1079,10 +1141,30 @@ class Store:
             print("[store] cola llena, muestra descartada", file=sys.stderr)
 
     def _writer(self):
-        c = self._conn()
+        # ⚠️ Conexion PEREZOSA: antes se abria aqui y, si la base no estaba, el
+        # hilo moria en silencio para siempre -- ni siquiera al volver el disco
+        # se reanudaba. Ahora se abre cuando hace falta y se suelta si falla.
+        c = None
         pend = []
         last_flush = time.time()
         while not STOP.is_set():
+            if not self.disponible:
+                if c is not None:
+                    try:
+                        c.close()
+                    except Exception:
+                        pass
+                    c = None
+                pend.clear()
+                time.sleep(1)
+                continue
+            if c is None:
+                try:
+                    c = self._conn()
+                except Exception as e:
+                    self.disponible = False
+                    self.ultimo_error = str(e)
+                    continue
             try:
                 pend.append(self.q.get(timeout=1.0))
             except queue.Empty:
@@ -1103,9 +1185,24 @@ class Store:
                     c.commit()
                 except Exception as e:
                     print(f"[store] error escribiendo: {e}", file=sys.stderr)
+                    # Si la base se cae en caliente hay que enterarse aqui:
+                    # seguir encolando llenaria la cola y taparia el problema.
+                    self.disponible = False
+                    self.ultimo_error = str(e)
+                    try:
+                        c.close()
+                    except Exception:
+                        pass
+                    c = None
                 pend.clear()
                 last_flush = time.time()
-        c.close()
+        # `c` puede ser None: la conexion es perezosa desde que el almacen
+        # puede estar caido. Cerrar a ciegas mataba el hilo al parar.
+        if c is not None:
+            try:
+                c.close()
+            except Exception:
+                pass
 
     def _roller(self):
         """Consolida crudo -> 1m -> 1h y purga lo vencido. Sin esto, el
@@ -1115,6 +1212,8 @@ class Store:
                 if STOP.is_set():
                     return
                 time.sleep(1)
+            if not self.disponible:
+                continue
             try:
                 c = self._conn()
                 # crudo -> minuto
@@ -1149,6 +1248,8 @@ class Store:
                 print(f"[store] error consolidando: {e}", file=sys.stderr)
 
     def upsert_tank(self, tank_id: int, mac: str):
+        if not self.disponible:
+            return                   # sin base no hay nada que registrar
         c = self._conn()
         row = c.execute("SELECT mac FROM tanks WHERE tank_id=?", (tank_id,)).fetchone()
         if row is None:
@@ -1179,6 +1280,8 @@ class Store:
         escalado se aplica aqui. Asi, sustituir una placa averiada no
         obliga a recalibrar -- basta con ponerle su tank_id.
         """
+        if not self.disponible:
+            return               # sin base no hay nada que guardar
         c = self._conn()
         c.execute("INSERT OR IGNORE INTO tanks(tank_id,first_seen,last_seen)"
                   " VALUES(?,?,?)", (tank_id, now(), now()))
@@ -1199,6 +1302,13 @@ class Store:
         vivo, un reinicio de la pasarela borraria de la vista justo los
         sensores que hay que ir a revisar.
         """
+        if not self.disponible:
+            # ⚠️ Sin base se sirve SOLO lo vivo. Es peor que el registro
+            # completo -- los tanques caidos desde el arranque no salen -- pero
+            # es mucho mejor que devolver un error y dejar el panel en blanco.
+            return [dict(r, age_s=now() - r["ts"],
+                         online=(now() - r["ts"]) <= 120)
+                    for r in (live or {}).values()]
         c = self._conn()
         out, seen = [], set()
         t_now = now()
@@ -1246,6 +1356,8 @@ class Store:
         return out
 
     def tank_cfg(self) -> dict:
+        if not self.disponible:
+            return {}        # sin base: no se inventa, se devuelve vacio
         c = self._conn()
         out = {r[0]: {"name": r[1], "scale": r[2], "offset": r[3], "unit": r[4]}
                for r in c.execute("SELECT tank_id,name,scale,offset,unit FROM tanks")}
@@ -1253,6 +1365,8 @@ class Store:
         return out
 
     def history(self, tank_id: int, table: str, since: int, limit: int = 5000):
+        if not self.disponible:
+            return []        # sin base: no se inventa, se devuelve vacio
         c = self._conn()
         rows = c.execute(
             f"SELECT * FROM {table} WHERE tank_id=? AND ts>=? ORDER BY ts DESC LIMIT ?",
@@ -1527,7 +1641,7 @@ def main():
         snap = live.snapshot()
         macs = {r["mac"]: r["tank_id"] for r in snap.values() if r.get("mac")}
         tanques = {r["tank_id"]: r for r in store.roster(snap)}
-        return arbol(switches_snapshot(macs), tanques)
+        return arbol(switches_snapshot(macs), tanques, store.estado())
 
     outs = build_outputs(cfg, live, store, STOP, pse_fn=pse_snapshot,
                          switches_fn=switches_snapshot, arbol_fn=arbol_fn)
