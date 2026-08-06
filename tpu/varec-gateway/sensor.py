@@ -168,6 +168,15 @@ F_PUSH     = 0x01   # push L2 por SPE
 F_RTU      = 0x02   # puerto RS-485 (Modbus RTU)
 F_NO_K1    = 0x04   # no energizar el rele K1
 F_ENC_LEDS = 0x08   # LEDs de canal del encoder (diagnostico)
+F_BAT      = 0x10   # suspender transmisiones con la placa en bateria
+#
+# ⚠️ F_BAT NO SE ACTIVA A CIEGAS. PB11 no significa lo mismo en todas las
+# placas: medido, tank1 da 0 con alimentacion externa y tank21 da 1 en la
+# MISMA situacion. En una placa invertida esta bandera la deja MUDA nada mas
+# arrancar, e indistinguible de un sensor averiado.
+#
+# ANTES DE ACTIVARLA, comprobar en ESA placa que con alimentacion externa el
+# arbol reporta pwr.gpio_listo = true y pwr.pb11 = false (trama v4).
 
 
 def set_flag(ip: str, mask: int, on: bool, unit: int = 1, save=True):

@@ -214,6 +214,42 @@ static int att_en_bateria(void)
 	return BAT_ACTIVO_ALTO ? (v != 0) : (v == 0);
 }
 
+/* Estado de alimentacion empaquetado, para poder VERIFICAR LA POLARIDAD DE
+ * PB11 EN REMOTO.
+ *
+ * POR QUE HACE FALTA (2026-08-06): la suspension por bateria (CFG_F_BAT) esta
+ * apagada de fabrica porque PB11 NO SIGNIFICA LO MISMO EN TODAS LAS PLACAS
+ * -- medido: tank1 da 0 con alimentacion externa y tank21 da 1 en la MISMA
+ * situacion. Activarla en una placa con la lectura invertida la deja MUDA
+ * nada mas arrancar, e indistinguible de un sensor averiado.
+ *
+ * Hasta ahora la unica forma de comprobar la polaridad de una placa era
+ * mirarle la consola con el Pico: inviable para 50 tanques. Con esto se lee
+ * desde el panel y activar la funcion pasa a ser una decision informada.
+ *
+ *   bit0  nivel CRUDO de PB11 (0 o 1), tal cual lo da el pin
+ *   bit1  conclusion del firmware: 1 = se cree en bateria
+ *   bit2  CFG_F_BAT activa en esta placa
+ *   bit3  el puerto GPIO esta listo (si es 0, bit0 no significa nada)
+ *
+ * Con la placa en alimentacion EXTERNA, bit3=1 y bit0=0 es la polaridad
+ * buena. Si con alimentacion externa sale bit0=1, esa placa esta invertida y
+ * NO se le debe activar CFG_F_BAT. */
+static uint16_t att_pwr_estado(void)
+{
+	uint16_t v = 0;
+
+	if (gpb != NULL) {
+		int raw = gpio_pin_get_raw(gpb, BAT_PIN);
+
+		v |= BIT(3);
+		if (raw > 0) { v |= BIT(0); }
+	}
+	if (att_en_bateria()) { v |= BIT(1); }
+	if (g_bat_activo)     { v |= BIT(2); }
+	return v;
+}
+
 /* ---------------- LEDs del conector RS-485 (D9 y D10) ----------------
  *
  * Van CABLEADOS A LAS LINEAS TX/RX del USART2 (confirmado por Mayker), no a un
@@ -633,6 +669,8 @@ static int cfg_save(void)
  *   IR 4   : transiciones ilegales (rebotes / pulsos perdidos)
  *   IR 5   : uptime en segundos
  *   IR 6   : estado (bit0 = portadora SPE if1, bit1 = if2)
+ *   IR 12  : alimentacion -- bit0 PB11 crudo | bit1 se cree en bateria |
+ *            bit2 CFG_F_BAT activa | bit3 puerto GPIO listo
  * ====================================================================== */
 #define MB_UNIT_ID   1
 #define MB_TCP_PORT  502
@@ -657,6 +695,7 @@ static int mb_input_reg_rd(uint16_t addr, uint16_t *reg)
 	case 9: *reg = att_calibrated() ? 1 : 0; break;
 	case 10: *reg = (uint16_t)att_temp_c10(); break;   /* 0.1 C, 0x8000 = sin dato */
 	case 11: *reg = (uint16_t)att_humi_rh10(); break;  /* 0.1 %, 0x8000 = sin sensor */
+	case 12: *reg = att_pwr_estado(); break;   /* alimentacion: ver att_pwr_estado() */
 	case 6:
 		v = 0;
 		if (net_if_is_carrier_ok(net_if_get_by_index(1))) { v |= BIT(0); }
@@ -1147,6 +1186,7 @@ struct att_frame {
 	uint32_t uptime_ms;
 	int16_t  temp_c10;   /* v3: temperatura ambiente en 0.1 C  (ATT_NA = sin dato) */
 	int16_t  humi_rh10;  /* v3: humedad relativa en 0.1 %      (ATT_NA = sin sensor) */
+	uint16_t pwr;        /* v4: estado de alimentacion. Ver att_pwr_estado(). */
 } __packed;
 
 static int tx_sock = -1;
@@ -1210,7 +1250,7 @@ static int spe_tx(struct net_if *iface, uint32_t seq)
 	memcpy(f.eth.src.addr, ll->addr, 6);
 	f.eth.type      = htons(ATT_ETHERTYPE);
 	f.magic         = htonl(ATT_MAGIC);
-	f.version       = htons(3);   /* v3: anade temp_c10 y humi_rh10 al final */
+	f.version       = htons(4);   /* v4: anade pwr al final */
 	f.tank_id       = htons(cfg.tank_id);
 	f.seq           = htonl(seq);
 	f.count         = (int32_t)htonl((uint32_t)enc_count);
@@ -1220,6 +1260,7 @@ static int spe_tx(struct net_if *iface, uint32_t seq)
 	f.uptime_ms     = htonl(k_uptime_get_32());
 	f.temp_c10      = (int16_t)htons((uint16_t)att_temp_c10());
 	f.humi_rh10     = (int16_t)htons((uint16_t)att_humi_rh10());
+	f.pwr           = htons(att_pwr_estado());
 
 	tx_dst.sll_ifindex = net_if_get_by_iface(iface);
 	return zsock_sendto(tx_sock, &f, sizeof(f), 0, (struct sockaddr *)&tx_dst, sizeof(tx_dst));

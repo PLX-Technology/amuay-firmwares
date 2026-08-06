@@ -984,12 +984,31 @@ int ltc4296_do_spoe_sccp(const struct device *dev, enum ltc4296_board_class boar
 			}
 
 			return ADI_LTC_DISCONTINUE_SCCP;
-		} else if(pse_pwr_status == LTC_PSE_STATUS_UNKNOWN) {
+		} else if (pse_pwr_status == LTC_PSE_STATUS_SEARCHING ||
+		           pse_pwr_status == LTC_PSE_STATUS_PREPDET) {
+			/* Negociacion EN CURSO: no tocar. Deshabilitar aqui abortaria una
+			 * deteccion que va bien y dejaria el puerto dando tumbos. */
+			return ADI_LTC_DISCONTINUE_SCCP;
+		} else {
+			/* ★ CUALQUIER OTRO ESTADO SE DESHABILITA PARA PODER REINTENTAR
+			 * (2026-08-06). Antes aqui solo se contemplaba UNKNOWN, y los demas
+			 * estados atascados -- IDLE, ERROR, SLEEPING -- caian en el vacio: ni
+			 * entregaban ni se deshabilitaban.
+			 *
+			 * Y eso era un CALLEJON SIN SALIDA, porque la renegociacion solo
+			 * ocurre en la rama LTC_PORT_DISABLED de esta misma funcion: un
+			 * puerto que no figura como deshabilitado NUNCA se reintenta.
+			 *
+			 * Medido en la placa en servicio: al desconectar y reconectar el
+			 * cable SPE de una ATT, su puerto quedaba en IDLE (estado 5,
+			 * pxst=0x3045) y no volvia a entregar potencia por mucho que se
+			 * reconectara. Con esto vuelve a la cola de reintento y la siguiente
+			 * pasada lo renegocia.
+			 */
 			ret = ltc4296_port_disable(dev, ltc4296_port);
 			if (ret != 0) {
 				return ret;
 			}
-			//LOG_ERR("LTC4296-1 port %d disabling output \n",ltc4296_port);
 			return ADI_LTC_DISCONTINUE_SCCP;
 		}
 	} else if(port_chk == LTC_PORT_DISABLED) {

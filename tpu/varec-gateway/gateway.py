@@ -42,6 +42,7 @@ FRAME_FMT_BY_VER = {
     1: "!IHHIiIII",
     2: "!IHHIiiIII",
     3: "!IHHIiiIIIhh",
+    4: "!IHHIiiIIIhhH",
 }
 FRAME_LEN_BY_VER = {v: struct.calcsize(f) for v, f in FRAME_FMT_BY_VER.items()}
 FRAME_MIN_LEN = min(FRAME_LEN_BY_VER.values())
@@ -963,13 +964,18 @@ def parse_att_frame(payload: bytes):
     if len(payload) < n:
         return None
     f = struct.unpack(fmt, payload[:n])
-    level = temp = humi = None
+    level = temp = humi = pwr = None
     if ver == 1:
         _, _, tank, seq, count, edges, errors, uptime = f
     elif ver == 2:
         _, _, tank, seq, count, level, edges, errors, uptime = f
     else:
-        _, _, tank, seq, count, level, edges, errors, uptime, temp, humi = f
+        if ver == 3:
+            (_, _, tank, seq, count, level, edges, errors, uptime,
+             temp, humi) = f
+        else:
+            (_, _, tank, seq, count, level, edges, errors, uptime,
+             temp, humi, pwr) = f
         # La ATT no lleva sensor de humedad: manda el centinela. Guardar
         # None y no 0.0, para no inventar una lectura que no existe.
         temp = None if temp == ATT_NA else temp / 10.0
@@ -982,10 +988,27 @@ def parse_att_frame(payload: bytes):
     if level == ATT_LEVEL_NA:
         level = None
         ref_ok = False
-    return {"ver": ver, "tank_id": tank, "seq": seq, "count": count,
-            "level_mm": level, "ref_ok": ref_ok, "edges": edges,
-            "errors": errors, "uptime": uptime, "temp_c": temp,
-            "humi_rh": humi}
+    d = {"ver": ver, "tank_id": tank, "seq": seq, "count": count,
+         "level_mm": level, "ref_ok": ref_ok, "edges": edges,
+         "errors": errors, "uptime": uptime, "temp_c": temp,
+         "humi_rh": humi}
+    if pwr is not None:
+        # v4: estado de alimentacion, desglosado aqui para que nadie tenga que
+        # recordar que significa cada bit -- y sobre todo para poder VERIFICAR
+        # LA POLARIDAD DE PB11 de cada placa SIN ir con la consola: en tank1
+        # vale 0 con alimentacion externa y en tank21 vale 1 en la MISMA
+        # situacion, y activar la suspension por bateria en una placa invertida
+        # la deja MUDA e indistinguible de un sensor averiado.
+        #
+        # ⚠️ `pb11` solo significa algo si `gpio_listo` es True.
+        d["pwr"] = {
+            "pb11": bool(pwr & 0x01),        # nivel CRUDO del pin
+            "en_bateria": bool(pwr & 0x02),  # lo que concluye el firmware
+            "bat_activa": bool(pwr & 0x04),  # CFG_F_BAT encendida en esa placa
+            "gpio_listo": bool(pwr & 0x08),
+            "crudo": pwr,
+        }
+    return d
 
 STOP = threading.Event()
 
@@ -1344,6 +1367,10 @@ def ingest(cfg: dict, store: Store, live: Live, outs: list):
             # la de la TPU (scale/offset); esto queda como referencia.
             "att_level_mm": fr["level_mm"],
         }
+        # v4: estado de alimentacion de la placa (PB11). Solo si la trama lo
+        # trae; con firmware anterior no existe y no se inventa.
+        if fr.get("pwr") is not None:
+            rec["pwr"] = fr["pwr"]
         live.update(rec)
         store.put(rec)
         for o in outs:
