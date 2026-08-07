@@ -280,6 +280,29 @@ def process_packet(packet_list, options, bl_scp):
 	if options.verbose >= VERBOSE:
 		print('Trying to Connect.')
 
+	# ★ TIMEOUT CORTO SOLO PARA CONECTAR (2026-08-07).
+	#
+	# Las dos fases piden lo contrario y la herramienta usaba un unico -t:
+	#
+	#   conectar    hay que REINTENTAR DEPRISA. Con una placa que tiene
+	#               aplicacion valida, el ROM abre una ventana de una fraccion
+	#               de segundo al arrancar; el resto del tiempo no contesta
+	#               nadie. Cada intento fallido se queda bloqueado el timeout
+	#               entero, asi que con -t 30 salen DOS intentos por minuto y
+	#               acertar la ventana es cuestion de suerte. Medido: con -t 30
+	#               no conecto en varios minutos y varios POR; con 2 s, a la
+	#               primera.
+	#
+	#   transferir  hay que TENER PACIENCIA. Cada bloque implica un borrado o
+	#               escritura real de flash, que tarda mas que esos 2 s. Con el
+	#               timeout corto la sesion conectaba y moria luego al 17 %
+	#               con "timeout, no packet received".
+	#
+	# Por eso el timeout de conexion es propio (--connect-timeout) y al entrar
+	# en la transferencia se restaura el de -t.
+	tmo_transferencia = bl_scp.timeout
+	bl_scp.timeout = options.connect_timeout
+
 	bbar = progressbar.ProgressBar(widgets=[progressbar.widgets.AnimatedMarker()], maxval=options.first_retry_nb - 1).start()
 	for i in bbar((i for i in range(options.first_retry_nb))):
 		try:
@@ -291,6 +314,8 @@ def process_packet(packet_list, options, bl_scp):
 			raise Exception()
 		except Exception as inst:
 			pass
+
+	bl_scp.timeout = tmo_transferencia
 
 	if options.mpc:
 		mpc_status(2, len(packet_list))
@@ -399,8 +424,14 @@ if __name__ == "__main__":
 						help="Specifies the protocol timeout (s).By default the timeout is 10s")
 	group.add_option("-e", "--erase-timeout", dest="erase_timeout", type="int", default=10, 
 						help="Specifies the protocol erase mem command timeout (s). By default the timeout is 5s")
-	group.add_option("-f", "--first-retry", dest="first_retry_nb", type="int", default=200, 
+	group.add_option("-f", "--first-retry", dest="first_retry_nb", type="int", default=200,
 						help="Specifies the number of retry for first packet. By default the number is 200")
+	group.add_option("--connect-timeout", dest="connect_timeout", type="int", default=2,
+						help="Timeout (s) SOLO de la fase de conexion. Corto a proposito: "
+						     "con una placa que tiene aplicacion valida el ROM abre una "
+						     "ventana brevisima al arrancar, y un timeout largo gasta el "
+						     "reintento entero esperando. 2 s por defecto. Ver -t para la "
+						     "transferencia.")
 	group.add_option("-r", "--retry", dest="retry_nb", type="int", default=1, 
 						help="Specifies the number of retry for packets. By default the number is 1")
 	group.add_option("--packet-delay", dest="packet_delay", type="int", default=0, 

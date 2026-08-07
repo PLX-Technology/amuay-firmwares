@@ -112,10 +112,58 @@ alimentar la placa **por fuente externa**.
 
 | Opcion | Valor | Motivo |
 |---|---|---|
-| `--packet-delay 50` | 50 ms | **Necesario.** Sin pausa muere pronto: cada bloque implica una escritura real en flash |
+| `--packet-delay` | **250 ms a 24 V**, 50 ms con 50 V | Cada bloque es una escritura real en flash. Ver §5.2 |
 | `-r 1` | sin reintentos | ⚠️ **NO subirlo.** SCP reproduce una secuencia grabada; reintentar un paquete que la placa ya proceso **desincroniza** la sesion (`expected data size != real one`) |
+| `--connect-timeout 2` | timeout **solo al conectar** | ★ Ver §5.1. Con el `-t` largo NO se caza la ventana del ROM |
 | `-t 30` | timeout por paquete | Es **por paquete**, no total. Un valor enorme solo hace que un fallo tarde minutos en verse |
-| `-f 900` | reintentos de conexion | Alarga la fase de conexion; util solo si hay que acertar la ventana |
+| `-f 3000` | reintentos de conexion | Alarga la fase de conexion; util solo si hay que acertar la ventana |
+
+### 5.1 ★ `--connect-timeout`: por que `-t 30` no deja conectar
+
+2026-08-07. `-t` es el **timeout de lectura del puerto serie**, y la fase de
+conexion es un bucle que manda una peticion y **espera la respuesta ese timeout
+entero** antes de reintentar:
+
+```python
+for i in range(first_retry_nb):
+    con_req.process(bl_scp)      # manda
+    con_reply.process(bl_scp)    # espera -> timeout = -t
+```
+
+Con `-t 30` salen **dos intentos por minuto**. Y en una placa **con aplicacion
+valida** el ROM abre una ventana de una **fraccion de segundo** al arrancar.
+Acertarla asi es cuestion de suerte: no conecto en varios minutos y varios POR.
+
+Con **2 s**, a la primera.
+
+⚠️ **Por eso la receta parecia funcionar antes**: se depuro sobre placas **sin**
+aplicacion valida, donde el ROM espera indefinidamente y el primer intento
+conecta siempre, con el timeout que sea. El caso de la placa que arranca bien
+—el normal al actualizar— nunca se habia probado.
+
+Las dos fases piden lo contrario y antes compartian un unico `-t`: conectar
+necesita **reintentar deprisa**, transferir necesita **paciencia** (un borrado de
+pagina tarda mas de 2 s; con el timeout corto la sesion conecta y muere luego a
+media transferencia con `timeout, no packet received`). De ahi la opcion
+separada.
+
+### 5.2 ★ A 24 V hay que CUADRUPLICAR la pausa entre paquetes
+
+Misma fecha. Con la placa a 24 V de banco, las sesiones morian en puntos
+**aleatorios**: 17 %, 19 %, 41 %, 48 %. Ese patron es el que §3 atribuye a
+interrupciones — solo que aqui nadie tocaba nada.
+
+Es el **rail hundiendose en las rafagas de escritura de flash**: conectar
+consume poco y va siempre; programar da picos y la placa se reinicia.
+
+| `--packet-delay` | Resultado a 24 V |
+|---|---|
+| 50 ms | muere en punto aleatorio — 4 de 4 |
+| **250 ms** | **100 %, `SCP session OK`** |
+
+Es el mismo remedio que en el flasher de la ATT (bloques de 128 B y pausa entre
+ellos): dar tiempo al rail a recuperarse. **Con 50 V no hace falta**; con 24 V,
+si. Y el sintoma engana, porque parece transporte.
 
 Otras cosas comprobadas:
 
