@@ -77,8 +77,17 @@ def write_mem(ser, addr, data):
 
 
 def read_mem(ser, addr, n):
-    """Read Memory (0x11). Devuelve n bytes o None."""
-    for _ in range(4):
+    """Read Memory (0x11). Devuelve n bytes o None.
+
+    MISMA estrategia que write_mem: espera creciente y RESINCRONIZACION a
+    partir del tercer intento. Antes reintentaba cuatro veces sin resincronizar
+    nunca, y esa asimetria costaba el flasheo entero: cuando la linea pierde un
+    byte el bootloader sigue vivo pero descolocado, asi que los cuatro
+    reintentos fallaban en cadena y se abortaba tras haber ESCRITO bien los
+    209 KB. Paso el 2026-08-07 con la placa del tank7, muriendo en 0x1F00; al
+    releer luego con resincronizacion el flash coincidia byte a byte.
+    """
+    for intento in range(8):
         if cmd(ser, 0x11) and send_addr(ser, addr):
             ser.write(bytes([n - 1, (n - 1) ^ 0xFF]))
             if ack(ser):
@@ -86,8 +95,10 @@ def read_mem(ser, addr, n):
                 d = ser.read(n)
                 if len(d) == n:
                     return d
-        time.sleep(0.05)
         ser.reset_input_buffer()
+        time.sleep(0.05 * (intento + 1))
+        if intento >= 2:
+            connect(ser)
     return None
 
 
