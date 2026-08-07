@@ -28,8 +28,14 @@ build_scp_session.exe -c MAX32690 <dir_salida> fw_pad.sbin
 
 # 4) Empaquetar en zip (packet.list + los .packet) y enviar
 python tools/sscp/send_scp.py -c MAX32690 -s COM<pico> -i uart \
-  -t 30 -e 30 -r 1 -f 900 --packet-delay 50 -v sesion.zip
+  --connect-timeout 2 -t 30 -e 30 -r 1 -f 3000 --packet-delay 250 sesion.zip
 ```
+
+★ Los dos valores que cuestan una tarde si se ponen mal (ver §5.1 y §5.2):
+
+- **`--connect-timeout 2`** — sin esto no se caza la ventana del ROM en una
+  placa que arranca bien, que es el caso normal al ACTUALIZAR.
+- **`--packet-delay 250`** — si la placa esta a **24 V**. Con 50 V bastan 50 ms.
 
 Va por el **LPUART del conector `uC SWD` (J11), pines 6/8**, puenteado por la
 CDC-UART del Pico. **No usa `SWDIO` ni `SWCLK`** — funciona con el SWD muerto.
