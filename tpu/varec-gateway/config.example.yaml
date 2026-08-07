@@ -86,6 +86,43 @@ mqtt:
   # El MISMO documento esta en HTTP en /api/arbol.
   arbol_topic: ""             # vacio = <topic_prefix>/topologia
   arbol_periodo_s: 10         # la topologia cambia poco; 10 s da reaccion de sobra
+  # ---- ordenes desde la sala de visualizacion ----
+  # La sala PIDE la calibracion; la TPU es la UNICA que escribe, y republica la
+  # vigente en el arbol retenido (campo `calibracion` de cada tanque). Asi no
+  # hay dos copias del dato que puedan discrepar: la sala muestra lo que la TPU
+  # confirma, y da igual cuantas salas haya o que alguien calibre desde el panel.
+  #
+  # Orden (JSON). DOS formas de decir la misma recta:
+  #
+  # a) "geometrica" -- la practica en campo, NO hay que mover producto:
+  #      {"id":"sala-001", "tank_id":7, "modo":"geometrica", "unidad":"mm",
+  #       "mm_por_pulso":0.595312, "altura_referencia":12000, "sentido":"baja"}
+  #
+  #    mm_por_pulso es una constante MECANICA del cabezal. El manual del Varec
+  #    2500 (IOM001 rev I) no publica el perimetro del pinon, pero si la escala
+  #    del cuadrante, que cuelga del mismo eje (p. 56-57): una vuelta = 1 ft en
+  #    cabezal INGLES (dos ruedas contadoras) o 100 mm en METRICO (tres
+  #    ruedas). Con 512 cuentas de encoder por vuelta:
+  #       ingles   304.8/512 = 0.595312 mm/pulso
+  #       metrico  100.0/512 = 0.195313 mm/pulso
+  #    altura_referencia es la cota del CERO del contador, medible con cinta.
+  #    sentido: "baja" (por defecto) = suben los pulsos, baja el nivel.
+  #
+  # b) "dos_puntos" (lo que se asume si no viene `modo`) -- exacto, pero exige
+  #    MOVER el flotador entre dos niveles conocidos:
+  #      {"id":"lo-que-sea", "tank_id":21, "unidad":"mm",
+  #       "punto_a":{"pulsos":848,"nivel":1000},
+  #       "punto_b":{"pulsos":7823,"nivel":2000}}
+  #
+  # Respuesta en res_topic, SIN retener:
+  #   {"id":..., "tank_id":21, "estado":"aplicada"|"rechazada",
+  #    "motivo":"...", "escala":..., "offset":..., "aviso":"..."}
+  #
+  # ⚠️ Topicos SEPARADOS de los de datos para que el broker pueda dar permiso
+  # de publicar aqui SOLO a la sala, y de leer a todo lo demas. Ver
+  # despliegue/acl_mqtt.sh
+  cmd_topic: ""               # vacio = <topic_prefix>/cmd/calibrar
+  res_topic: ""               # vacio = <topic_prefix>/cmd/resultado
 
 modbus_tcp:
   enabled: true

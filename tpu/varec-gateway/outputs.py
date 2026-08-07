@@ -59,7 +59,7 @@ def tank_regs(rec: dict) -> list:
 
 # ============================================================ MQTT
 class MqttOut:
-    def __init__(self, cfg, live, stop, arbol_fn=None):
+    def __init__(self, cfg, live, stop, arbol_fn=None, cal_fn=None):
         try:
             import paho.mqtt.client as mqtt
         except ImportError:
@@ -72,6 +72,13 @@ class MqttOut:
         self.retain = cfg.get("retain", True)
         self.arbol_fn = arbol_fn
         self.arbol_topic = cfg.get("arbol_topic") or f"{self.prefix}/topologia"
+        self.cal_fn = cal_fn
+        # Ordenes desde la sala de visualizacion. Topicos SEPARADOS de los de
+        # datos a proposito: asi el broker puede dar permiso de publicar aqui a
+        # un usuario distinto del que solo lee. Calibrar es lo que convierte
+        # pulsos en el numero con el que alguien decide una carga.
+        self.t_cmd = cfg.get("cmd_topic") or f"{self.prefix}/cmd/calibrar"
+        self.t_res = cfg.get("res_topic") or f"{self.prefix}/cmd/resultado"
         # Un documento entero cada 2 s (el ritmo de la telemetria) seria mucho
         # ruido para algo que cambia poco: la topologia solo se mueve cuando se
         # conecta o cae un equipo. 10 s da reaccion de sobra.
@@ -85,6 +92,9 @@ class MqttOut:
             self.c.username_pw_set(cfg["username"], pw)
         self.c.will_set(f"{self.prefix}/gateway/status", "offline",
                         qos=1, retain=True)
+        if self.cal_fn is not None:
+            self.c.on_connect = self._on_connect
+            self.c.on_message = self._on_message
         self.c.connect_async(cfg.get("host", "localhost"), cfg.get("port", 1883), 60)
         self.c.loop_start()
         self.c.publish(f"{self.prefix}/gateway/status", "online", qos=1, retain=True)
@@ -93,6 +103,31 @@ class MqttOut:
             threading.Thread(target=self._bucle_arbol, daemon=True,
                              name="mqtt-arbol").start()
             print(f"[mqtt] arbol en {self.arbol_topic} cada {self.arbol_periodo:g}s")
+
+    def _on_connect(self, cliente, ud, flags, rc):
+        """Se suscribe AQUI y no una sola vez al arrancar: si el broker se cae
+        y el cliente reconecta, la suscripcion se pierde. Hacerlo en on_connect
+        cubre tambien las reconexiones."""
+        cliente.subscribe(self.t_cmd, qos=1)
+        print(f"[mqtt] escuchando ordenes en {self.t_cmd}")
+
+    def _on_message(self, cliente, ud, msg):
+        """Una orden de calibracion. SIEMPRE se responde, tambien al rechazar:
+        sin respuesta el emisor no distingue "no llego" de "llego y fallo",
+        que son dos averias muy distintas."""
+        try:
+            orden = json.loads(msg.payload.decode("utf-8"))
+            res = self.cal_fn(orden)
+        except Exception as e:
+            res = {"estado": "rechazada", "motivo": "no se pudo interpretar: %s" % e}
+        try:
+            # SIN retener: un resultado es un hecho puntual, no un estado.
+            # Retenido, quien se suscriba mañana recibiria como novedad la
+            # respuesta a una orden de la semana pasada.
+            self.c.publish(self.t_res, json.dumps(res), qos=1, retain=False)
+        except Exception as e:
+            print(f"[mqtt] no pude responder a la orden: {e}", file=sys.stderr)
+        print("[mqtt] orden de calibracion -> %s" % res.get("estado"))
 
     def _bucle_arbol(self):
         """Publica el arbol completo de la instalacion cada N segundos.
@@ -279,7 +314,7 @@ class ModbusOut:
 # ============================================================ HTTP / JSON / UI
 class HttpOut:
     def __init__(self, cfg, live, store, stop, full_cfg=None, cfg_path=None,
-                 pse_fn=None, switches_fn=None, arbol_fn=None):
+                 pse_fn=None, switches_fn=None, arbol_fn=None, cal_fn=None):
         import http.server
         import webui
         self.live, self.store, self.stop = live, store, stop
@@ -288,6 +323,12 @@ class HttpOut:
         self.pse_fn = pse_fn
         self.switches_fn = switches_fn
         self.arbol_fn = arbol_fn
+        # ★ EL MISMO motor de calibracion que atiende las ordenes MQTT. Que el
+        # panel calcule su propia recta por su cuenta es como empiezan a
+        # discrepar dos plataformas: una valida distinto que la otra, o corrige
+        # un caso limite que la otra no. Compartiendo la funcion, calibrar
+        # desde el panel y calibrar desde la sala son literalmente lo mismo.
+        self.cal_fn = cal_fn
         self.full_cfg = full_cfg or {}
         self.cfg_path = cfg_path
         outer = self
@@ -351,6 +392,8 @@ class HttpOut:
                         cookie=f"{webui.COOKIE}={tok}; Path=/; Max-Age={webui.SESSION_TTL}"
                                "; HttpOnly; SameSite=Strict",
                         location="/")
+                if p.startswith("/api/nueva/"):
+                    return self._nueva_post(p)
                 if p.startswith("/api/tank/"):
                     return self._tank_post(p)
                 if p != "/api/config":
@@ -370,6 +413,63 @@ class HttpOut:
                 # systemd (Restart=always) levanta el proceso con el config nuevo.
                 webui.restart_later(1.0)
 
+            def _nueva_post(self, p):
+                """Da de alta una placa sin asignar: le escribe su numero de tanque.
+
+                    POST /api/nueva/<mac>/asignar   {"tank_id": 7}
+
+                Es el paso que antes obligaba a: buscar la MAC en el log del
+                DHCP, editar dnsmasq a mano, reiniciarlo y lanzar un Modbus
+                desde una consola. Con 50 tanques eso no se sostiene.
+
+                El numero lo pone SIEMPRE una persona. Que la placa aparezca
+                sola es automatizable; saber que esta en el tanque 7 y no en el
+                12 no lo es, y una identidad inventada publicaria niveles
+                atribuidos al tanque equivocado -- peor que no publicar nada.
+                """
+                if not self._auth():
+                    return
+                import sensor
+                partes = p.split("/")
+                mac = (partes[3] if len(partes) > 3 else "").lower()
+                try:
+                    n = int(self.headers.get("Content-Length", 0))
+                    body = json.loads(self.rfile.read(n))
+                    nid = int(body["tank_id"])
+                except Exception as e:
+                    return self._send({"error": f"peticion invalida: {e}"}, 400)
+                if not (1 <= nid <= 65535):
+                    return self._send({"error": "tank_id debe ser 1-65535"}, 400)
+
+                # Duplicar un tank_id es el error de campo mas caro de
+                # diagnosticar: dos placas escribiendo sobre el mismo historico.
+                snap = outer.live.snapshot()
+                otro = snap.get(nid)
+                if otro and otro.get("mac", "").lower() != mac:
+                    return self._send({"error": f"el tank_id {nid} ya lo usa otro"
+                                                f" sensor ({otro['mac']})"}, 409)
+                if outer.store.disponible and nid in outer.store.tank_cfg():
+                    return self._send({"error": f"el tank_id {nid} ya existe en el"
+                                                f" registro; elige otro o borralo"},
+                                      409)
+
+                ip = sensor.mac_to_ip(mac)
+                if not ip:
+                    return self._send({"error": f"no se encuentra la IP de {mac}."
+                                                f" ¿Le concedio direccion el DHCP?"},
+                                      409)
+                try:
+                    sensor.set_tank_id(ip, nid)      # HR 5 + HR 9=0xA5 (persiste)
+                except Exception as e:
+                    return self._send({"error": f"no respondio al Modbus: {e}"}, 502)
+
+                # Deja de ser una placa pendiente en cuanto se le escribe. Sin
+                # esto seguiria en la lista hasta que caducara, invitando a
+                # asignarla otra vez.
+                outer.live.olvidar_nueva(mac)
+                outer.store.upsert_tank(nid, mac)
+                self._send({"ok": True, "tank_id": nid, "mac": mac, "ip": ip})
+
             def _tank_post(self, p):
                 """Reconfigura un sensor ATT en remoto por Modbus."""
                 if not self._auth():
@@ -385,6 +485,21 @@ class HttpOut:
                     body = json.loads(self.rfile.read(n))
                 except Exception as e:
                     return self._send({"error": f"json invalido: {e}"}, 400)
+
+                # Calibracion por ORDEN, igual que por MQTT. El panel manda la
+                # misma estructura que la sala de visualizacion y la resuelve
+                # la misma funcion, asi que las dos vias no pueden divergir.
+                if "modo" in body:
+                    if outer.cal_fn is None:
+                        return self._send({"error": "sin motor de calibracion"}, 503)
+                    orden = dict(body)
+                    orden["tank_id"] = tid      # manda la URL, no el cuerpo
+                    res = outer.cal_fn(orden)
+                    ok = res.get("estado") == "aplicada"
+                    return self._send(
+                        res if ok else {"error": res.get("motivo") or "rechazada",
+                                        **res},
+                        200 if ok else 400)
 
                 # Calibracion: vive en la TPU, NO hace falta hablar con el
                 # sensor. Se resuelve antes de exigir su IP, para poder
@@ -445,6 +560,35 @@ class HttpOut:
                 self._send({"ok": True, "ip": ip})
 
             def do_GET(self):
+                """Envoltura de seguridad. Una excepcion aqui dentro cerraba la
+                conexion SIN respuesta: el navegador y `curl` recibian CERO
+                bytes, que es indistinguible de "la pasarela no esta". El
+                2026-08-07 un fallo del NVMe reventaba sqlite dentro de
+                roster() y dejo el panel entero en blanco mientras la
+                telemetria seguia llegando perfectamente.
+
+                Ahora se responde SIEMPRE, con el motivo, y ademas se marca el
+                almacenamiento como caido para que el modo degradado entre al
+                instante en vez de esperar al siguiente sondeo.
+                """
+                try:
+                    return self._get()
+                except Exception as e:
+                    if "database" in str(e).lower() or "disk" in str(e).lower():
+                        try:
+                            outer.store.disponible = False
+                            outer.store.ultimo_error = str(e)
+                        except Exception:
+                            pass
+                    print(f"[http] {self.path}: {e}", file=sys.stderr)
+                    try:
+                        self._send({"error": str(e),
+                                    "aviso": "la pasarela sigue viva; mira"
+                                             " /api/arbol -> almacenamiento"}, 503)
+                    except Exception:
+                        pass
+
+            def _get(self):
                 p = self.path.split("?")[0].rstrip("/")
                 snap = outer.live.snapshot()
                 if p == "/login":
@@ -477,6 +621,11 @@ class HttpOut:
                     # caido debe seguir listado (marcado sin senal).
                     rost = outer.store.roster(snap)
                     self._send({"tanks": rost, "n": len(rost),
+                                # Placas conectadas sin numero de tanque. Van en
+                                # la MISMA respuesta que ya pide el panel cada
+                                # 5 s: una placa nueva aparece sola, sin que
+                                # nadie tenga que ir a buscarla.
+                                "nuevas": outer.live.nuevas_snapshot(),
                                 "ts": int(time.time())})
                 elif p == "/api/pse":
                     # Consumo por puerto del LTC4296 del power switch. Panel de
@@ -548,11 +697,12 @@ class HttpOut:
 
 # ============================================================ fabrica
 def build_outputs(cfg, live, store, stop, pse_fn=None, switches_fn=None,
-                  arbol_fn=None) -> list:
+                  arbol_fn=None, cal_fn=None) -> list:
     outs = []
     if cfg.get("mqtt", {}).get("enabled"):
         try:
-            outs.append(MqttOut(cfg["mqtt"], live, stop, arbol_fn=arbol_fn))
+            outs.append(MqttOut(cfg["mqtt"], live, stop, arbol_fn=arbol_fn,
+                                cal_fn=cal_fn))
         except Exception as e:
             print(f"[mqtt] deshabilitado: {e}", file=sys.stderr)
     if cfg.get("modbus_tcp", {}).get("enabled") or cfg.get("modbus_rtu", {}).get("enabled"):
@@ -562,5 +712,6 @@ def build_outputs(cfg, live, store, stop, pse_fn=None, switches_fn=None,
                             full_cfg=cfg, cfg_path=cfg.get("_path"),
                             pse_fn=pse_fn,
                             switches_fn=switches_fn,
-                            arbol_fn=arbol_fn))
+                            arbol_fn=arbol_fn,
+                            cal_fn=cal_fn))
     return outs

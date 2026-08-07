@@ -270,7 +270,7 @@ PAGE = r"""<!doctype html>
  .tabs{display:flex;gap:4px}
  .tab{padding:7px 14px;border-radius:6px;cursor:pointer;border:1px solid transparent}
  .tab.on{background:var(--acc);color:#fff}
- main{max-width:1000px;margin:20px auto;padding:0 16px}
+ main{max-width:1180px;margin:20px auto;padding:0 16px}
  .card{background:var(--card);border:1px solid var(--line);border-radius:8px;
        padding:16px;margin-bottom:14px}
  .card h2{font-size:14px;margin:0 0 12px;text-transform:uppercase;letter-spacing:.04em;
@@ -278,6 +278,28 @@ PAGE = r"""<!doctype html>
  table{width:100%;border-collapse:collapse}
  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);font-size:14px}
  th{color:var(--mut);font-weight:600;font-size:12px;text-transform:uppercase}
+ /* Una tabla con muchas columnas se estrecha hasta partir CADA celda en dos
+    lineas ("5 h 53" / "min", "en" / "linea") y la fila deja de leerse de un
+    vistazo. Antes que eso, que la tabla se desborde y se desplace dentro de su
+    propia caja: la fila se mantiene entera y el resto de la pagina no se
+    descoloca. */
+ .tw{overflow-x:auto}
+ .tw table{min-width:1080px}
+ /* Doce columnas no caben con el relleno normal: sobraban 49 px y aparecia una
+    barra de desplazamiento. Tres pixeles menos por lado x 24 lados son 72 px,
+    justo lo que hace falta. Preferible a quitar una columna o a encoger la
+    letra, que es lo que de verdad se nota al leer. */
+ .tw th,.tw td{padding-left:7px;padding-right:7px}
+ /* Igual pero SIN ancho minimo: para tablas que caben casi siempre y solo
+    necesitan la valvula de escape. Poner el min-width de .tw a la de switches,
+    que tiene cinco columnas, le forzaria una barra de desplazamiento que no
+    hace ninguna falta. */
+ .tx{overflow-x:auto}
+ .tx th{white-space:nowrap}
+ /* Columnas que NUNCA deben partirse: son valores cortos donde el salto de
+    linea solo estorba. El nombre y la MAC si pueden, que son los largos. */
+ .nw{white-space:nowrap}
+ .tw th{white-space:nowrap}
  .dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px}
  .up{background:var(--ok)} .down{background:var(--bad)}
  .row{display:grid;grid-template-columns:150px 1fr;gap:10px;align-items:center;
@@ -327,14 +349,30 @@ PAGE = r"""<!doctype html>
   <div id="dash">
     <div class="card">
       <h2>TPU <span class="mut" id="tpu_hdr" style="text-transform:none;font-weight:400"></span></h2>
-      <div id="tpu_wrap"><p class="mut">cargando…</p></div>
+      <div id="tpu_wrap" class="tx"><p class="mut">cargando…</p></div>
+    </div>
+
+    <!-- Placas conectadas sin numero de tanque. La tarjeta esta OCULTA cuando
+         no hay ninguna: un hueco permanente que casi siempre dice "ninguna" se
+         deja de mirar, y esto tiene que llamar la atencion el dia que aparece. -->
+    <div class="card" id="nue_card" style="display:none;border-color:#d29922">
+      <h2 style="color:#d29922">Placas nuevas sin asignar
+        <span class="mut" id="nue_hdr" style="text-transform:none;font-weight:400"></span></h2>
+      <p class="mut" style="margin:0 0 12px;font-size:13px">Estas placas est&aacute;n
+        conectadas y transmitiendo, pero <b>no tienen n&uacute;mero de tanque</b>, as&iacute;
+        que todav&iacute;a no se guarda su historial. Ponles el n&uacute;mero del tanque
+        donde est&aacute;n instaladas y quedan de alta al momento: se escribe en su
+        EEPROM y sobrevive a reinicios y a futuras actualizaciones de firmware.</p>
+      <div class="tx" id="nue_wrap"></div>
     </div>
 
     <div class="card">
       <h2>Tanques</h2>
+      <div class="tw">
       <table><thead><tr><th>ID</th><th>Nombre</th><th>MAC</th><th>Valor</th><th>Pulsos</th><th>Temp.</th><th>Errores</th><th>Envío</th>
+        <th>Marcha</th>
         <th>Última conexión</th><th>Estado</th><th></th></tr></thead><tbody id="tb">
-        <tr><td colspan="11" class="mut">cargando…</td></tr></tbody></table>
+        <tr><td colspan="12" class="mut">cargando…</td></tr></tbody></table></div>
     </div>
 
     <div class="card">
@@ -373,28 +411,96 @@ PAGE = r"""<!doctype html>
      align-items:center;justify-content:center;padding:16px">
   <div class="card" style="width:min(94vw,620px);margin:0;max-height:92vh;overflow:auto">
     <h2 style="margin-top:0">Configurar <span id="caltit"></span></h2>
-    <p class="mut" style="margin:0 0 12px;font-size:13px">Dos puntos bastan: la cinta
-      avanza sobre un pi&ntilde;&oacute;n, as&iacute; que los mm por pulso son constantes.
-      <b>Sep&aacute;ralos todo lo que puedas.</b> Un tercer punto sirve para
-      <i>comprobar</i>, no para afinar: si se desv&iacute;a, revisa la mec&aacute;nica.</p>
-    <div class="calpt">
-      <h3>Punto A</h3>
-      <div class="row"><label>Pulsos</label>
-        <span class="calin"><input type="number" id="ca_c">
-        <button id="ca_now" class="mini">Leer</button></span></div>
-      <div class="row"><label>Nivel real</label>
-        <span class="calin"><input type="number" id="ca_l" placeholder="mm"></span></div>
+    <p class="mut" style="margin:0 0 12px;font-size:13px">Pulsos ahora:
+      <b id="calvivo" style="color:#e6edf3;font-size:15px">—</b>
+      <span style="font-size:12px">&nbsp;se actualiza cada 2 s; espera a que se
+      estabilice antes de capturar</span></p>
+
+    <div style="display:flex;gap:8px;margin:0 0 12px">
+      <button id="mg_geo" class="mini" style="flex:1">Por geometr&iacute;a</button>
+      <button id="mg_2p"  class="mini" style="flex:1">Por dos puntos</button>
     </div>
-    <div class="calpt">
-      <h3>Punto B</h3>
-      <div class="row"><label>Pulsos</label>
-        <span class="calin"><input type="number" id="cb_c">
-        <button id="cb_now" class="mini">Leer</button></span></div>
-      <div class="row"><label>Nivel real</label>
-        <span class="calin"><input type="number" id="cb_l" placeholder="mm"></span></div>
+
+    <!-- ===== geometria: no hay que mover producto ======================= -->
+    <div id="pan_geo">
+      <p class="mut" style="margin:0 0 12px;font-size:13px">
+        <b>nivel = altura de referencia &minus; pulsos &times; mm por pulso.</b>
+        Los mm por pulso son una constante mec&aacute;nica del cabezal, y la
+        altura de referencia se mide con cinta. <b>No hay que mover
+        producto</b>, que es lo que hace viable dar de alta 50 tanques.</p>
+      <div class="calpt">
+        <h3>Geometr&iacute;a</h3>
+        <div class="row"><label>mm por pulso</label>
+          <span class="calin"><input type="number" step="0.000001" id="g_mm">
+          <button id="g_ing" class="mini">Inglesa</button>
+          <button id="g_met" class="mini">M&eacute;trica</button></span></div>
+        <p class="mut" style="margin:2px 0 8px;font-size:12px">Cabezal
+          <b>ingl&eacute;s</b> (dos ruedas contadoras, cuadrante en pulgadas):
+          una vuelta = 1 ft = 304,8 mm &divide; 512 pulsos =
+          <b>0,595312</b>. <b>M&eacute;trico</b> (tres ruedas): una vuelta =
+          100 mm &divide; 512 = <b>0,195313</b>.</p>
+        <div class="row"><label>Altura de referencia</label>
+          <span class="calin"><input type="number" id="g_h" placeholder="mm">
+          </span></div>
+        <p class="mut" style="margin:2px 0 8px;font-size:12px">La cota que
+          corresponde al <b>cero del contador</b>: el nivel que habr&iacute;a
+          con 0 pulsos.</p>
+        <div class="row"><label>Al subir los pulsos</label>
+          <select id="g_s">
+            <option value="-1">el nivel BAJA (flotador y cinta)</option>
+            <option value="1">el nivel SUBE</option>
+          </select></div>
+      </div>
+
+      <!-- El acople del encoder al cabezal es nuestro, no de Varec: los mm por
+           pulso de arriba son el valor TEORICO. Esto lo confirma en campo
+           contra el propio contador mec&aacute;nico del medidor. -->
+      <div class="calpt">
+        <h3>Medir los mm por pulso (opcional)</h3>
+        <p class="mut" style="margin:2px 0 8px;font-size:13px">Mueve la cinta
+          con la perilla de comprobaci&oacute;n y compara contra el contador
+          mec&aacute;nico del cabezal. Cuanto m&aacute;s la muevas, mejor.</p>
+        <div class="row"><label>Pulsos antes</label>
+          <span class="calin"><input type="number" id="m_c1">
+          <button id="m_n1" class="mini">Leer</button></span></div>
+        <div class="row"><label>Pulsos despu&eacute;s</label>
+          <span class="calin"><input type="number" id="m_c2">
+          <button id="m_n2" class="mini">Leer</button></span></div>
+        <div class="row"><label>Se movi&oacute;</label>
+          <span class="calin"><input type="number" id="m_mm" placeholder="mm">
+          <button id="m_go" class="mini">Calcular</button></span></div>
+        <p id="m_out" class="mut" style="margin:8px 0 0;font-size:13px"></p>
+      </div>
+      <p id="gcalc" class="mut" style="margin:10px 0"></p>
     </div>
+
+    <!-- ===== dos puntos: lo exacto, si se puede mover el flotador ======= -->
+    <div id="pan_2p" style="display:none">
+      <p class="mut" style="margin:0 0 12px;font-size:13px">Dos niveles reales
+        medidos. Es lo exacto, pero hay que <b>mover el flotador</b> entre
+        ellos. <b>Sep&aacute;ralos todo lo que puedas.</b> Un tercer punto sirve
+        para <i>comprobar</i>, no para afinar: si se desv&iacute;a, revisa la
+        mec&aacute;nica.</p>
+      <div class="calpt">
+        <h3>Punto A</h3>
+        <div class="row"><label>Pulsos</label>
+          <span class="calin"><input type="number" id="ca_c">
+          <button id="ca_now" class="mini">Leer</button></span></div>
+        <div class="row"><label>Nivel real</label>
+          <span class="calin"><input type="number" id="ca_l" placeholder="mm"></span></div>
+      </div>
+      <div class="calpt">
+        <h3>Punto B</h3>
+        <div class="row"><label>Pulsos</label>
+          <span class="calin"><input type="number" id="cb_c">
+          <button id="cb_now" class="mini">Leer</button></span></div>
+        <div class="row"><label>Nivel real</label>
+          <span class="calin"><input type="number" id="cb_l" placeholder="mm"></span></div>
+      </div>
+      <p id="calc" class="mut" style="margin:10px 0"></p>
+    </div>
+
     <div class="row"><label>Unidad</label><input type="text" id="c_u" value="mm"></div>
-    <p id="calc" class="mut" style="margin:10px 0"></p>
 
     <!-- ⚠️ VA DENTRO DEL DIALOGO, no en la fila de la tabla: la tabla se
          redibuja con CADA trama (~1 s) y cualquier control abierto en una fila
@@ -479,6 +585,29 @@ function hace(s){
   if(s < 3600)  return Math.floor(s/60)+' min';
   if(s < 86400) return Math.floor(s/3600)+' h';
   return Math.floor(s/86400)+' d';
+}
+// Marcha con DOS unidades. hace() vale para "hace 3 h", donde la precision
+// sobra, pero un uptime de "3 d" esconde si el equipo lleva tres dias o casi
+// cuatro -- y con 50 tanques lo que se busca en esta columna es justo el que
+// se reinicio anoche.
+function marcha(s){
+  if(s==null) return '<span class="mut">—</span>';
+  const d=Math.floor(s/86400), h=Math.floor(s%86400/3600);
+  const m=Math.floor(s%3600/60);
+  if(d) return d+' d '+h+' h';
+  if(h) return h+' h '+m+' min';
+  if(m) return m+' min';
+  return s+' s';
+}
+// Un equipo que lleva menos de 5 min en marcha acaba de reiniciarse. Se marca
+// en ambar porque en una lista de 50 tanques eso es lo unico que distingue
+// "lleva semanas funcionando" de "se cayo mientras no mirabas".
+const RECIEN = 300;
+function marcaMarcha(s){
+  if(s==null) return '<span class="mut">—</span>';
+  return (s < RECIEN)
+    ? '<span style="color:#d29922" title="reiniciado hace poco">'+marcha(s)+'</span>'
+    : marcha(s);
 }
 
 // Un Varec mide nivel de liquido: se mueve en minutos, no en
@@ -590,19 +719,20 @@ async function tanks(){
            style="width:80px"></td>
       <td>${t.name||''}</td>
       <td class="mut" style="font-family:ui-monospace,monospace;font-size:12px">${t.mac||'—'}</td>
-      <td><b>${t.value!=null? t.value.toFixed(2) : '—'}</b> <span class="mut">${t.unit||''}</span></td>
-      <td>${t.count??0}</td>
-      <td>${ambiente(t)}</td>
+      <td class="nw"><b>${t.value!=null? t.value.toFixed(2) : '—'}</b> <span class="mut">${t.unit||''}</span></td>
+      <td class="nw">${t.count??0}</td>
+      <td class="nw">${ambiente(t)}</td>
       <td>${t.errors??0}</td>
       <td>${selPeriodo(t)}</td>
-      <td>${fechaHora(t.ts)}<br><span class="mut" style="font-size:11px">${t.age_s!=null? 'hace '+hace(t.age_s) : ''}</span></td>
-      <td><span class="dot ${t.online?'up':'down'}"></span>${t.online?'en línea':'sin señal'}</td>
+      <td class="nw">${t.online ? marcaMarcha(t.uptime_s) : '<span class="mut">—</span>'}</td>
+      <td class="nw">${fechaHora(t.ts)}<br><span class="mut" style="font-size:11px">${t.age_s!=null? 'hace '+hace(t.age_s) : ''}</span></td>
+      <td class="nw"><span class="dot ${t.online?'up':'down'}"></span>${t.online?'en línea':'sin señal'}</td>
       <td style="white-space:nowrap"><button class="sid" data-id="${t.tank_id}"
            style="padding:5px 10px;font-size:13px" disabled>Guardar</button>
         <button class="cal" data-id="${t.tank_id}"
            style="padding:5px 10px;font-size:13px;background:#2b3846">Config</button></td>
       </tr>`).join('') :
-      '<tr><td colspan="11" class="mut">ningún tanque dado de alta todavía</td></tr>';
+      '<tr><td colspan="12" class="mut">ningún tanque dado de alta todavía</td></tr>';
     // El boton solo se activa si el valor cambio: evita escrituras accidentales
     // a la EEPROM del sensor.
     document.querySelectorAll('.tid').forEach(x=>x.oninput=()=>{
@@ -613,7 +743,89 @@ async function tanks(){
     CALT = d.tanks;
     document.querySelectorAll('.cal').forEach(b=>b.onclick=()=>calOpen(+b.dataset.id));
     document.querySelectorAll('.pms').forEach(x=>x.onchange=()=>setPeriodo(x));
+    pintaNuevas(d.nuevas||[]);
   }catch(e){ $('#hdr').textContent='sin conexión'; }
+}
+
+// ---- placas nuevas sin asignar --------------------------------------
+// Salen de la MISMA respuesta de /api/tanks que ya se pide cada 5 s, asi que
+// una placa recien conectada aparece sola sin pedir nada nuevo.
+// ⚠️ NO se redibuja la tabla en cada refresco. Es la misma trampa que obligo a
+// sacar la calibracion a un dialogo: el panel se refresca cada 5 s, y volver a
+// escribir el innerHTML DESTRUYE el <input> -- con el numero de tanque que el
+// operario estuviera tecleando dentro. Mientras las placas sean las mismas se
+// actualizan SOLO las celdas volatiles, celda a celda, y no se toca el campo.
+let NUE_CLAVE = '';
+function pintaNuevas(ns){
+  const card = $('#nue_card');
+  if(!card) return;
+  if(!ns.length){ card.style.display='none'; NUE_CLAVE=''; return; }
+  card.style.display='';
+  $('#nue_hdr').textContent = ns.length+' placa'+(ns.length==1?'':'s')+' esperando número';
+
+  const celdas = n => ({
+    c: String(n.count??0),
+    t: (n.temp_c!=null ? n.temp_c.toFixed(1)+' °C' : '—'),
+    m: marcaMarcha(n.uptime_s),
+    v: (n.online ? '<span class="dot up"></span>ahora'
+                 : '<span class="dot down"></span>hace '+hace(n.age_s)),
+  });
+
+  const clave = ns.map(n=>n.mac).join(',');
+  if(clave === NUE_CLAVE){
+    ns.forEach(n=>{
+      const c = celdas(n);
+      for(const k in c){
+        const e = document.getElementById('nue_'+k+'_'+n.mac);
+        if(e && e.innerHTML !== c[k]) e.innerHTML = c[k];
+      }
+    });
+    return;                 // el <input> y su contenido quedan intactos
+  }
+
+  // Cambio la lista de placas: toca redibujar. Se conserva lo ya tecleado, que
+  // si no se perderia al aparecer o marcharse OTRA placa distinta.
+  const escrito = {};
+  document.querySelectorAll('.nid').forEach(i=>{ if(i.value) escrito[i.dataset.mac]=i.value; });
+  NUE_CLAVE = clave;
+  $('#nue_wrap').innerHTML = `<table><thead><tr>
+      <th>MAC</th><th>Pulsos</th><th>Temp.</th><th>Marcha</th><th>Visto</th>
+      <th>N&uacute;mero de tanque</th></tr></thead><tbody>`
+    + ns.map(n=>{ const c = celdas(n); return `<tr>
+      <td class="nw" style="font-family:ui-monospace,monospace;font-size:12px">${n.mac}</td>
+      <td class="nw" id="nue_c_${n.mac}">${c.c}</td>
+      <td class="nw" id="nue_t_${n.mac}">${c.t}</td>
+      <td class="nw" id="nue_m_${n.mac}">${c.m}</td>
+      <td class="nw" id="nue_v_${n.mac}">${c.v}</td>
+      <td class="nw"><span class="calin">
+        <input type="number" class="nid" data-mac="${n.mac}" min="1" max="65535"
+               placeholder="p. ej. 7" style="width:110px"
+               value="${escrito[n.mac]||''}">
+        <button class="nasig mini" data-mac="${n.mac}">Asignar</button></span></td>
+    </tr>`; }).join('')
+    + `</tbody></table><p id="nue_msg" class="mut" style="margin:10px 0 0"></p>`;
+  document.querySelectorAll('.nasig').forEach(b=>b.onclick=()=>asignarNueva(b));
+}
+
+async function asignarNueva(btn){
+  const mac = btn.dataset.mac;
+  const inp = document.querySelector('.nid[data-mac="'+mac+'"]');
+  const msg = $('#nue_msg');
+  const id = parseInt(inp.value, 10);
+  if(!(id>=1 && id<=65535)){ msg.textContent='Escribe un número de tanque entre 1 y 65535.'; return; }
+  // Se desactiva mientras va: escribir dos veces la EEPROM por un doble clic
+  // no rompe nada, pero deja dos peticiones Modbus compitiendo por la placa.
+  btn.disabled = true; msg.textContent = 'Escribiendo en la placa...';
+  try{
+    const r = await fetch('/api/nueva/'+mac+'/asignar', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify({tank_id:id})});
+    const d = await r.json();
+    if(r.ok){ msg.innerHTML = '<span style="color:#3fb950">Placa '+mac+' asignada al tanque '
+        + d.tank_id+' ('+d.ip+'). Aparecerá en la tabla de tanques enseguida.</span>';
+      tanks();
+    } else { msg.innerHTML = '<span style="color:#ffb4bd">'+(d.error||'error')+'</span>';
+             btn.disabled = false; }
+  }catch(e){ msg.textContent = 'No se pudo asignar: '+e; btn.disabled = false; }
 }
 
 // Acciones sobre un sensor. Son EXPLICITAS ("apagar"/"encender") y no un
@@ -643,7 +855,70 @@ async function accion(v){
 let CALT = [], CALID = null;
 const $c = id => document.getElementById(id);
 
+// mm de cinta por pulso del encoder, segun la escala del cuadrante del Varec
+// 2500 (manual IOM001 rev I, p. 56-57) y los 512 pulsos por vuelta del
+// encoder en cuadratura x4. El manual NO publica el perimetro del pinon, pero
+// la escala del cuadrante cuelga del mismo eje y es equivalente.
+const MMP_INGLESA = 304.8/512;   // 1 ft por vuelta
+const MMP_METRICA = 100.0/512;   // 100 mm por vuelta
+
+// Que formulario esta a la vista. Por defecto geometria: es el unico que no
+// obliga a mover producto, y con 50 tanques es el que se va a usar siempre.
+let CALMODO = 'geo';
+function calModo(m){
+  CALMODO = m;
+  $c('pan_geo').style.display = (m==='geo') ? '' : 'none';
+  $c('pan_2p').style.display  = (m==='geo') ? 'none' : '';
+  $c('mg_geo').style.background = (m==='geo') ? '' : '#2b3846';
+  $c('mg_2p').style.background  = (m==='geo') ? '#2b3846' : '';
+  calCalc();
+}
+
+function geoCalc(){
+  const mm=+$c('g_mm').value, h=+$c('g_h').value, s=+$c('g_s').value;
+  const el=$c('gcalc');
+  if($c('g_mm').value==='' || $c('g_h').value===''){
+    el.textContent='Introduce los mm por pulso y la altura de referencia.'; return null; }
+  if(!(mm>0)){ el.innerHTML='<span style="color:#ffb4bd">Los mm por pulso deben ser '
+    + 'mayores que cero. El sentido se elige abajo.</span>'; return null; }
+  const scale=s*mm, offset=h, u=$c('c_u').value;
+  el.innerHTML = 'escala <b>'+scale.toFixed(6)+'</b> '+u+'/pulso &middot; '
+    + 'offset <b>'+offset.toFixed(2)+'</b><br>'
+    + 'con 0 pulsos el nivel ser&aacute; <b>'+offset.toFixed(1)+' '+u+'</b>'
+    + ((h<300||h>30000) ? '<br><span style="color:#ffb4bd">Fuera del alcance de un '
+      + '2500 (0,3 a 27,4 m). &iquest;Est&aacute; en mil&iacute;metros?</span>' : '');
+  return {mm_por_pulso:mm, altura_referencia:h, sentido:s};
+}
+
+// Medida de campo de los mm por pulso, contra el contador mecanico del propio
+// cabezal. El acople del encoder es nuestro, no de Varec: el valor teorico es
+// un punto de partida, esto es la comprobacion.
+function geoMedir(){
+  const c1=+$c('m_c1').value, c2=+$c('m_c2').value, mm=+$c('m_mm').value;
+  const el=$c('m_out');
+  if(['m_c1','m_c2','m_mm'].some(k=>$c(k).value==='')){
+    el.textContent='Faltan las dos lecturas de pulsos y el desplazamiento.'; return; }
+  const dp=c2-c1;
+  if(dp===0){ el.innerHTML='<span style="color:#ffb4bd">Los pulsos no cambiaron.</span>'; return; }
+  const v=Math.abs(mm/dp);
+  $c('g_mm').value = v.toFixed(6);
+  // El signo tambien sale de la medida: si al aumentar los pulsos el contador
+  // marco menos nivel, el sentido es -1. Se deduce, no se pregunta otra vez.
+  const s = (dp>0 && mm<0) || (dp<0 && mm>0) ? -1 : 1;
+  $c('g_s').value = String(s);
+  const teo = Math.abs(v-MMP_INGLESA)<Math.abs(v-MMP_METRICA) ? MMP_INGLESA : MMP_METRICA;
+  const desv = 100*Math.abs(v-teo)/teo;
+  el.innerHTML = '<b>'+v.toFixed(6)+'</b> mm/pulso en '+Math.abs(dp)+' pulsos &middot; '
+    + 'sentido '+(s<0?'baja':'sube')+'<br>'
+    + (desv<5 ? 'Coincide con el te&oacute;rico ('+teo.toFixed(6)+', '+desv.toFixed(1)+'%).'
+              : '<span style="color:#ffb4bd">Se aparta un '+desv.toFixed(1)+'% del te&oacute;rico '
+                + 'm&aacute;s cercano ('+teo.toFixed(6)+'): el acople del encoder lleva '
+                + 'reducci&oacute;n, o el desplazamiento se ley&oacute; mal.</span>');
+  geoCalc();
+}
+
 function calCalc(){
+  if(CALMODO==='geo') return geoCalc();
   const ac=+$c('ca_c').value, al=+$c('ca_l').value;
   const bc=+$c('cb_c').value, bl=+$c('cb_l').value;
   const el=$c('calc');
@@ -662,33 +937,99 @@ function calOpen(id){
   CALID = id;
   const t = CALT.find(x=>x.tank_id===id) || {};
   $c('caltit').textContent = 'tanque '+id + (t.name? ' - '+t.name : '');
-  ['ca_c','ca_l','cb_c','cb_l'].forEach(k=>$c(k).value='');
+  ['ca_c','ca_l','cb_c','cb_l','m_c1','m_c2','m_mm'].forEach(k=>$c(k).value='');
+  $c('m_out').textContent='';
   $c('c_u').value = t.unit || 'mm';
+  // Se rellena con la calibracion VIGENTE leida como geometria, no con un
+  // formulario en blanco: lo normal al reabrir es retocar la altura, y volver
+  // a teclear los mm por pulso solo invita a equivocarse. Sin calibrar, el
+  // teorico del cabezal ingles, que es el que hay instalado.
+  const cal = (t.scale!=null && +t.scale!==1);
+  $c('g_mm').value = cal ? Math.abs(+t.scale).toFixed(6) : MMP_INGLESA.toFixed(6);
+  $c('g_h').value  = cal ? (+t.offset) : '';
+  $c('g_s').value  = (cal && +t.scale>0) ? '1' : '-1';
   $c('calm').textContent = (t.scale!=null)
     ? 'Actual: escala '+(+t.scale).toFixed(6)+' / offset '+(+t.offset).toFixed(2)
     : 'Sin calibrar: el valor mostrado son los pulsos crudos.';
-  calCalc();
+  calModo('geo');
   $c('calbg').style.display='flex';
+  calVivoArrancar();
 }
-function calNow(campo){
-  const t = CALT.find(x=>x.tank_id===CALID);
-  if(!t || t.count==null){ $c('calm').textContent='Ese sensor no reporta pulsos ahora.'; return; }
-  $c(campo).value = t.count; calCalc();
+async function calNow(campo){
+  // ⚠️ SE PIDE EL DATO AHORA, no se usa la foto en cache. Mientras el modal
+  // esta abierto el refresco general esta PARADO a proposito (para que la
+  // tabla no se redibuje bajo un control abierto), asi que CALT se queda
+  // congelado en el instante en que se abrio. Leyendo de ahi, "Leer" devolvia
+  // siempre la misma cifra por mucho que la cinta se moviera -- y el punto B
+  // salia identico al A, que es justo lo que invalida la recta.
+  try{
+    const r = await fetch('/api/tanks'); const d = await r.json();
+    const t = (d.tanks||[]).find(x=>x.tank_id===CALID);
+    if(!t || t.count==null){ $c('calm').textContent='Ese sensor no reporta pulsos ahora.'; return; }
+    $c(campo).value = t.count; $c('calm').textContent=''; calCalc();
+  }catch(e){ $c('calm').textContent='No pude leer los pulsos: '+e; }
 }
-['ca_c','ca_l','cb_c','cb_l','c_u'].forEach(id=>{ const e=$c(id); if(e) e.oninput=calCalc; });
+
+// Lectura EN VIVO dentro del modal. El refresco general esta parado, asi que
+// este es el unico sitio donde se ve moverse la cinta -- y hace falta para
+// saber cuando se ha estabilizado antes de capturar un punto.
+let CALVIVO = null;
+function calVivoArrancar(){
+  const pinta = async () => {
+    if(!$c('calbg') || $c('calbg').style.display!=='flex') return;
+    try{
+      const r = await fetch('/api/tanks'); const d = await r.json();
+      const t = (d.tanks||[]).find(x=>x.tank_id===CALID);
+      const e = $c('calvivo');
+      if(e) e.textContent = (t && t.count!=null) ? t.count : '—';
+    }catch(e){}
+  };
+  pinta();
+  if(CALVIVO) clearInterval(CALVIVO);
+  CALVIVO = setInterval(pinta, 2000);
+}
+function calVivoParar(){ if(CALVIVO){ clearInterval(CALVIVO); CALVIVO=null; } }
+['ca_c','ca_l','cb_c','cb_l','c_u','g_mm','g_h'].forEach(id=>{
+  const e=$c(id); if(e) e.oninput=calCalc; });
+if($c('g_s')) $c('g_s').onchange=calCalc;
 if($c('ca_now')) $c('ca_now').onclick=()=>calNow('ca_c');
 if($c('cb_now')) $c('cb_now').onclick=()=>calNow('cb_c');
+if($c('m_n1')) $c('m_n1').onclick=()=>calNow('m_c1');
+if($c('m_n2')) $c('m_n2').onclick=()=>calNow('m_c2');
+if($c('m_go')) $c('m_go').onclick=geoMedir;
+if($c('mg_geo')) $c('mg_geo').onclick=()=>calModo('geo');
+if($c('mg_2p'))  $c('mg_2p').onclick =()=>calModo('2p');
+if($c('g_ing')) $c('g_ing').onclick=()=>{ $c('g_mm').value=MMP_INGLESA.toFixed(6); calCalc(); };
+if($c('g_met')) $c('g_met').onclick=()=>{ $c('g_mm').value=MMP_METRICA.toFixed(6); calCalc(); };
 if($c('led_on'))  $c('led_on').onclick  = ()=>accion('ledson');
 if($c('led_off')) $c('led_off').onclick = ()=>accion('ledsoff');
-if($c('calclose')) $c('calclose').onclick=()=>{ $c('calbg').style.display='none'; };
-if($c('calbg')) $c('calbg').onclick=e=>{ if(e.target===$c('calbg')) $c('calbg').style.display='none'; };
+if($c('calclose')) $c('calclose').onclick=()=>{ $c('calbg').style.display='none'; calVivoParar(); };
+if($c('calbg')) $c('calbg').onclick=e=>{ if(e.target===$c('calbg')){ $c('calbg').style.display='none'; calVivoParar(); } };
 if($c('calsave')) $c('calsave').onclick=async()=>{
   const r=calCalc(); if(!r) return;
+  // ⚠️ Se manda la ORDEN, no la recta ya resuelta. Es la misma estructura que
+  // acepta el topico MQTT de calibracion y la resuelve la MISMA funcion en la
+  // TPU. Si el panel calculara y guardara por su cuenta, panel y sala de
+  // visualizacion serian dos implementaciones de la misma regla, y tarde o
+  // temprano una validaria algo que la otra no.
+  const orden = (CALMODO==='geo')
+    ? {modo:'geometrica', mm_por_pulso:r.mm_por_pulso,
+       altura_referencia:r.altura_referencia, sentido:r.sentido,
+       unidad:$c('c_u').value}
+    : {modo:'dos_puntos', unidad:$c('c_u').value,
+       punto_a:{pulsos:+$c('ca_c').value, nivel:+$c('ca_l').value},
+       punto_b:{pulsos:+$c('cb_c').value, nivel:+$c('cb_l').value}};
   const res=await fetch('/api/tank/'+CALID+'/config',{method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({scale:r.scale, offset:r.offset, unit:$c('c_u').value})});
+    body:JSON.stringify(orden)});
   const d=await res.json();
-  if(res.ok){ $c('calbg').style.display='none'; tanks(); }
+  if(res.ok){
+    // Con aviso NO se cierra: guardar y desaparecer dejaria el aviso sin leer,
+    // y avisar de algo que nadie ve es lo mismo que no avisar.
+    if(d.aviso){ $c('calm').innerHTML='<span style="color:#ffd479">Guardado, pero: '
+      + d.aviso+'</span>'; return; }
+    $c('calbg').style.display='none'; calVivoParar(); tanks();
+  }
   else $c('calm').textContent='No se guardo: '+(d.error||'error');
 };
 
@@ -765,12 +1106,15 @@ async function tpu(){
       : (al.disponible === true ? '<span style="color:#3fb950">guardando</span>'
                                 : '<span class="mut">—</span>');
     $('#tpu_wrap').innerHTML = `<table><thead><tr>
+        <th>Marcha</th>
         <th>SoC</th><th>NVMe</th><th>RP1</th><th>Ventilador</th><th>Tension</th>
         <th>Ambiente</th><th>eth0 (planta)</th><th>Historico</th></tr></thead><tbody><tr>
-        <td${cal(t.soc_c)}>${v(t.soc_c,' °C')}</td>
-        <td${cal(t.nvme_c)}>${v(t.nvme_c,' °C')}</td>
-        <td${cal(t.rp1_c)}>${v(t.rp1_c,' °C')}</td>
-        <td>${v(t.ventilador_rpm,' rpm')}</td>
+        <td class="nw">${marcaMarcha(t.uptime_s)}<br><span class="mut" style="font-size:11px"
+             title="marcha del proceso de la pasarela">pasarela ${marcha(t.pasarela_s)}</span></td>
+        <td class="nw"${cal(t.soc_c)}>${v(t.soc_c,' °C')}</td>
+        <td class="nw"${cal(t.nvme_c)}>${v(t.nvme_c,' °C')}</td>
+        <td class="nw"${cal(t.rp1_c)}>${v(t.rp1_c,' °C')}</td>
+        <td class="nw">${v(t.ventilador_rpm,' rpm')}</td>
         <td>${t.subtension === true
               ? '<span style="color:#e5534b;font-weight:600">SUBTENSION</span>'
               : (t.subtension === false ? '<span style="color:#3fb950">OK</span>'

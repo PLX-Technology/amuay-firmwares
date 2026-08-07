@@ -620,6 +620,150 @@ ARBOL_ESQUEMA = 1
 ALIAS = {}
 
 
+# Milimetros de cinta por pulso del encoder, para un cabezal Varec 2500 en
+# configuracion INGLESA (dos ruedas contadoras y cuadrante de pulgadas/16avos).
+#
+# De donde sale: el manual del 2500 (IOM001, rev I) NO publica el perimetro del
+# piñon ni el paso de la cinta perforada -- se busco entero. Pero si publica la
+# escala del cuadrante, que cuelga del mismo eje (p. 56-57):
+#
+#   inglesa : rueda derecha = 1 ft, cuadrante = 12 pulgadas -> 304,8 mm/vuelta
+#   metrica : rueda derecha = 0,1 m, cuadrante = 10x10 mm   -> 100,0 mm/vuelta
+#
+# y el encoder da 512 cuentas por vuelta (128 PPR en cuadratura x4):
+#
+#   inglesa : 304,8 / 512 = 0,595312 mm/pulso
+#   metrica : 100,0 / 512 = 0,195313 mm/pulso
+#
+# ⚠️ Esto vale SI el encoder va al eje del cuadrante. Es un acople mecanico
+# nuestro, no de Varec, asi que el valor se ofrece como DEFECTO, no como
+# verdad: el formulario deja escribirlo, y la forma honesta de confirmarlo en
+# campo es mover la cinta con la perilla de comprobacion y dividir el
+# desplazamiento leido en el contador mecanico entre los pulsos contados.
+MM_POR_PULSO_INGLESA = 304.8 / 512.0
+MM_POR_PULSO_METRICA = 100.0 / 512.0
+
+
+def aplicar_calibracion(store, live, orden: dict) -> dict:
+    """Aplica una calibracion y devuelve el resultado.
+
+    Dos formas de decir la misma recta `nivel = pulsos*escala + offset`:
+
+      modo "dos_puntos" (por defecto) -- dos parejas (pulsos, nivel) medidas.
+          Es lo exacto, pero exige MOVER el flotador entre dos niveles
+          conocidos, y en un tanque en servicio eso significa mover producto.
+
+      modo "geometrica" -- `mm_por_pulso` (constante mecanica del cabezal, ver
+          MM_POR_PULSO_INGLESA) y `altura_referencia` (la cota del cero del
+          contador, medible con cinta metrica). De ahi:
+              escala = sentido * mm_por_pulso      (sentido -1 por defecto)
+              offset = altura_referencia
+          que es exactamente `nivel = altura_referencia - pulsos*mm_por_pulso`.
+          No hay que mover nada, y por eso es la unica via practica para dar de
+          alta 50 tanques.
+
+    No se guarda `mm_por_pulso` ni `altura_referencia` aparte: son |escala| y
+    offset, se recuperan tal cual de la recta. Una copia mas seria una copia
+    mas que puede discrepar.
+
+    ★ LA TPU ES LA UNICA QUE ESCRIBE. La sala de visualizacion manda la orden,
+    esta funcion la aplica y el arbol retenido republica la calibracion
+    vigente. Asi no hay dos copias del dato que puedan discrepar: la sala
+    muestra lo que la TPU confirma, y si se reinicia, o hay dos salas, o
+    alguien calibra desde el panel, todas ven lo mismo sin sincronizar nada.
+
+    Devuelve SIEMPRE un dict con `estado` y, si se rechaza, el `motivo`. Sin
+    respuesta explicita el emisor no puede distinguir "no llego" de "llego y
+    fallo", que son dos averias muy distintas.
+    """
+    res = {"id": orden.get("id"), "ts": now()}
+    modo = (orden.get("modo") or "dos_puntos").strip().lower()
+    res["modo"] = modo
+    try:
+        tid = int(orden["tank_id"])
+    except (KeyError, TypeError, ValueError) as e:
+        res.update(estado="rechazada", motivo="orden mal formada: %s" % e)
+        return res
+    res["tank_id"] = tid
+
+    if not store.disponible:
+        # ⚠️ Sin base, set_cal() no guarda nada. Aceptar la orden aqui seria
+        # decirle a la sala que quedo calibrado cuando se perderia al reiniciar.
+        res.update(estado="rechazada",
+                   motivo="sin almacenamiento: la calibracion no se podria guardar")
+        return res
+
+    aviso = None
+    if modo == "geometrica":
+        try:
+            mmp = float(orden["mm_por_pulso"])
+            href = float(orden["altura_referencia"])
+        except (KeyError, TypeError, ValueError) as e:
+            res.update(estado="rechazada",
+                       motivo="orden mal formada: faltan mm_por_pulso y/o "
+                              "altura_referencia (%s)" % e)
+            return res
+        if mmp <= 0:
+            res.update(estado="rechazada",
+                       motivo="mm_por_pulso debe ser > 0; el sentido va aparte")
+            return res
+        # `sentido` es hacia donde va el NIVEL cuando los pulsos suben. Por
+        # defecto -1, que es la geometria de flotador y cinta: sube el nivel,
+        # el flotador sube, la cinta se recoge y la cuenta baja. Se admite
+        # numero o palabra porque la sala manda JSON escrito por humanos.
+        s = orden.get("sentido", -1)
+        if isinstance(s, str):
+            s = {"baja": -1, "bajar": -1, "sube": 1, "subir": 1}.get(s.strip().lower())
+            if s is None:
+                res.update(estado="rechazada",
+                           motivo="sentido debe ser 'baja'/'sube' o -1/+1")
+                return res
+        s = -1 if float(s) < 0 else 1
+        escala = s * mmp
+        offset = href
+        # Un cabezal 2500 mide como mucho 60 ft (18,2 m), o 90 ft (27,4 m) en
+        # rango extendido; y un tanque de menos de 30 cm no existe. Fuera de
+        # esa horquilla casi siempre es la unidad equivocada -- metros donde se
+        # esperaban milimetros, que da un nivel 1000 veces menor y creible.
+        # No se rechaza (la unidad la elige el usuario) pero se dice.
+        if not (300 <= href <= 30000):
+            aviso = ("altura_referencia = %g: fuera del rango util de un 2500 "
+                     "(0,3 a 27,4 m). ¿Esta en las unidades correctas?" % href)
+    else:
+        try:
+            a, b = orden["punto_a"], orden["punto_b"]
+            ca, la = float(a["pulsos"]), float(a["nivel"])
+            cb, lb = float(b["pulsos"]), float(b["nivel"])
+        except (KeyError, TypeError, ValueError) as e:
+            res.update(estado="rechazada", motivo="orden mal formada: %s" % e)
+            return res
+
+        if cb == ca:
+            res.update(estado="rechazada",
+                       motivo="los dos puntos tienen los mismos pulsos: no definen una recta")
+            return res
+
+        escala = (lb - la) / (cb - ca)
+        offset = la - ca * escala
+        if escala == 0.0:
+            res.update(estado="rechazada",
+                       motivo="los dos puntos dan el mismo nivel: la recta seria plana")
+            return res
+
+        # Separacion corta = error amplificado. No se rechaza (puede ser
+        # deliberado en un tanque pequeño) pero se dice.
+        if abs(cb - ca) < 100:
+            aviso = ("puntos muy juntos (%d pulsos): el error de medida se "
+                     "amplifica; separalos todo lo que puedas" % abs(cb - ca))
+
+    store.set_cal(tid, escala, offset, orden.get("unidad") or "mm")
+    res.update(estado="aplicada", escala=escala, offset=offset,
+               unidad=orden.get("unidad") or "mm")
+    if aviso:
+        res["aviso"] = aviso
+    return res
+
+
 def _nodo_tanque(rec: dict) -> dict:
     """Hoja del arbol: una ATT sobre su tanque."""
     avisos = []
@@ -632,6 +776,11 @@ def _nodo_tanque(rec: dict) -> dict:
     if rec.get("errors"):
         avisos.append("errores_encoder")
     tid = "tanque:%s" % rec.get("tank_id")
+    # Recta vigente. Escala 1 y offset 0 es la identidad: el "nivel" que se
+    # publica son PULSOS, no milimetros.
+    esc = float(rec.get("scale") or 1.0)
+    off = float(rec.get("offset") or 0.0)
+    calibrado = not (esc == 1.0 and off == 0.0)
     return {
         "tipo": "tanque",
         "id": tid,
@@ -649,6 +798,34 @@ def _nodo_tanque(rec: dict) -> dict:
         "errores": rec.get("errors"),
         "temp_c": rec.get("temp_c"),
         "humi_rh": rec.get("humi_rh"),
+        # ★ CALIBRACION VIGENTE, para que la sala de visualizacion no guarde
+        # copia propia: muestra lo que la TPU confirma. Con una sola copia del
+        # dato, dos plataformas no pueden discrepar -- no hay nada que
+        # sincronizar porque no hay dos versiones.
+        "calibracion": {
+            "escala": rec.get("scale"),
+            "offset": rec.get("offset"),
+            "unidad": rec.get("unit"),
+            # Escala 1 y offset 0 es la recta identidad: el nivel que se
+            # publica son PULSOS, no milimetros. Se dice explicitamente para
+            # que nadie lea una cifra cruda creyendo que esta calibrada.
+            "calibrado": calibrado,
+            # La misma recta leida en terminos fisicos, que es como se calibra
+            # en campo: cuanto avanza la cinta por pulso, y a que cota esta el
+            # cero del contador. No es un dato aparte -- se deriva de la recta,
+            # asi que no puede desincronizarse de ella.
+            #
+            # ⚠️ SIN CALIBRAR VAN A null, NO a los valores de la identidad. La
+            # recta identidad daria mm_por_pulso=1,0 y altura_referencia=0,0,
+            # que es cierto matematicamente y una trampa en la practica: 1,0
+            # mm/pulso tiene toda la pinta de una geometria real, y quien pinte
+            # el campo sin mirar `calibrado` enseñaria un numero inventado. Un
+            # null no se puede confundir con una medida.
+            "mm_por_pulso": abs(esc) if calibrado else None,
+            "altura_referencia": off if calibrado else None,
+            # -1: suben los pulsos, baja el nivel (flotador y cinta).
+            "sentido": (-1 if esc < 0 else 1) if calibrado else None,
+        },
         "avisos": avisos,
         "puertos": [],                      # una ATT es hoja: nunca tiene hijos
     }
@@ -773,6 +950,25 @@ def _hwmon(nombre: str, fichero: str = "temp1_input"):
     return None
 
 
+def _uptime_maquina():
+    """Segundos que lleva encendida la TPU, no el proceso.
+
+    De /proc/uptime y no de `time.time() - arranque del proceso`: son cosas
+    distintas y la que interesa aqui es la de la maquina. Un despliegue
+    reinicia el proceso; solo un corte de luz o un reinicio del sistema pone
+    esta a cero, y eso es justo lo que hay que poder ver despues.
+
+    Es tambien inmune al reloj: /proc/uptime lo lleva el nucleo, asi que un
+    salto de NTP no lo altera. Con `time.time()` un ajuste de hora daria una
+    marcha falsa, o negativa.
+    """
+    try:
+        with open("/proc/uptime") as f:
+            return int(float(f.read().split()[0]))
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 def _red_iface(nombre: str) -> dict:
     """Direccion IPv4, MAC y estado de enlace de una interfaz.
 
@@ -831,6 +1027,17 @@ def tpu_salud() -> dict:
     # alimentacion -- confundirlos fue un error mio al montar esto.
     sub = _hwmon("rpi_volt", "in0_lcrit_alarm")
     return {
+        # ⚠️ DOS marchas distintas, y confundirlas despista de verdad:
+        #   `uptime_s`  = la MAQUINA. Se reinicia con un corte de luz o un
+        #                 reinicio del sistema. Es el que delata que la TPU se
+        #                 fue y volvio sin que nadie se enterara.
+        #   `pasarela_s`= el PROCESO. Se reinicia ademas con cada despliegue y
+        #                 cada vez que systemd lo levanta tras un fallo.
+        # Que el proceso lleve minutos y la maquina dias es normal (un
+        # despliegue). Al reves es imposible; y que los dos se pongan a cero a
+        # la vez es un corte de alimentacion.
+        "uptime_s": _uptime_maquina(),
+        "pasarela_s": int(time.time() - ARRANQUE),
         "soc_c": c(_hwmon("cpu_thermal")),
         "nvme_c": c(_hwmon("nvme")),
         "rp1_c": c(_hwmon("rp1_adc")),
@@ -845,7 +1052,8 @@ def tpu_salud() -> dict:
     }
 
 
-def arbol(equipos: list, tanques: dict, almacen: dict = None) -> dict:
+def arbol(equipos: list, tanques: dict, almacen: dict = None,
+          nuevas: list = None) -> dict:
     """Documento JERARQUICO de toda la instalacion, para publicar por MQTT.
 
     TPU -> power switch -> field switches encadenados -> tanques.
@@ -909,7 +1117,26 @@ def arbol(equipos: list, tanques: dict, almacen: dict = None) -> dict:
             "tanques": n_tanques,
             "tanques_en_linea": en_linea,
             "tanques_sin_ubicar": len(huerfanos),
+            "placas_sin_asignar": len(nuevas or []),
         },
+        # ★ Placas conectadas y transmitiendo pero SIN numero de tanque. No son
+        # tanques -- por eso van fuera de la jerarquia y no cuentan en
+        # `tanques` -- pero se publican para que la sala pueda darlas de alta
+        # igual que el panel. Una placa nueva que no se ve es una placa que
+        # alguien va a ir a revisar al campo sin necesidad.
+        "sin_asignar": [{
+            "tipo": "placa_sin_asignar",
+            "mac": r.get("mac"),
+            "vivo": bool(r.get("online")),
+            "edad_s": r.get("age_s"),
+            "uptime_s": r.get("uptime_s"),
+            "pulsos": r.get("count"),
+            "errores": r.get("errors"),
+            "temp_c": r.get("temp_c"),
+            "humi_rh": r.get("humi_rh"),
+            "ver": r.get("ver"),
+            "avisos": ["sin_identidad"],
+        } for r in (nuevas or [])],
         "raiz": {
             "tipo": "tpu",
             "id": "tpu:%s" % socket.gethostname(),
@@ -1187,14 +1414,47 @@ class Store:
         return True
 
     def _reintentar(self):
-        """Reintenta abrir la base cada 30 s: si el disco vuelve, el historico
-        se reanuda solo sin reiniciar el servicio."""
+        """Vigila el almacenamiento y lo recupera solo.
+
+        DOS trabajos, y el segundo faltaba:
+
+          - si esta CAIDO, reintenta abrirlo (cada 30 s). Si el disco vuelve,
+            el historico se reanuda sin reiniciar el servicio.
+
+          - si esta DISPONIBLE, comprueba cada 5 s que de verdad lo esta.
+
+        ⚠️ Sin esa comprobacion, `disponible` solo se ponia a False desde
+        put(), o sea desde el camino de ESCRITURA. Las lecturas (roster,
+        tank_cfg, el arbol) miran la bandera al entrar pero no capturan la
+        excepcion: si el disco moria con la bandera aun en True, reventaban y
+        se llevaban por delante TODA la API -- panel en blanco, /api/tanks y
+        /api/arbol devolviendo nada. El modo degradado existia justo para que
+        eso no pasara y no llegaba a activarse.
+
+        Paso el 2026-08-07: ext4 cerro el sistema de ficheros por errores de
+        E/S del NVMe (`mount` lo mostraba como `shutdown`) y la pasarela seguia
+        recibiendo telemetria con normalidad mientras el panel estaba muerto.
+        """
+        n = 0
         while not STOP.is_set():
-            for _ in range(30):
+            for _ in range(5):
                 if STOP.is_set():
                     return
                 time.sleep(1)
-            if not self.disponible:
+            n += 5
+            if self.disponible:
+                # Sondeo barato: si el volumen esta caido, esto falla enseguida.
+                try:
+                    c = self._conn()
+                    c.execute("SELECT 1 FROM tanks LIMIT 1").fetchone()
+                    c.close()
+                except Exception as e:
+                    self.disponible = False
+                    self.ultimo_error = str(e)
+                    print(f"[store] ⛔ EL ALMACENAMIENTO HA CAIDO: {e}. Se sigue "
+                          f"sirviendo el dato en VIVO, pero NO se guarda "
+                          f"historico.", file=sys.stderr)
+            elif n % 30 == 0:
                 self._probar()
 
     def estado(self) -> dict:
@@ -1480,11 +1740,26 @@ class Live:
     def __init__(self, offline_after: int):
         self.lock = threading.Lock()
         self.tanks: dict = {}
+        # Placas que reportan tank_id=0, indexadas por MAC. VAN APARTE de
+        # `tanks` a proposito: no son tanques todavia, no tienen historico y no
+        # deben contarse en los resumenes. Pero tienen que VERSE, o dar de alta
+        # una placa exige adivinar su MAC leyendo el log del DHCP -- que es
+        # exactamente lo que hubo que hacer a mano el 2026-08-07.
+        self.nuevas: dict = {}
         self.offline_after = offline_after
 
     def update(self, rec: dict):
         with self.lock:
             self.tanks[rec["tank_id"]] = rec
+
+    def update_nueva(self, rec: dict):
+        with self.lock:
+            self.nuevas[rec["mac"]] = rec
+
+    def olvidar_nueva(self, mac: str):
+        """Se llama al asignarle identidad: deja de ser una placa nueva."""
+        with self.lock:
+            self.nuevas.pop(mac, None)
 
     def snapshot(self) -> dict:
         t = now()
@@ -1496,6 +1771,26 @@ class Live:
                 d["online"] = d["age_s"] <= self.offline_after
                 out[tid] = d
             return out
+
+    def nuevas_snapshot(self) -> list:
+        """Placas sin asignar vistas hace poco.
+
+        Se OLVIDAN las que llevan un rato sin hablar (10x el plazo normal):
+        una placa que se desconecto no debe quedarse en la lista invitando a
+        asignarle un tanque que ya no esta ahi.
+        """
+        t = now()
+        with self.lock:
+            out = []
+            for mac, r in self.nuevas.items():
+                edad = t - r["ts"]
+                if edad > self.offline_after * 10:
+                    continue
+                d = dict(r)
+                d["age_s"] = edad
+                d["online"] = edad <= self.offline_after
+                out.append(d)
+            return sorted(out, key=lambda x: x["mac"])
 
 
 # ================================================================ ingesta
@@ -1541,12 +1836,36 @@ def ingest(cfg: dict, store: Store, live: Live, outs: list):
         count, edges, errors = fr["count"], fr["edges"], fr["errors"]
         uptime = fr["uptime"]
         if tank_id == 0:
-            # 0 = sin asignar. Es un error de puesta en marcha, no un dato.
+            # 0 = sin asignar: una placa recien puesta en marcha. NO es un
+            # tanque -- no va al historico ni a los resumenes -- pero si se
+            # PUBLICA como placa pendiente, para poder darla de alta desde el
+            # panel sin ir a buscar su MAC al log del DHCP.
+            #
+            # Antes se descartaba la trama y se avisaba por stderr. El aviso
+            # era correcto y no lo leyo nadie: bajo systemd la salida va con
+            # buffer y no aparece hasta que el servicio para. Una placa nueva
+            # quedaba invisible aunque estuviera transmitiendo bien.
+            live.update_nueva({
+                "ts": now(), "mac": mac, "seq": seq, "count": count,
+                "edges": edges, "errors": errors, "uptime_s": uptime // 1000,
+                "temp_c": fr["temp_c"], "humi_rh": fr["humi_rh"],
+                "ref_ok": fr["ref_ok"], "ver": ver,
+                **({"pwr": fr["pwr"]} if fr.get("pwr") is not None else {}),
+            })
             if mac not in _warned_id:
                 _warned_id.add(mac)
-                print(f"[spe] {mac} reporta tank_id=0 (sin asignar): escribele el"
-                      f" HR 5 por Modbus y guarda con HR 9=0xA5", file=sys.stderr)
+                print(f"[spe] {mac} reporta tank_id=0 (sin asignar): aparece en"
+                      f" el panel para darle numero de tanque", file=sys.stderr)
             continue
+
+        # Ya tiene identidad: deja de ser una placa pendiente. Se hace AQUI, al
+        # ver la primera trama con tank_id valido, y no solo al darla de alta
+        # desde el panel: la identidad se le puede escribir por Modbus desde
+        # cualquier sitio (una consola, un script de puesta en marcha), y
+        # entonces la placa seguia figurando como "sin asignar" hasta que
+        # caducaba. El 2026-08-07 la tank7 salio a la vez en las dos tablas.
+        if mac in live.nuevas:
+            live.olvidar_nueva(mac)
 
         if time.time() - last_cfg > 30:
             tcfg = store.tank_cfg()
@@ -1738,10 +2057,16 @@ def main():
         snap = live.snapshot()
         macs = {r["mac"]: r["tank_id"] for r in snap.values() if r.get("mac")}
         tanques = {r["tank_id"]: r for r in store.roster(snap)}
-        return arbol(switches_snapshot(macs), tanques, store.estado())
+        return arbol(switches_snapshot(macs), tanques, store.estado(),
+                     live.nuevas_snapshot())
+
+    def cal_fn(orden):
+        """Calibracion pedida desde la sala de visualizacion por MQTT."""
+        return aplicar_calibracion(store, live, orden)
 
     outs = build_outputs(cfg, live, store, STOP, pse_fn=pse_snapshot,
-                         switches_fn=switches_snapshot, arbol_fn=arbol_fn)
+                         switches_fn=switches_snapshot, arbol_fn=arbol_fn,
+                         cal_fn=cal_fn)
 
     # Ingesta por dos caminos: SPE (tramas L2) y/o Modbus RTU (RS-485).
     # Con el SPE del ATT roto, el RTU es el que trae los datos.
