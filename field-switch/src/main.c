@@ -998,19 +998,49 @@ int main(void)
 	 * se perdian (SES_ReceiveMessage los rechaza sin libreria inicializada). */
 
 	k_sleep(K_MSEC(1));
-	/* ⚠️ La MAC se SORTEA en cada arranque. No se toca aqui para no cambiar el
-	 * comportamiento de red probado en campo, pero es la razon de que la
-	 * telemetria lleve `dev_id`: la identidad de esta placa NO puede ser su
-	 * MAC. Ver el comentario de struct mfs_tele.
-	 *
-	 * (Pendiente de valorar: derivar tambien la MAC del USN, para que deje de
-	 * cambiar en cada arranque en una red puenteada con la de oficina.) */
-	srand(k_cycle_get_32());
-	mac_addr[3] = rand();
-	mac_addr[4] = rand();
-	mac_addr[5] = rand();
-
 	g_dev_id = mfs_dev_id();
+
+	/* ★ MAC DERIVADA DEL USN, NO SORTEADA (2026-08-07).
+	 *
+	 * Antes era `srand(k_cycle_get_32())` + tres `rand()`. La semilla es el
+	 * contador de ciclos EN ESE PUNTO DEL ARRANQUE, asi que dos placas que
+	 * arrancan del mismo corte llegan ahi con casi el mismo valor y sacan LA
+	 * MISMA MAC.
+	 *
+	 * No es teorico: el 2026-08-07, al reiniciar un field switch se reinicio
+	 * la cadena entera y LOS TRES salieron con 00:18:80:fb:29:12. Por separado
+	 * habian salido distintos. Con 50 tanques, un corte de luz reinicia toda
+	 * la planta a la vez -- justo el caso peor.
+	 *
+	 * Que dos switches compartan MAC rompe el aprendizaje de direcciones: las
+	 * tramas se entregan por el puerto de quien hablo el ultimo. Y en la
+	 * pasarela la jerarquia se deshace, porque un puerto ya no puede saber si
+	 * lo que tiene detras es un switch o un tanque: se vio el tanque 21
+	 * colgando de dos sitios a la vez.
+	 *
+	 * El USN del MAX32690 es unico por placa y no cambia. Se pliegan sus 64
+	 * bits sobre 24 (XOR de las dos mitades) para aprovechar toda la entropia
+	 * en los tres bytes que no son el OUI. Ademas la MAC pasa a ser ESTABLE
+	 * entre arranques, que era el otro problema anotado aqui: en una red
+	 * puenteada con la de oficina, una MAC que cambia sola ensucia las tablas
+	 * de todos los switches de por medio.
+	 *
+	 * Sin USN (g_dev_id == 0) se cae al sorteo de antes: es mejor una MAC
+	 * dudosa que una placa sin red.
+	 */
+	if (g_dev_id != 0) {
+		uint32_t h = (uint32_t)(g_dev_id ^ (g_dev_id >> 32));
+
+		mac_addr[3] = (uint8_t)(h >> 16);
+		mac_addr[4] = (uint8_t)(h >> 8);
+		mac_addr[5] = (uint8_t)h;
+	} else {
+		srand(k_cycle_get_32());
+		mac_addr[3] = rand();
+		mac_addr[4] = rand();
+		mac_addr[5] = rand();
+	}
+
 	printf("dev_id (USN): %08x%08x\n",
 	       (unsigned)(g_dev_id >> 32), (unsigned)(g_dev_id & 0xFFFFFFFFu));
 
