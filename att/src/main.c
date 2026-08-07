@@ -415,7 +415,14 @@ struct att_cfg {
  *
  * Con 50 tanques, activarlo por defecto seria repartir esa loteria por toda la
  * planta. Se enciende POR UNIDAD, y solo despues de comprobar en esa placa
- * concreta que PB11 = 0 con alimentacion externa. */
+ * concreta que PB11 = 0 con alimentacion externa.
+ *
+ * ⚠️ Y NO BASTA CON COMPROBARLO EN UN SOLO ESTADO (2026-08-07). Hay que verlo
+ * por IR 12 con potencia SPE Y SIN ELLA. Un pin que solo delata la PRESENCIA
+ * DE LA BATERIA da 0 con alimentacion externa -- pasa la comprobacion de un
+ * solo estado -- pero se va a ALTO al quitarle la bateria, y entonces la placa
+ * se cree en bateria y se calla CON EL SPE ENERGIZADO. Medido en la de tank7.
+ * Una placa puede llevar bateria o no, y eso no puede impedir que reporte. */
 #define CFG_F_BAT    BIT(4)
 
 static const struct device *const eep = DEVICE_DT_GET(DT_NODELABEL(eeprom0));
@@ -442,16 +449,36 @@ static void enc_leds_aplicar(void)
 static void cfg_defaults(void)
 {
 	cfg.magic = CFG_MAGIC;
-	/* ★ CFG_F_BAT ACTIVA DE FABRICA (2026-08-06, decision del usuario).
-	 * Antes venia apagada porque PB11 no significaba lo mismo en todas las
-	 * placas y una lectura invertida deja el tanque MUDO. El convenio queda
-	 * fijado -- 0 = alimentado por SPE, 1 = bateria -- y Mayker corrige las
-	 * placas que no lo cumplan.
+	/* ★ CFG_F_BAT APAGADA DE FABRICA (2026-08-07).
 	 *
-	 * ⚠️ Hasta ese rework, una placa invertida (medido: la de tank21) se
-	 * creera en bateria con alimentacion externa y no transmitira. En esas
-	 * hay que APAGAR la bandera por Modbus hasta que se corrija. */
-	cfg.flags = CFG_F_PUSH | CFG_F_RTU | CFG_F_BAT;
+	 * Estuvo activa desde el 2026-08-06, cuando se fijo el convenio (0 = SPE,
+	 * 1 = bateria) dando por hecho que Mayker corregiria las placas que no lo
+	 * cumplieran. Se vuelve a apagar por un caso que ese convenio no cubre:
+	 *
+	 *   UNA PLACA SIN BATERIA, ALIMENTADA POR SPE, NO TRANSMITE.
+	 *
+	 * Medido en la de tank7: sin bateria, PB11 se va a ALTO, el firmware
+	 * concluye "en bateria" y se suspende -- apagando el PHY y dejando el
+	 * tanque mudo con el SPE conectado y energizado. En esa placa PB11 indica
+	 * PRESENCIA DE BATERIA, no fuente de alimentacion.
+	 *
+	 * Y no se arregla invirtiendo la polaridad: al reves, la placa CON bateria
+	 * se suspenderia estando alimentada por SPE, que es peor.
+	 *
+	 * El razonamiento de fondo: una placa sin bateria y sin SPE esta APAGADA,
+	 * no "en bateria". Si esta ejecutando este codigo y no tiene bateria, solo
+	 * puede estar alimentada por SPE. Con un pin que unicamente delata la
+	 * presencia de la bateria, "estoy en bateria" es indeducible -- y suponerlo
+	 * deja el tanque mudo, que es el peor fallo que puede tener esta placa:
+	 * se dispara al arrancar y desde la pasarela es indistinguible de un
+	 * sensor averiado.
+	 *
+	 * La bandera se enciende POR UNIDAD, y solo tras comprobar EN ESA PLACA,
+	 * por IR 12 y en los DOS estados (con y sin potencia SPE), que PB11 sigue
+	 * de verdad a la alimentacion. Hoy eso solo esta verificado en la de
+	 * tank1. Mientras la placa pueda o no llevar bateria, esto no puede ser un
+	 * limitante para que reporte. */
+	cfg.flags = CFG_F_PUSH | CFG_F_RTU;
 	cfg.unit_id = 1;
 	cfg.baud_div = 192;                   /* 19200 = default del estandar Modbus */
 	cfg.parity = 1;                       /* even */
