@@ -14,7 +14,10 @@ set -e
 SRC=/home/tpu01/despliegue
 DST=/opt/varec-gateway
 BAK=/var/backups/varec-gateway/$(date +%Y%m%d-%H%M%S)
-FICHEROS="gateway.py outputs.py webui.py sensor.py"
+# ⚠️ UN FICHERO QUE NO ESTE EN ESTA LISTA NO SE DESPLIEGA, y no avisa de nada:
+# la version vieja se queda en /opt y el import falla, o -- peor -- funciona
+# con el modulo anterior y uno cree estar probando el codigo nuevo.
+FICHEROS="gateway.py outputs.py webui.py sensor.py ota.py"
 
 # --- 1) Validar el ORIGEN antes de tocar nada -----------------------------
 # ⚠️ Esta es la comprobacion que faltaba. Un fichero vacio o con sintaxis rota
@@ -62,7 +65,13 @@ if [ "$vacio" = "1" ]; then
     echo "   sobrescribiria la ultima copia buena)"
 else
     install -d "$BAK"
-    cp -a $(for f in $FICHEROS; do echo "$DST/$f"; done) "$BAK/"
+    # ⚠️ SOLO LOS QUE YA EXISTEN EN /opt. Un modulo NUEVO todavia no esta ahi y
+    # no hay nada suyo que salvar; copiarlo a ciegas hacia fallar `cp`, y con
+    # `set -e` eso abortaba el despliegue entero. Paso el 2026-08-11 al anadir
+    # ota.py a la lista.
+    for f in $FICHEROS; do
+        [ -e "$DST/$f" ] && cp -a "$DST/$f" "$BAK/"
+    done
     echo "   guardada en $BAK"
 fi
 

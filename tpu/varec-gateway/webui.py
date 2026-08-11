@@ -392,6 +392,32 @@ PAGE = r"""<!doctype html>
     </div>
 
     <div class="card">
+      <h2>Firmware de los sensores <span class="mut" id="ota_hdr" style="text-transform:none;font-weight:400"></span></h2>
+      <div id="ota_img" class="mut">cargando…</div>
+      <p style="margin:10px 0 4px">
+        <input type="file" id="ota_file" accept=".bin">
+        <button id="ota_up" type="button">Cargar imagen</button>
+      </p>
+      <div id="ota_msg" class="mut" style="margin:6px 0"></div>
+      <div id="ota_wrap"></div>
+      <p class="mut" style="margin:10px 0 0">Se sube el <b>zephyr.signed.bin</b> (la
+        aplicación firmada), <b>no</b> la imagen combinada del grabado por cable.
+        Se comprueba la cabecera y el hash <b>antes</b> de guardarla: un fichero
+        equivocado se rechaza aquí y no llega a ninguna placa.</p>
+      <p class="mut" style="margin:6px 0 0">⚠️ <b>MCUboot no se actualiza por aquí</b>:
+        vive en su propia partición y el OTA solo toca la ranura de la aplicación.
+        Cambiarlo exige cable, así que la primera grabación de cada sensor —en el
+        banco, antes de instalarlo— tiene que llevar ya el bootloader bueno.</p>
+      <p class="mut" style="margin:6px 0 0">La imagen nueva arranca <b>a prueba</b> y solo
+        se confirma tras 4 envíos SPE correctos. Si arrancara sin transmitir, MCUboot
+        revierte sola a la anterior en el siguiente reinicio: un sensor no se queda mudo
+        dentro de un tanque por una actualización.</p>
+      <p class="mut" style="margin:6px 0 0">De uno en uno, a propósito. Con 50 tanques la
+        tentación de actualizar todos es fuerte, y también la posibilidad de dejar 50
+        sensores raros a la vez.</p>
+    </div>
+
+    <div class="card">
       <p class="mut" style="margin:10px 0 0">El <b>tank_id</b> vive en la EEPROM de cada
         sensor y viaja en cada trama: al cambiarlo aquí se escribe <b>en el sensor</b> por
         Modbus, no en la pasarela. Así, si sustituyes una ATT averiada, le pones su id y
@@ -1132,8 +1158,96 @@ async function tpu(){
   }
 }
 
+// ---------------- firmware de los sensores (OTA por SPE) ----------------
+// Se sondea cada 3 s mientras hay un trabajo en curso y cada 15 s en reposo:
+// la secuencia dura cerca de minuto y medio y el operador necesita ver en que
+// paso va, no un boton que se queda gris sin decir nada.
+let OTA_SHA = null;
+
+function otaMsg(t, err){
+  const d = $('#ota_msg');
+  d.textContent = t || '';
+  d.style.color = err ? '#f85149' : '';
+}
+
+async function otaCargar(){
+  const f = $('#ota_file').files[0];
+  if(!f){ otaMsg('elige primero un fichero .bin', true); return; }
+  otaMsg('subiendo '+f.name+'…');
+  try{
+    const r = await fetch('/api/ota/imagen', {method:'POST', body: f});
+    const j = await r.json();
+    if(!r.ok){ otaMsg(j.error || 'rechazada', true); return; }
+    otaMsg('imagen cargada y verificada');
+    ota();
+  }catch(e){ otaMsg('error al subir: '+e, true); }
+}
+
+async function otaActualizar(btn){
+  const id = btn.dataset.id;
+  if(!confirm('¿Actualizar el firmware del tanque '+id+'?\n\n'
+      +'La imagen nueva arranca a prueba y se revierte sola si el sensor no '
+      +'transmite. Tarda alrededor de minuto y medio.')) return;
+  btn.disabled = true;
+  try{
+    const r = await fetch('/api/ota/tank/'+id, {method:'POST'});
+    const j = await r.json();
+    if(!r.ok){ otaMsg(j.error || 'no se pudo lanzar', true); btn.disabled = false; return; }
+    otaMsg('');
+    ota();
+  }catch(e){ otaMsg('error: '+e, true); btn.disabled = false; }
+}
+
+async function ota(){
+  try{
+    const j = await (await fetch('/api/ota')).json();
+    const im = j.imagen;
+    OTA_SHA = im ? im.sha : null;
+    $('#ota_img').innerHTML = im
+      ? `imagen cargada: <b>v${im.version}</b> · ${(im.tam/1024).toFixed(1)} kB ·
+         <span class="mut">sha ${im.sha.slice(0,16)}…</span>`
+      : 'no hay ninguna imagen cargada';
+
+    const t = j.trabajo;
+    const enCurso = t && t.estado === 'en_curso';
+    if(t){
+      const col = t.estado==='ok' ? '#3fb950' : (t.estado==='error' ? '#f85149' : '#d29922');
+      $('#ota_hdr').innerHTML = `<span style="color:${col}">tanque ${t.tank_id}: `
+        + `${t.fase}${t.motivo ? ' — '+t.motivo : ''}</span>`;
+    } else {
+      $('#ota_hdr').textContent = '';
+    }
+
+    // Un boton por tanque que este reportando. Los que no reportan no se
+    // ofrecen: sin enlace no hay por donde entrar, y un boton que siempre
+    // falla solo genera desconfianza en el que si funciona.
+    const tk = await (await fetch('/api/tanks')).json();
+    const filas = (tk.tanks||[]).map(x => {
+      const on = x.online;
+      const dis = (!im || !on || enCurso) ? 'disabled' : '';
+      return `<tr><td>tank${x.tank_id}</td>
+        <td class="mut">${on ? 'en línea' : 'sin señal'}</td>
+        <td><button type="button" data-id="${x.tank_id}" class="otab" ${dis}>Actualizar</button></td></tr>`;
+    }).join('');
+    $('#ota_wrap').innerHTML = filas
+      ? `<table><thead><tr><th>Sensor</th><th>Estado</th><th></th></tr></thead>
+         <tbody>${filas}</tbody></table>`
+      : '<p class="mut">no hay sensores conocidos</p>';
+    document.querySelectorAll('.otab').forEach(b =>
+      b.addEventListener('click', () => otaActualizar(b)));
+
+    setTimeout(ota, enCurso ? 3000 : 15000);
+  }catch(e){
+    $('#ota_img').textContent = 'sin datos de firmware';
+    setTimeout(ota, 15000);
+  }
+}
+
+$('#ota_up').addEventListener('click', otaCargar);
+
 tanks(); setInterval(tanks,5000);
 tpu();   setInterval(tpu,10000);
+ota();
 load();
 </script></body></html>
 """

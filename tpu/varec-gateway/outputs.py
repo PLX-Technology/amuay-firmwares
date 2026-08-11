@@ -331,6 +331,8 @@ class HttpOut:
         self.cal_fn = cal_fn
         self.full_cfg = full_cfg or {}
         self.cfg_path = cfg_path
+        import ota as ota_mod
+        self.ota = ota_mod.Gestor(self.full_cfg)
         outer = self
 
         class H(http.server.BaseHTTPRequestHandler):
@@ -394,6 +396,10 @@ class HttpOut:
                         location="/")
                 if p.startswith("/api/nueva/"):
                     return self._nueva_post(p)
+                if p == "/api/ota/imagen":
+                    return self._ota_imagen()
+                if p.startswith("/api/ota/tank/"):
+                    return self._ota_lanzar(p)
                 if p.startswith("/api/tank/"):
                     return self._tank_post(p)
                 if p != "/api/config":
@@ -469,6 +475,56 @@ class HttpOut:
                 outer.live.olvidar_nueva(mac)
                 outer.store.upsert_tank(nid, mac)
                 self._send({"ok": True, "tank_id": nid, "mac": mac, "ip": ip})
+
+            def _ota_imagen(self):
+                """Recibe el .bin del firmware y lo guarda si es valido.
+
+                    POST /api/ota/imagen   (el cuerpo es el binario crudo)
+
+                ⚠️ SE VALIDA ANTES DE GUARDARLO. Mandar un fichero equivocado a
+                un sensor dentro de un tanque es el error que no se puede
+                permitir, asi que aqui se comprueba la cabecera de MCUboot y
+                que el hash cuadre con el contenido. Un .bin truncado, el
+                zephyr.bin sin firmar o la imagen combinada del grabado por
+                cable se rechazan sin llegar a tocar ninguna placa.
+                """
+                if not self._auth():
+                    return
+                n = int(self.headers.get("Content-Length", 0) or 0)
+                if n <= 0 or n > 4 * 1024 * 1024:
+                    return self._send({"error": "tamano de fichero no valido"}, 400)
+                data = self.rfile.read(n)
+                info = outer.ota.guardar(data)
+                if not info["ok"]:
+                    return self._send({"error": info["motivo"], **info}, 400)
+                return self._send({"ok": True, **info})
+
+            def _ota_lanzar(self, p):
+                """Actualiza UN sensor.  POST /api/ota/tank/<id>
+
+                Responde en cuanto arranca; el progreso se sigue por
+                GET /api/ota. La secuencia tarda cerca de minuto y medio y una
+                peticion abierta todo ese rato acabaria con el navegador
+                rindiendose sin que nadie sepa como quedo la placa.
+                """
+                if not self._auth():
+                    return
+                import sensor
+                try:
+                    tid = int(p.split("/")[4])
+                except (IndexError, ValueError):
+                    return self._send({"error": "tank_id invalido"}, 400)
+                rec = outer.live.snapshot().get(tid)
+                if not rec:
+                    return self._send({"error": "ese tanque no esta reportando"}, 404)
+                ip = sensor.mac_to_ip(rec["mac"])
+                if not ip:
+                    return self._send({"error": f"no se encuentra la IP de "
+                                                f"{rec['mac']} (¿tomo DHCP?)"}, 409)
+                res = outer.ota.lanzar(tid, ip)
+                if "error" in res:
+                    return self._send(res, 409)
+                return self._send(res)
 
             def _tank_post(self, p):
                 """Reconfigura un sensor ATT en remoto por Modbus."""
@@ -649,6 +705,10 @@ class HttpOut:
                     eq = outer.switches_fn(macs)
                     self._send({"switches": eq, "n": len(eq),
                                 "ts": int(time.time())})
+                elif p == "/api/ota":
+                    if not self._auth():
+                        return
+                    self._send(outer.ota.estado())
                 elif p == "/api/arbol":
                     # EXACTAMENTE el mismo documento que se publica por MQTT.
                     # Compartir la funcion y no reimplementarla es lo que evita
@@ -674,7 +734,7 @@ class HttpOut:
                                    200 if tid in snap else 404)
                 else:
                     self._send({"rutas": ["/  (UI web)", "/api/tanks", "/api/pse",
-                                          "/api/switches",
+                                          "/api/switches", "/api/ota",
                                           "/api/tank/<id>",
                                           "/api/tank/<id>/history?res=raw|1m|1h",
                                           "/api/config"]}, 404)
