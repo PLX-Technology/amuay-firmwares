@@ -604,8 +604,14 @@ class HttpOut:
                                                         f" otro sensor ({other['mac']})"},
                                               409)
                         sensor.set_tank_id(ip, nid, unit)
+                    confirmado = None
                     if "push_ms" in body:
-                        sensor.set_push_ms(ip, int(body["push_ms"]), unit)
+                        # Se devuelve lo que el SENSOR confirma tener, no lo
+                        # que se le pidio: el panel lo necesita para no
+                        # repintar el valor viejo mientras el periodo
+                        # observado --que tarda dos tramas-- se pone al dia.
+                        confirmado = sensor.set_push_ms(
+                            ip, int(body["push_ms"]), unit)
                     # Puerto RS-485: se enciende y apaga EN CALIENTE, sin
                     # reiniciar el sensor. Se persiste, porque apagarlo es una
                     # decision de instalacion.
@@ -620,7 +626,10 @@ class HttpOut:
                                         bool(body["enc_leds"]), unit, save=False)
                 except Exception as e:
                     return self._send({"error": str(e)}, 502)
-                self._send({"ok": True, "ip": ip})
+                res = {"ok": True, "ip": ip}
+                if confirmado is not None:
+                    res["push_ms"] = confirmado
+                self._send(res)
 
             def do_GET(self):
                 """Envoltura de seguridad. Una excepcion aqui dentro cerraba la

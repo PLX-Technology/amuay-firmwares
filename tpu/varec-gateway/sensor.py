@@ -205,12 +205,31 @@ def set_flag(ip: str, mask: int, on: bool, unit: int = 1, save=True):
     return new
 
 
-def set_push_ms(ip: str, ms: int, unit: int = 1, save=True):
+def set_push_ms(ip: str, ms: int, unit: int = 1, save=True) -> int:
     """Periodo de muestreo. Un Varec mide nivel de liquido: se mueve en
-    minutos, no en milisegundos. 30 s es un punto sensato."""
+    minutos, no en milisegundos. 30 s es un punto sensato.
+
+    Devuelve el periodo que el sensor CONFIRMA tener, releido de su registro.
+
+    ★ Sin ese dato, la unica realimentacion posible era el periodo OBSERVADO
+    entre tramas, que tarda DOS tramas en reflejar el cambio -- con 30 s, hasta
+    un minuto -- y mientras tanto el panel repintaba el valor viejo y parecia
+    que la orden se habia perdido. El sensor si sabe lo que tiene: se le
+    pregunta.
+
+    ⚠️ LAS TRES TRANSACCIONES POR UNA SOLA SESION. Con una conexion cada una se
+    agotan los contextos TCP de la ATT y deja de aceptar conexiones, con toda
+    la pinta de un sensor caido. Ya paso dos veces en este proyecto.
+    """
     v = ms // 10
     if not (5 <= v <= 6000):            # 50 ms .. 60 s
         raise ValueError("periodo fuera de rango (50ms-60s)")
-    write_reg(ip, HR_PUSH_MS10, v, unit)
-    if save:
-        write_reg(ip, HR_CMD, CMD_SAVE, unit)
+    with Sesion(ip, unit) as ses:
+        ses.txn(struct.pack(">BHH", 6, HR_PUSH_MS10, v))
+        if save:
+            # Sin esto el cambio vive solo en RAM y se pierde al reiniciar.
+            ses.txn(struct.pack(">BHH", 6, HR_CMD, CMD_SAVE))
+        body = ses.txn(struct.pack(">BHH", 3, HR_PUSH_MS10, 1))
+    if len(body) < 4:
+        raise IOError("respuesta incompleta al releer el periodo")
+    return struct.unpack(">H", body[2:4])[0] * 10

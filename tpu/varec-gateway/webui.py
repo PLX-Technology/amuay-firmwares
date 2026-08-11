@@ -658,14 +658,35 @@ function ambiente(t){
   return `${t.temp_c.toFixed(1)} <span class="mut">°C</span>${h}`;
 }
 
+// ★ Periodo CONFIRMADO por el sensor, por tanque, tras un cambio.
+//
+// El desplegable se pintaba con el periodo OBSERVADO entre tramas, y eso
+// tarda DOS tramas en reflejar un cambio -- con 30 s, hasta un minuto. Como el
+// panel se refresca cada 5 s, la seleccion del operador desaparecia a los
+// pocos segundos y parecia que la orden se habia perdido. No se perdia: la
+// realimentacion iba por detras.
+//
+// Ahora manda lo que el sensor CONFIRMA tener, y el observado solo se muestra
+// al lado hasta que los dos coinciden.
+const PMS_FIJADO = {};
+
 function selPeriodo(t){
   const obs = t.period_s;
+  const fij = PMS_FIJADO[t.tank_id];
+  // Cuando el observado alcanza a lo configurado, se suelta la fijacion y el
+  // panel vuelve a reflejar la realidad medida.
+  if(fij && obs && Math.abs(fij/1000-obs) < 0.6){ delete PMS_FIJADO[t.tank_id]; }
+  const marca = PMS_FIJADO[t.tank_id] || (obs ? obs*1000 : null);
   const sel = PERIODOS.map(([ms,lab])=>
-      `<option value="${ms}" ${obs && Math.abs(ms/1000-obs)<0.6?'selected':''}>${lab}</option>`
+      `<option value="${ms}" ${marca && Math.abs(ms-marca)<600?'selected':''}>${lab}</option>`
     ).join('');
+  // Mientras no coincidan, se dice lo que se ve: es informacion, no un fallo.
+  const espera = PMS_FIJADO[t.tank_id]
+    ? ` <span class="mut" title="el periodo medido tarda dos tramas en ponerse al dia">observado ${obs || '—'} s</span>`
+    : '';
   return `<select class="pms" data-id="${t.tank_id}"
             ${t.online?'':'disabled title="el sensor no responde"'}>
-      <option value="">—</option>${sel}</select>`;
+      <option value="">—</option>${sel}</select>${espera}`;
 }
 
 async function setPeriodo(sel){
@@ -677,7 +698,10 @@ async function setPeriodo(sel){
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({push_ms:parseInt(ms,10)})});
     const d = await r.json();
-    if(!r.ok) alert('No se pudo cambiar: '+(d.error||'error'));
+    if(!r.ok){ alert('No se pudo cambiar: '+(d.error||'error')); }
+    // Lo que el SENSOR confirma tener. Se fija hasta que el periodo observado
+    // lo alcance, para que el refresco no repinte el valor viejo encima.
+    else if(d.push_ms){ PMS_FIJADO[id] = d.push_ms; tanks(); }
   }catch(e){ alert('No se pudo cambiar: '+e); }
   sel.disabled = false;
 }
