@@ -194,6 +194,25 @@ static volatile int g_bat_activo;
  * Sin puerto listo se devuelve 0 (= alimentacion externa) A PROPOSITO: ante la
  * duda, la placa TRANSMITE. Un falso "en bateria" dejaria el tanque mudo y sin
  * forma de diagnosticarlo en remoto, que es mucho peor que gastar de mas. */
+/* ¿Hay enlace SPE en alguna de las dos interfaces?
+ *
+ * Es el testigo de que SIGUE HABIENDO ALIMENTACION EXTERNA: la ATT se alimenta
+ * por el propio par, asi que si el PSE deja de entregar, el enlace se cae. No
+ * es una medida de tension, pero es la unica senal independiente del pin que
+ * tiene la placa, y no miente en el sentido que importa: con enlace arriba,
+ * alguien esta alimentando este cable. */
+static int att_spe_enlazado(void)
+{
+	for (int i = 1; i <= 2; i++) {
+		struct net_if *f = net_if_get_by_index(i);
+
+		if (f && net_if_is_carrier_ok(f)) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
 static int att_en_bateria(void)
 {
 	int v;
@@ -211,7 +230,30 @@ static int att_en_bateria(void)
 	if (v < 0) {
 		return 0;
 	}
-	return BAT_ACTIVO_ALTO ? (v != 0) : (v == 0);
+	if (!(BAT_ACTIVO_ALTO ? (v != 0) : (v == 0))) {
+		return 0;               /* el pin dice alimentacion externa */
+	}
+
+	/* ★★ EL PIN NO BASTA PARA ENTRAR (2026-08-11). PB11 deberia dar 0 V con
+	 * alimentacion por SPE y 3,3 V solo con bateria, pero NO TODAS LAS PLACAS
+	 * LO CUMPLEN: en la tank7, conectarle una bateria TENIENDO SPE la dejo
+	 * muda -- el pin daba "bateria" con la alimentacion externa presente.
+	 * Costo media hora de diagnostico persiguiendo un fallo de hardware en una
+	 * placa que estaba obedeciendo.
+	 *
+	 * Asi que para ENTRAR se exigen las dos cosas: el pin Y que no haya enlace
+	 * SPE, que es lo que de verdad ocurre cuando el PSE deja de entregar. Con
+	 * una bateria puesta y el enlace arriba, la placa sigue hablando.
+	 *
+	 * ⚠️ ASIMETRICO A PROPOSITO: para SALIR manda el pin y solo el pin. En
+	 * modo bateria se duerme el PHY y se bajan las interfaces, asi que el
+	 * enlace es falso por construccion -- exigirlo tambien para salir seria
+	 * una trampa sin salida: la placa no podria despertar jamas.
+	 */
+	if (g_en_bateria) {
+		return 1;               /* ya dentro: el pin manda */
+	}
+	return !att_spe_enlazado();
 }
 
 /* Estado de alimentacion empaquetado, para poder VERIFICAR LA POLARIDAD DE
@@ -247,6 +289,10 @@ static uint16_t att_pwr_estado(void)
 	}
 	if (att_en_bateria()) { v |= BIT(1); }
 	if (g_bat_activo)     { v |= BIT(2); }
+	/* bit4 = hay enlace SPE. Es la segunda condicion para entrar en modo
+	 * bateria, asi que sin ella no se puede diagnosticar en remoto por que
+	 * una placa se callo -- o por que NO se callo. */
+	if (att_spe_enlazado()) { v |= BIT(4); }
 	return v;
 }
 
@@ -1500,11 +1546,20 @@ int main(void)
 	if (device_is_ready(gpb)) {
 		int ret = gpio_pin_configure(gpb, BAT_PIN, GPIO_INPUT);
 
-		g_en_bateria = att_en_bateria();
-		LOG_INF("Alimentacion: PB11 = %d, funcion %s -> %s (ret=%d)",
+		/* ⚠️ AQUI NO SE DECIDE NADA, SOLO SE INFORMA. Esto corre ANTES de
+		 * levantar las interfaces, asi que todavia no hay portadora y la
+		 * regla del enlace daria "en bateria" en cualquier placa cuyo pin
+		 * mienta -- durmiendole el PHY nada mas arrancar y sin vuelta atras.
+		 *
+		 * Se arranca SIEMPRE en "externa" y decide el bucle, que corre
+		 * despues de la espera de portadora. Si de verdad esta en bateria, la
+		 * primera vuelta lo detecta y apaga todo: se pierde un periodo de
+		 * transmision, que es un precio ridiculo comparado con un sensor que
+		 * no despierta. */
+		g_en_bateria = 0;
+		LOG_INF("Alimentacion: PB11 = %d, funcion %s (decide el bucle) (ret=%d)",
 			gpio_pin_get_raw(gpb, BAT_PIN),
 			(cfg.flags & CFG_F_BAT) ? "ACTIVA" : "desactivada (HR 0 bit4)",
-			g_en_bateria ? "BATERIA (se suspenden transmisiones)" : "transmite",
 			ret);
 	} else {
 		gpb = NULL;
