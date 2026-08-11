@@ -803,24 +803,32 @@ def _nodo_tanque(rec: dict) -> dict:
         # dato, dos plataformas no pueden discrepar -- no hay nada que
         # sincronizar porque no hay dos versiones.
         "calibracion": {
-            "escala": rec.get("scale"),
-            "offset": rec.get("offset"),
-            "unidad": rec.get("unit"),
-            # Escala 1 y offset 0 es la recta identidad: el nivel que se
-            # publica son PULSOS, no milimetros. Se dice explicitamente para
-            # que nadie lea una cifra cruda creyendo que esta calibrada.
+            # ⚠️⚠️ SIN CALIBRAR, **TODOS** LOS NUMEROS VAN A null.
+            #
+            # Escala 1 y offset 0 es la recta identidad: significa que el
+            # "nivel" que se publica son PULSOS, no milimetros. Es cierto
+            # matematicamente y una trampa en la practica -- 1,0 mm/pulso
+            # tiene toda la pinta de una geometria real, y quien pinte el
+            # campo sin mirar `calibrado` enseñaria un numero inventado.
+            # Un null no se puede confundir con una medida.
+            #
+            # ⚠️ Y VAN TODOS, NO SOLO ALGUNOS. Hasta el 2026-08-11 los tres
+            # derivados iban a null pero `escala` y `offset` seguian saliendo
+            # con 1,0 y 0,0: dentro del MISMO objeto, unos campos decian la
+            # verdad y otros no. Lo reporto Gabriel desde la plataforma web,
+            # que acabo apoyandose solo en `calibrado` porque era el unico
+            # campo fiable en los dos casos. Si un campo miente, el consumidor
+            # deja de fiarse del objeto entero -- y con razon.
+            "escala": esc if calibrado else None,
+            "offset": off if calibrado else None,
+            # La unidad tambien: sin recta, el numero publicado no esta en
+            # milimetros ni en nada, son cuentas del encoder.
+            "unidad": rec.get("unit") if calibrado else None,
             "calibrado": calibrado,
             # La misma recta leida en terminos fisicos, que es como se calibra
             # en campo: cuanto avanza la cinta por pulso, y a que cota esta el
             # cero del contador. No es un dato aparte -- se deriva de la recta,
             # asi que no puede desincronizarse de ella.
-            #
-            # ⚠️ SIN CALIBRAR VAN A null, NO a los valores de la identidad. La
-            # recta identidad daria mm_por_pulso=1,0 y altura_referencia=0,0,
-            # que es cierto matematicamente y una trampa en la practica: 1,0
-            # mm/pulso tiene toda la pinta de una geometria real, y quien pinte
-            # el campo sin mirar `calibrado` enseñaria un numero inventado. Un
-            # null no se puede confundir con una medida.
             "mm_por_pulso": abs(esc) if calibrado else None,
             "altura_referencia": off if calibrado else None,
             # -1: suben los pulsos, baja el nivel (flotador y cinta).
@@ -1885,6 +1893,17 @@ def ingest(cfg: dict, store: Store, live: Live, outs: list):
             "uptime_s": uptime // 1000,
             # None = la ATT no tiene referencia: la cuenta no significa nada
             # y aplicarle la recta daria un valor falso pero plausible.
+            #
+            # ⚠️ SIN CALIBRAR **SI** SE PUBLICA, y sale el CONTEO del encoder:
+            # la recta es la identidad y lo deja pasar tal cual, con `unit`
+            # diciendo "mm". DECISION DELIBERADA (2026-08-11), no un descuido:
+            # callarlo dejaria el tanque indistinguible de un sensor caido, y
+            # durante la puesta en marcha de 50 tanques eso son decenas de
+            # huecos que nadie sabria interpretar.
+            #
+            # A cambio, el consumidor tiene con que distinguirlo SIEMPRE:
+            # `calibrado` va en la trama <id>/raw y en el nodo del arbol, donde
+            # ademas todos los numeros de calibracion van a null.
             "value": (count * (c.get("scale") or 1.0) + (c.get("offset") or 0.0)
                       if fr["ref_ok"] else None),
             "ref_ok": fr["ref_ok"],

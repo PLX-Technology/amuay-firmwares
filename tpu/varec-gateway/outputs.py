@@ -166,6 +166,13 @@ class MqttOut:
             "unit": rec["unit"], "count": rec["count"],
             "edges": rec["edges"], "errors": rec["errors"],
             "uptime_s": rec["uptime_s"], "mac": rec["mac"],
+            # ⚠️ SIN CALIBRAR, `value` SON CUENTAS DEL ENCODER, no milimetros:
+            # la recta es la identidad y `unit` sigue diciendo "mm". Se publica
+            # la bandera para que el consumidor pueda distinguirlo AQUI, sin
+            # tener que cruzarlo con el arbol de topologia. Mismo criterio que
+            # en el nodo del arbol, donde ademas los numeros van a null.
+            "calibrado": not ((rec.get("scale") or 1.0) == 1.0
+                              and (rec.get("offset") or 0.0) == 0.0),
         }), self.qos, self.retain)
 
     def close(self):

@@ -339,7 +339,6 @@ PAGE = r"""<!doctype html>
   <h1 id="site">Pasarela Varec</h1>
   <div class="tabs">
     <div class="tab on" data-t="dash">Tanques</div>
-    <div class="tab" data-t="fw">Firmware</div>
     <div class="tab" data-t="cfg">Settings</div>
   </div>
   <div class="sp"></div>
@@ -400,37 +399,6 @@ PAGE = r"""<!doctype html>
     </div>
   </div>
 
-  <!-- Pestana aparte, no en el panel de tanques: esto es mantenimiento, no
-       vigilancia. Quien esta mirando niveles no necesita un boton que
-       reprograma sensores de campo delante todo el rato. -->
-  <div id="fw" style="display:none">
-    <div class="card">
-      <h2>Firmware de los sensores <span class="mut" id="ota_hdr" style="text-transform:none;font-weight:400"></span></h2>
-      <div id="ota_img" class="mut">cargando…</div>
-      <p style="margin:10px 0 4px">
-        <input type="file" id="ota_file" accept=".bin">
-        <button id="ota_up" type="button">Cargar imagen</button>
-      </p>
-      <div id="ota_msg" class="mut" style="margin:6px 0"></div>
-      <div id="ota_wrap"></div>
-      <p class="mut" style="margin:10px 0 0">Se sube el <b>zephyr.signed.bin</b> (la
-        aplicación firmada), <b>no</b> la imagen combinada del grabado por cable.
-        Se comprueba la cabecera y el hash <b>antes</b> de guardarla: un fichero
-        equivocado se rechaza aquí y no llega a ninguna placa.</p>
-      <p class="mut" style="margin:6px 0 0">⚠️ <b>MCUboot no se actualiza por aquí</b>:
-        vive en su propia partición y el OTA solo toca la ranura de la aplicación.
-        Cambiarlo exige cable, así que la primera grabación de cada sensor —en el
-        banco, antes de instalarlo— tiene que llevar ya el bootloader bueno.</p>
-      <p class="mut" style="margin:6px 0 0">La imagen nueva arranca <b>a prueba</b> y solo
-        se confirma tras 4 envíos SPE correctos. Si arrancara sin transmitir, MCUboot
-        revierte sola a la anterior en el siguiente reinicio: un sensor no se queda mudo
-        dentro de un tanque por una actualización.</p>
-      <p class="mut" style="margin:6px 0 0">De uno en uno, a propósito. Con 50 tanques la
-        tentación de actualizar todos es fuerte, y también la posibilidad de dejar 50
-        sensores raros a la vez.</p>
-    </div>
-  </div>
-
   <div id="cfg" style="display:none">
     <div class="msg" id="m"></div>
     <div id="secs"></div>
@@ -451,6 +419,38 @@ PAGE = r"""<!doctype html>
     <div style="display:flex;gap:8px;margin:0 0 12px">
       <button id="mg_geo" class="mini" style="flex:1">Por geometr&iacute;a</button>
       <button id="mg_2p"  class="mini" style="flex:1">Por dos puntos</button>
+      <button id="mg_fw"  class="mini" style="flex:1">Firmware</button>
+    </div>
+
+    <!-- ===== firmware de ESTE sensor =====================================
+         Aqui y no en una pestana global: en este modal ya se esta trabajando
+         con un sensor concreto, asi que no hay que elegirlo de ninguna lista
+         -- ni equivocarse de tanque al elegirlo. -->
+    <div id="pan_fw" style="display:none">
+      <div id="fw_img" class="mut" style="margin:0 0 10px">cargando&hellip;</div>
+      <p style="margin:0 0 4px">
+        <input type="file" id="fw_file" accept=".bin">
+        <button id="fw_up" type="button" class="mini">Cargar imagen</button>
+      </p>
+      <p id="fw_msg" class="mut" style="margin:6px 0"></p>
+      <button id="fw_go" type="button" style="width:100%;margin:6px 0 0">
+        Actualizar este sensor</button>
+      <p id="fw_est" class="mut" style="margin:8px 0 0"></p>
+      <p class="mut" style="margin:10px 0 0;font-size:13px">Se sube el
+        <b>zephyr.signed.bin</b> (la aplicaci&oacute;n firmada), <b>no</b> la
+        imagen combinada del grabado por cable. Se comprueba la cabecera y el
+        hash <b>antes</b> de guardarla: un fichero equivocado se rechaza aqu&iacute;
+        y no llega a ninguna placa. La imagen vale para todos los sensores; se
+        carga una vez y se actualiza desde el modal de cada uno.</p>
+      <p class="mut" style="margin:6px 0 0;font-size:13px">La imagen nueva arranca
+        <b>a prueba</b> y solo se confirma tras 4 env&iacute;os SPE correctos: si
+        arrancara sin transmitir, MCUboot revierte sola a la anterior. Al terminar
+        se relee la placa y se compara el hash, as&iacute; que solo dice
+        <b>verificada</b> si lo demuestra.</p>
+      <p class="mut" style="margin:6px 0 0;font-size:13px">⚠️ <b>MCUboot no se
+        actualiza por aqu&iacute;</b>: vive en su propia partici&oacute;n. Cambiarlo
+        exige cable, as&iacute; que la primera grabaci&oacute;n de cada sensor
+        —en el banco, antes de instalarlo— tiene que llevar ya el bootloader bueno.</p>
     </div>
 
     <!-- ===== geometria: no hay que mover producto ======================= -->
@@ -575,10 +575,9 @@ const SECS = {
 let CFG={};
 
 const $=s=>document.querySelector(s);
-// Un panel por pestana, por data-t. Antes eran dos ifs; con la tercera
-// pestana eso ya pedia una lista -- anadir una cuarta y olvidar una linea
-// deja dos paneles visibles a la vez.
-const PANELES = ['dash', 'fw', 'cfg'];
+// Un panel por pestana, por data-t. Con una lista, anadir otra pestana es
+// una linea; con un if por panel, olvidar uno deja dos visibles a la vez.
+const PANELES = ['dash', 'cfg'];
 document.querySelectorAll('.tab').forEach(x=>x.onclick=()=>{
   document.querySelectorAll('.tab').forEach(y=>y.classList.toggle('on',y===x));
   PANELES.forEach(p => $('#'+p).style.display = (x.dataset.t==p ? '' : 'none'));
@@ -902,11 +901,16 @@ const MMP_METRICA = 100.0/512;   // 100 mm por vuelta
 let CALMODO = 'geo';
 function calModo(m){
   CALMODO = m;
-  $c('pan_geo').style.display = (m==='geo') ? '' : 'none';
-  $c('pan_2p').style.display  = (m==='geo') ? 'none' : '';
-  $c('mg_geo').style.background = (m==='geo') ? '' : '#2b3846';
-  $c('mg_2p').style.background  = (m==='geo') ? '#2b3846' : '';
-  calCalc();
+  const modos = {geo:'pan_geo', '2p':'pan_2p', fw:'pan_fw'};
+  const bots  = {geo:'mg_geo',  '2p':'mg_2p',  fw:'mg_fw'};
+  for(const k in modos){
+    $c(modos[k]).style.display   = (k===m) ? '' : 'none';
+    $c(bots[k]).style.background = (k===m) ? '' : '#2b3846';
+  }
+  // Guardar/Cancelar son de la calibracion: en firmware no pintan nada, y un
+  // "Guardar" ahi invita a creer que confirma la actualizacion.
+  $c('calsave').style.display = (m==='fw') ? 'none' : '';
+  if(m === 'fw'){ fwPinta(); } else { calCalc(); }
 }
 
 function geoCalc(){
@@ -1009,6 +1013,11 @@ async function calNow(campo){
 // este es el unico sitio donde se ve moverse la cinta -- y hace falta para
 // saber cuando se ha estabilizado antes de capturar un punto.
 let CALVIVO = null;
+// Declarado junto al otro temporizador del modal, y no en el bloque de mas
+// abajo donde se usa: calVivoParar() lo limpia y esta definida ANTES. Hoy
+// funcionaria igual --el cuerpo corre despues de cargar el script-- pero con
+// `let` eso es zona muerta esperando a que alguien adelante una llamada.
+let FWTIMER = null;
 function calVivoArrancar(){
   const pinta = async () => {
     if(!$c('calbg') || $c('calbg').style.display!=='flex') return;
@@ -1023,7 +1032,14 @@ function calVivoArrancar(){
   if(CALVIVO) clearInterval(CALVIVO);
   CALVIVO = setInterval(pinta, 2000);
 }
-function calVivoParar(){ if(CALVIVO){ clearInterval(CALVIVO); CALVIVO=null; } }
+function calVivoParar(){
+  if(CALVIVO){ clearInterval(CALVIVO); CALVIVO=null; }
+  // Tambien el sondeo del firmware, y se vuelve a geometria: si no, abrir el
+  // modal de OTRO tanque lo dejaria en la pestana Firmware, con el boton de
+  // actualizar apuntando ya a un sensor distinto del que se estaba mirando.
+  if(FWTIMER){ clearTimeout(FWTIMER); FWTIMER=null; }
+  if(CALMODO !== 'geo' && $c('mg_geo')) calModo('geo');
+}
 ['ca_c','ca_l','cb_c','cb_l','c_u','g_mm','g_h'].forEach(id=>{
   const e=$c(id); if(e) e.oninput=calCalc; });
 if($c('g_s')) $c('g_s').onchange=calCalc;
@@ -1034,6 +1050,77 @@ if($c('m_n2')) $c('m_n2').onclick=()=>calNow('m_c2');
 if($c('m_go')) $c('m_go').onclick=geoMedir;
 if($c('mg_geo')) $c('mg_geo').onclick=()=>calModo('geo');
 if($c('mg_2p'))  $c('mg_2p').onclick =()=>calModo('2p');
+if($c('mg_fw'))  $c('mg_fw').onclick =()=>calModo('fw');
+
+// ---------------- firmware del sensor abierto en el modal ----------------
+// Se sondea cada 3 s mientras hay un trabajo y cada 20 s en reposo, y SOLO
+// con la pestana a la vista: la secuencia dura cerca de minuto y medio y el
+// operador necesita ver en que paso va, no un boton gris que no dice nada.
+function fwMsg(t, err){
+  const d = $c('fw_msg');
+  d.textContent = t || '';
+  d.style.color = err ? '#f85149' : '';
+}
+
+async function fwPinta(){
+  if(FWTIMER){ clearTimeout(FWTIMER); FWTIMER = null; }
+  if(CALMODO !== 'fw' || CALID === null) return;
+  try{
+    const j = await (await fetch('/api/ota')).json();
+    const im = j.imagen, t = j.trabajo;
+    $c('fw_img').innerHTML = im
+      ? `imagen cargada: <b>v${im.version}</b> · ${(im.tam/1024).toFixed(1)} kB`
+        + ` · <span class="mut">sha ${im.sha.slice(0,16)}…</span>`
+      : 'no hay ninguna imagen cargada';
+
+    // El trabajo es global (uno a la vez). Si el que corre es de OTRO tanque
+    // se dice con su numero: si no, uno ve "subiendo la imagen" en el modal
+    // del tanque 7 creyendo que es el suyo.
+    const mio = t && String(t.tank_id) === String(CALID);
+    const enCurso = t && t.estado === 'en_curso';
+    if(t){
+      const col = t.estado==='ok' ? '#3fb950' : (t.estado==='error' ? '#f85149' : '#d29922');
+      $c('fw_est').innerHTML = `<span style="color:${col}">`
+        + (mio ? '' : `tanque ${t.tank_id}: `)
+        + `${t.fase}${t.motivo ? ' — '+t.motivo : ''}</span>`;
+    } else {
+      $c('fw_est').textContent = '';
+    }
+    $c('fw_go').disabled = !im || enCurso;
+    FWTIMER = setTimeout(fwPinta, enCurso ? 3000 : 20000);
+  }catch(e){
+    $c('fw_img').textContent = 'sin datos de firmware';
+    FWTIMER = setTimeout(fwPinta, 20000);
+  }
+}
+
+if($c('fw_up')) $c('fw_up').onclick = async()=>{
+  const f = $c('fw_file').files[0];
+  if(!f){ fwMsg('elige primero un fichero .bin', true); return; }
+  fwMsg('subiendo '+f.name+'…');
+  try{
+    const r = await fetch('/api/ota/imagen', {method:'POST', body:f});
+    const j = await r.json();
+    if(!r.ok){ fwMsg(j.error || 'rechazada', true); return; }
+    fwMsg('imagen cargada y verificada');
+    fwPinta();
+  }catch(e){ fwMsg('error al subir: '+e, true); }
+};
+
+if($c('fw_go')) $c('fw_go').onclick = async()=>{
+  if(CALID === null) return;
+  if(!confirm('¿Actualizar el firmware del tanque '+CALID+'?\n\n'
+      +'La imagen nueva arranca a prueba y se revierte sola si el sensor no '
+      +'transmite. Tarda alrededor de minuto y medio.')) return;
+  $c('fw_go').disabled = true;
+  try{
+    const r = await fetch('/api/ota/tank/'+CALID, {method:'POST'});
+    const j = await r.json();
+    if(!r.ok){ fwMsg(j.error || 'no se pudo lanzar', true); $c('fw_go').disabled=false; return; }
+    fwMsg('');
+    fwPinta();
+  }catch(e){ fwMsg('error: '+e, true); $c('fw_go').disabled=false; }
+};
 if($c('g_ing')) $c('g_ing').onclick=()=>{ $c('g_mm').value=MMP_INGLESA.toFixed(6); calCalc(); };
 if($c('g_met')) $c('g_met').onclick=()=>{ $c('g_mm').value=MMP_METRICA.toFixed(6); calCalc(); };
 if($c('led_on'))  $c('led_on').onclick  = ()=>accion('ledson');
@@ -1167,96 +1254,9 @@ async function tpu(){
   }
 }
 
-// ---------------- firmware de los sensores (OTA por SPE) ----------------
-// Se sondea cada 3 s mientras hay un trabajo en curso y cada 15 s en reposo:
-// la secuencia dura cerca de minuto y medio y el operador necesita ver en que
-// paso va, no un boton que se queda gris sin decir nada.
-let OTA_SHA = null;
-
-function otaMsg(t, err){
-  const d = $('#ota_msg');
-  d.textContent = t || '';
-  d.style.color = err ? '#f85149' : '';
-}
-
-async function otaCargar(){
-  const f = $('#ota_file').files[0];
-  if(!f){ otaMsg('elige primero un fichero .bin', true); return; }
-  otaMsg('subiendo '+f.name+'…');
-  try{
-    const r = await fetch('/api/ota/imagen', {method:'POST', body: f});
-    const j = await r.json();
-    if(!r.ok){ otaMsg(j.error || 'rechazada', true); return; }
-    otaMsg('imagen cargada y verificada');
-    ota();
-  }catch(e){ otaMsg('error al subir: '+e, true); }
-}
-
-async function otaActualizar(btn){
-  const id = btn.dataset.id;
-  if(!confirm('¿Actualizar el firmware del tanque '+id+'?\n\n'
-      +'La imagen nueva arranca a prueba y se revierte sola si el sensor no '
-      +'transmite. Tarda alrededor de minuto y medio.')) return;
-  btn.disabled = true;
-  try{
-    const r = await fetch('/api/ota/tank/'+id, {method:'POST'});
-    const j = await r.json();
-    if(!r.ok){ otaMsg(j.error || 'no se pudo lanzar', true); btn.disabled = false; return; }
-    otaMsg('');
-    ota();
-  }catch(e){ otaMsg('error: '+e, true); btn.disabled = false; }
-}
-
-async function ota(){
-  try{
-    const j = await (await fetch('/api/ota')).json();
-    const im = j.imagen;
-    OTA_SHA = im ? im.sha : null;
-    $('#ota_img').innerHTML = im
-      ? `imagen cargada: <b>v${im.version}</b> · ${(im.tam/1024).toFixed(1)} kB ·
-         <span class="mut">sha ${im.sha.slice(0,16)}…</span>`
-      : 'no hay ninguna imagen cargada';
-
-    const t = j.trabajo;
-    const enCurso = t && t.estado === 'en_curso';
-    if(t){
-      const col = t.estado==='ok' ? '#3fb950' : (t.estado==='error' ? '#f85149' : '#d29922');
-      $('#ota_hdr').innerHTML = `<span style="color:${col}">tanque ${t.tank_id}: `
-        + `${t.fase}${t.motivo ? ' — '+t.motivo : ''}</span>`;
-    } else {
-      $('#ota_hdr').textContent = '';
-    }
-
-    // Un boton por tanque que este reportando. Los que no reportan no se
-    // ofrecen: sin enlace no hay por donde entrar, y un boton que siempre
-    // falla solo genera desconfianza en el que si funciona.
-    const tk = await (await fetch('/api/tanks')).json();
-    const filas = (tk.tanks||[]).map(x => {
-      const on = x.online;
-      const dis = (!im || !on || enCurso) ? 'disabled' : '';
-      return `<tr><td>tank${x.tank_id}</td>
-        <td class="mut">${on ? 'en línea' : 'sin señal'}</td>
-        <td><button type="button" data-id="${x.tank_id}" class="otab" ${dis}>Actualizar</button></td></tr>`;
-    }).join('');
-    $('#ota_wrap').innerHTML = filas
-      ? `<table><thead><tr><th>Sensor</th><th>Estado</th><th></th></tr></thead>
-         <tbody>${filas}</tbody></table>`
-      : '<p class="mut">no hay sensores conocidos</p>';
-    document.querySelectorAll('.otab').forEach(b =>
-      b.addEventListener('click', () => otaActualizar(b)));
-
-    setTimeout(ota, enCurso ? 3000 : 15000);
-  }catch(e){
-    $('#ota_img').textContent = 'sin datos de firmware';
-    setTimeout(ota, 15000);
-  }
-}
-
-$('#ota_up').addEventListener('click', otaCargar);
 
 tanks(); setInterval(tanks,5000);
 tpu();   setInterval(tpu,10000);
-ota();
 load();
 </script></body></html>
 """
