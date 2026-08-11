@@ -13,7 +13,12 @@ import serial, sys, time
 
 BINF = sys.argv[1] if len(sys.argv) > 1 else 'att_blinky.bin'
 PORT = sys.argv[2] if len(sys.argv) > 2 else 'COM6'   # el puerto cambia al reenchufar
-ADDR = 0x08000000
+# Direccion destino. Por defecto el principio del flash (MCUboot + app), que es
+# el caso normal. Se puede dar otra para escribir UNA particion suelta:
+#   0x08000000  MCUboot            0x08010000  slot0 (imagen activa)
+#   0x080f0000  slot1 (ranura OTA) -- util para comparar una subida por SMP
+#                                     contra una escritura por cable
+ADDR = int(sys.argv[3], 0) if len(sys.argv) > 3 else 0x08000000
 
 
 def ack(ser, tmo=2):
@@ -119,10 +124,20 @@ if not connect(ser):
     print(">>> NO conecta. Entra en bootloader (Bootload+reset) y reintenta.")
     sys.exit(1)
 
-print("Conectado. Mass erase...")
-if not erase_all(ser):
-    print(">>> erase FALLO")
-    sys.exit(1)
+# ⚠️ EL BORRADO TOTAL SOLO CUANDO SE ESCRIBE LA IMAGEN COMPLETA. Escribiendo
+# UNA particion suelta, un mass erase se llevaria por delante MCUboot y la app
+# -- la placa quedaria sin nada y habria que recomponerla entera por cable.
+#
+# A cambio, en ese modo la region destino TIENE que estar ya borrada: escribir
+# sobre flash con datos corrompe en silencio. MCUboot borra slot1 entera cada
+# vez que rechaza una imagen, asi que tras un rechazo esta limpia.
+if ADDR == 0x08000000:
+    print("Conectado. Mass erase...")
+    if not erase_all(ser):
+        print(">>> erase FALLO")
+        sys.exit(1)
+else:
+    print("Conectado. Escribiendo en 0x%08X SIN borrar (particion suelta)." % ADDR)
 
 # Bloques de 128 B en vez de 256: la mitad de energia por escritura, o sea
 # medio pico de corriente en el rail que alimenta la linea serie. Tarda algo

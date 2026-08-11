@@ -1475,6 +1475,11 @@ int main(void)
 
 	k_msleep(1500);
 	LOG_INF("=== ATT Varec2500 — encoder -> SPE ===");
+	/* Sello de compilacion. Con OTA es la unica forma FIABLE de saber que
+	 * imagen esta corriendo de verdad: tras un intercambio de ranuras, la
+	 * placa arranca igual con la nueva que con la vieja, y sin un dato que
+	 * las distinga uno acaba deduciendo el resultado de sintomas. */
+	LOG_INF("build %s %s", __DATE__, __TIME__);
 #ifdef CONFIG_MCUBOOT_IMG_MANAGER
 	LOG_INF("OTA: imagen %s",
 		boot_is_img_confirmed() ? "confirmada" :

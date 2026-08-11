@@ -141,10 +141,15 @@ separado.
 El *warning* `Error reading MCUMgr parameters … ENOTSUP` es inocuo (el grupo
 `os` no implementa esa consulta opcional).
 
-### ⚠️ ABIERTO: el intercambio de ranuras
+### ✅ RESUELTO 2026-08-11 — eran DOS fallos encadenados
 
-Con el modo por defecto **`swap-using-offset`** MCUboot rechaza la imagen y
-**borra slot1**:
+**El OTA por SPE funciona de punta a punta**: subida, marcado, reinicio remoto,
+intercambio de ranuras y autoconfirmación, sin cable y sin tocar la placa.
+
+#### Fallo 1 (ya estaba arreglado): el modo de intercambio
+
+Con el modo por defecto **`swap-using-offset`** MCUboot rechazaba la imagen y
+**borraba slot1**:
 
 ```
 <inf> mcuboot: Image index: 0, Swap type: test
@@ -157,13 +162,52 @@ Con el modo por defecto **`swap-using-offset`** MCUboot rechaza la imagen y
 imagen secundaria desplazada un sector y la subida SMP la escribe al
 principio.
 
-Se cambió a `SB_CONFIG_MCUBOOT_MODE_SWAP_USING_MOVE=y` y **sigue fallando**,
-pero **aún no se ha capturado el log de MCUboot con el modo nuevo**. Ese es el
-siguiente paso — no volver a especular. Alternativas si no basta: dimensionar
-slot1 un sector mayor que slot0, o `overwrite-only` (pierde la reversión).
+Se cambió a `SB_CONFIG_MCUBOOT_MODE_SWAP_USING_MOVE=y`, que **lo arregló** —
+pasa a ser un aviso (`Non-optimal sector distribution`) y las ranuras son
+compatibles. ⚠️ **Ese cambio exige regrabar MCUboot por cable**: vive en su
+propia partición y el OTA no lo toca. Mientras no se regrabe, la placa sigue
+con el bootloader viejo y parece que el cambio "no hizo nada".
 
-**Todo lo demás del OTA está verificado**: subida, marcado, reinicio remoto y
-autoconfirmación.
+#### Fallo 2 (el que quedaba): el búfer de recepción se comía un byte por paquete
+
+Con el modo nuevo, MCUboot **seguía** rechazando con `Image in the secondary
+slot is not valid!`, cortando **justo tras leer el TLV del hash** — o sea, un
+hash que no cuadra.
+
+**Cómo se localizó, sin especular:**
+
+1. Se subió una imagen **que MCUboot sí validaba** (la que esa placa llevaba
+   días arrancando). También la rechazó ⇒ **no era el fichero**.
+2. Se escribió slot1 **por cable** con la misma imagen ⇒ **la aceptó e
+   intercambió** ⇒ no era la ranura, ni el modo, ni la firma, ni MCUboot.
+3. Se subió por SMP, se puso la placa en bootloader y se **volcó slot1 por
+   cable** para compararla byte a byte con el fichero.
+
+El resultado nombró el fallo solo:
+
+```
+103 bytes distintos de 149388 (0,069 %), TODOS aislados
+uno cada 1448 bytes exactos
+y el byte del flash es SIEMPRE 0xBF
+```
+
+`0xBF` es el marcador CBOR de **inicio de mapa** — el primer byte de una
+respuesta SMP. La placa codificaba la respuesta encima del búfer que todavía
+contenía los datos recibidos, y le pisaba un byte a cada paquete antes de
+escribirlo. 1448 B es lo que cabe de datos en un paquete con el MTU por
+defecto; el búfer estaba en **1024**.
+
+**El arreglo**: `CONFIG_MCUMGR_TRANSPORT_NETBUF_SIZE=1536` (≥ un paquete
+entero). Verificado subiendo con el MTU por defecto, sin parámetros.
+
+**Alternativa sin tocar firmware**, útil contra una placa ya desplegada que
+aún lleve el búfer viejo: `smpmgr --mtu 512`.
+
+⚠️ **Por qué engañaba tanto**: la cabecera y la zona de TLV caen fuera de las
+posiciones pisadas, así que `image state-read` devolvía el hash **correcto**,
+la subida llegaba al 100 % y todo parecía bien — hasta que MCUboot rehacía el
+cálculo sobre la flash. Un fallo del 0,07 % de los bytes que se presenta como
+"la imagen no es válida".
 
 ---
 

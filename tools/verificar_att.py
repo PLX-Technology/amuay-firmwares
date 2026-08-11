@@ -16,7 +16,10 @@ import serial, sys, time
 
 BINF = sys.argv[1]
 PORT = sys.argv[2]
-ADDR = 0x08000000
+# Direccion a comparar. Por defecto el principio del flash; se puede dar otra
+# para leer UNA particion suelta, p.ej. 0x080f0000 (slot1) y ver que dejo ahi
+# una subida OTA por SMP frente a lo que deberia haber.
+ADDR = int(sys.argv[3], 0) if len(sys.argv) > 3 else 0x08000000
 
 
 def ack(ser, tmo=2):
