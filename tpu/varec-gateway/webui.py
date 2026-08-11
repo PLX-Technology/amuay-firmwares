@@ -339,6 +339,7 @@ PAGE = r"""<!doctype html>
   <h1 id="site">Pasarela Varec</h1>
   <div class="tabs">
     <div class="tab on" data-t="dash">Tanques</div>
+    <div class="tab" data-t="fw">Firmware</div>
     <div class="tab" data-t="cfg">Settings</div>
   </div>
   <div class="sp"></div>
@@ -392,6 +393,18 @@ PAGE = r"""<!doctype html>
     </div>
 
     <div class="card">
+      <p class="mut" style="margin:10px 0 0">El <b>tank_id</b> vive en la EEPROM de cada
+        sensor y viaja en cada trama: al cambiarlo aquí se escribe <b>en el sensor</b> por
+        Modbus, no en la pasarela. Así, si sustituyes una ATT averiada, le pones su id y
+        listo.</p>
+    </div>
+  </div>
+
+  <!-- Pestana aparte, no en el panel de tanques: esto es mantenimiento, no
+       vigilancia. Quien esta mirando niveles no necesita un boton que
+       reprograma sensores de campo delante todo el rato. -->
+  <div id="fw" style="display:none">
+    <div class="card">
       <h2>Firmware de los sensores <span class="mut" id="ota_hdr" style="text-transform:none;font-weight:400"></span></h2>
       <div id="ota_img" class="mut">cargando…</div>
       <p style="margin:10px 0 4px">
@@ -415,13 +428,6 @@ PAGE = r"""<!doctype html>
       <p class="mut" style="margin:6px 0 0">De uno en uno, a propósito. Con 50 tanques la
         tentación de actualizar todos es fuerte, y también la posibilidad de dejar 50
         sensores raros a la vez.</p>
-    </div>
-
-    <div class="card">
-      <p class="mut" style="margin:10px 0 0">El <b>tank_id</b> vive en la EEPROM de cada
-        sensor y viaja en cada trama: al cambiarlo aquí se escribe <b>en el sensor</b> por
-        Modbus, no en la pasarela. Así, si sustituyes una ATT averiada, le pones su id y
-        listo.</p>
     </div>
   </div>
 
@@ -569,10 +575,13 @@ const SECS = {
 let CFG={};
 
 const $=s=>document.querySelector(s);
+// Un panel por pestana, por data-t. Antes eran dos ifs; con la tercera
+// pestana eso ya pedia una lista -- anadir una cuarta y olvidar una linea
+// deja dos paneles visibles a la vez.
+const PANELES = ['dash', 'fw', 'cfg'];
 document.querySelectorAll('.tab').forEach(x=>x.onclick=()=>{
   document.querySelectorAll('.tab').forEach(y=>y.classList.toggle('on',y===x));
-  $('#dash').style.display = x.dataset.t=='dash'?'':'none';
-  $('#cfg').style.display  = x.dataset.t=='cfg'?'':'none';
+  PANELES.forEach(p => $('#'+p).style.display = (x.dataset.t==p ? '' : 'none'));
 });
 
 let editing=false;
