@@ -413,8 +413,9 @@ PAGE = r"""<!doctype html>
     <h2 style="margin-top:0">Configurar <span id="caltit"></span></h2>
     <p class="mut" style="margin:0 0 12px;font-size:13px">Pulsos ahora:
       <b id="calvivo" style="color:#e6edf3;font-size:15px">—</b>
-      <span style="font-size:12px">&nbsp;se actualiza cada 2 s; espera a que se
-      estabilice antes de capturar</span></p>
+      <span style="font-size:12px">&nbsp;le&iacute;do del sensor en directo, no
+      depende del periodo de env&iacute;o; espera a que se estabilice antes de
+      capturar</span></p>
 
     <div style="display:flex;gap:8px;margin:0 0 12px">
       <button id="mg_geo" class="mini" style="flex:1">Por geometr&iacute;a</button>
@@ -1025,11 +1026,25 @@ async function calNow(campo){
   // congelado en el instante en que se abrio. Leyendo de ahi, "Leer" devolvia
   // siempre la misma cifra por mucho que la cinta se moviera -- y el punto B
   // salia identico al A, que es justo lo que invalida la recta.
+  //
+  // ★ Y se lee DEL SENSOR, no del ultimo valor empujado: capturar un punto de
+  // calibracion con una cifra de hace 30 s falsea la recta sin avisar. Si no
+  // contesta se cae al empujado, pero diciendolo.
   try{
-    const r = await fetch('/api/tanks'); const d = await r.json();
+    const r = await fetch(`/api/tank/${CALID}/vivo`);
+    if(r.ok){
+      const d = await r.json();
+      $c(campo).value = d.count; $c('calm').textContent=''; calCalc();
+      return;
+    }
+  }catch(e){}
+  try{
+    const d = await (await fetch('/api/tanks')).json();
     const t = (d.tanks||[]).find(x=>x.tank_id===CALID);
     if(!t || t.count==null){ $c('calm').textContent='Ese sensor no reporta pulsos ahora.'; return; }
-    $c(campo).value = t.count; $c('calm').textContent=''; calCalc();
+    $c(campo).value = t.count; calCalc();
+    $c('calm').textContent='Ojo: el sensor no responde a la lectura directa; '
+      +'este valor es el ultimo recibido y puede tener hasta un periodo de retraso.';
   }catch(e){ $c('calm').textContent='No pude leer los pulsos: '+e; }
 }
 
@@ -1042,22 +1057,46 @@ let CALVIVO = null;
 // funcionaria igual --el cuerpo corre despues de cargar el script-- pero con
 // `let` eso es zona muerta esperando a que alguien adelante una llamada.
 let FWTIMER = null;
+// ★ El conteo se le PREGUNTA al sensor, no se espera a que lo empuje.
+//
+// Antes se leia de /api/tanks, o sea el ultimo valor empujado: el refresco lo
+// marcaba el periodo de envio. Con 30 s, quien mueve la cinta con la perilla
+// esperaba medio minuto por cada lectura. Preguntando por Modbus se ve el
+// encoder moverse cuando se mueve, y el almacenamiento sigue a su ritmo
+// configurado sin enterarse.
+//
+// Si el sensor no contesta se cae al ultimo valor empujado en vez de enseñar
+// un error: sigue siendo informacion util, solo que mas vieja.
 function calVivoArrancar(){
   const pinta = async () => {
     if(!$c('calbg') || $c('calbg').style.display!=='flex') return;
+    const e = $c('calvivo'); if(!e) return;
     try{
-      const r = await fetch('/api/tanks'); const d = await r.json();
+      const r = await fetch(`/api/tank/${CALID}/vivo`);
+      if(r.ok){
+        const d = await r.json();
+        e.textContent = d.count;
+        e.title = 'leido del sensor ahora mismo';
+        return;
+      }
+    }catch(err){}
+    try{
+      const d = await (await fetch('/api/tanks')).json();
       const t = (d.tanks||[]).find(x=>x.tank_id===CALID);
-      const e = $c('calvivo');
-      if(e) e.textContent = (t && t.count!=null) ? t.count : '—';
-    }catch(e){}
+      e.textContent = (t && t.count!=null) ? t.count : '—';
+      e.title = 'ultimo valor recibido: el sensor no responde a la lectura directa';
+    }catch(err){}
   };
   pinta();
   if(CALVIVO) clearInterval(CALVIVO);
-  CALVIVO = setInterval(pinta, 2000);
+  CALVIVO = setInterval(pinta, 700);
 }
 function calVivoParar(){
   if(CALVIVO){ clearInterval(CALVIVO); CALVIVO=null; }
+  // Soltar la sesion Modbus en cuanto se sabe que ya nadie mira. La pasarela
+  // la cerraria sola por inactividad, pero no tiene sentido dejarla abierta
+  // 30 s contra un sensor con el que ya no se esta trabajando.
+  if(CALID !== null){ fetch(`/api/tank/${CALID}/soltar`).catch(()=>{}); }
   // Tambien el sondeo del firmware, y se vuelve a geometria: si no, abrir el
   // modal de OTRO tanque lo dejaria en la pestana Firmware, con el boton de
   // actualizar apuntando ya a un sensor distinto del que se estaba mirando.

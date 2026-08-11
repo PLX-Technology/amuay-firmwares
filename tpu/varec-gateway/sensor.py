@@ -21,6 +21,8 @@ import os
 import re
 import socket
 import struct
+import threading
+import time
 
 MB_PORT = 502
 HR_FLAGS = 0
@@ -137,6 +139,101 @@ def _txn(ip: str, unit: int, pdu: bytes, timeout=4.0) -> bytes:
     """
     with Sesion(ip, unit, timeout) as ses:
         return ses.txn(pdu)
+
+
+# ------------------------------------------------- lectura en vivo (FC 04)
+# Registros de ENTRADA de la ATT. Espejo de mb_input_reg_rd() en att/src/main.c.
+IR_COUNT_HI = 0     # el conteo son 32 bits en dos registros
+IR_EDGES_HI = 2
+IR_ERRORS = 4
+IR_UPTIME = 5
+
+
+def leer_encoder(ses: "Sesion") -> dict:
+    """Conteo del encoder AHORA, preguntandoselo al sensor.
+
+    ★ POR QUE EXISTE. La vista de calibracion mostraba el ultimo valor que la
+    ATT hubiera EMPUJADO, asi que su refresco lo marcaba el periodo de envio:
+    con 30 s, quien mueve la cinta con la perilla espera medio minuto por cada
+    lectura, y con 50 tanques eso es una tarde perdida.
+
+    La alternativa era subirle el ritmo de envio mientras el modal esta
+    abierto, pero eso MODIFICA EL SENSOR y hay que acordarse de deshacerlo: si
+    alguien cierra el portatil, esa placa se queda transmitiendo rapido para
+    siempre. Preguntar no cambia nada: no hay estado que restaurar, y el
+    almacenamiento y MQTT siguen a su ritmo configurado sin enterarse.
+
+    Recibe una Sesion YA ABIERTA a proposito -- ver SesionesVivas.
+    """
+    body = ses.txn(struct.pack(">BHH", 4, IR_COUNT_HI, 6))
+    if len(body) < 2 + 12:
+        raise IOError("respuesta incompleta al leer el encoder")
+    r = struct.unpack(">6H", body[2:14])
+    count = (r[0] << 16) | r[1]
+    if count >= 0x80000000:                 # el conteo es CON SIGNO
+        count -= 0x100000000
+    return {"count": count,
+            "edges": (r[2] << 16) | r[3],
+            "errors": r[4],
+            "uptime_s": r[5]}
+
+
+class SesionesVivas:
+    """Una conexion Modbus POR TANQUE, reutilizada y cerrada por inactividad.
+
+    ⚠️ NO ABRIR UNA CONEXION POR LECTURA. Sondeando cada 500 ms, eso son dos
+    conexiones por segundo: en un par de minutos se agotan los contextos TCP de
+    la ATT y deja de aceptar conexiones -- con toda la pinta de un sensor
+    caido, y sin relacion aparente con lo que se estaba haciendo. Ya paso dos
+    veces en este proyecto por el mismo motivo.
+
+    El cierre por inactividad es la red de seguridad: si el navegador se cierra
+    sin avisar, la sesion se suelta sola y no queda nada abierto.
+    """
+
+    def __init__(self, inactividad: float = 30.0):
+        self.inactividad = inactividad
+        self._s = {}                        # tank_id -> (Sesion, ip, ultimo_uso)
+        self._lock = threading.Lock()
+
+    def _purgar(self, ahora):
+        for tid, (ses, _ip, visto) in list(self._s.items()):
+            if ahora - visto > self.inactividad:
+                ses.close()
+                del self._s[tid]
+
+    def leer(self, tank_id: int, ip: str, unit: int = 1) -> dict:
+        ahora = time.time()
+        with self._lock:
+            self._purgar(ahora)
+            ses = None
+            if tank_id in self._s:
+                ses, ip_prev, _ = self._s[tank_id]
+                if ip_prev != ip:           # cambio de IP: la vieja no vale
+                    ses.close()
+                    ses = None
+                    del self._s[tank_id]
+            if ses is None:
+                ses = Sesion(ip, unit)
+            try:
+                dat = leer_encoder(ses)
+            except Exception:
+                # Una sesion rota no se reutiliza: se suelta y la siguiente
+                # lectura abre otra. Insistir sobre ella da fallos en cadena.
+                ses.close()
+                self._s.pop(tank_id, None)
+                raise
+            self._s[tank_id] = (ses, ip, ahora)
+        return dat
+
+    def soltar(self, tank_id: int):
+        """Cierre explicito al cerrar el modal. La inactividad ya lo haria,
+        pero soltarlo en cuanto se sabe evita tener una conexion abierta 30 s
+        contra un sensor con el que ya nadie esta trabajando."""
+        with self._lock:
+            t = self._s.pop(tank_id, None)
+        if t:
+            t[0].close()
 
 
 def read_cfg(ip: str, unit: int = 1) -> dict:

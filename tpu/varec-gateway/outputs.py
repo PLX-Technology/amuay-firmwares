@@ -339,7 +339,11 @@ class HttpOut:
         self.full_cfg = full_cfg or {}
         self.cfg_path = cfg_path
         import ota as ota_mod
+        import sensor as sensor_mod
         self.ota = ota_mod.Gestor(self.full_cfg)
+        # Sesiones Modbus vivas para la vista de calibracion. Una por tanque,
+        # reutilizada mientras se sondea y cerrada por inactividad.
+        self.vivas = sensor_mod.SesionesVivas()
         outer = self
 
         class H(http.server.BaseHTTPRequestHandler):
@@ -721,6 +725,41 @@ class HttpOut:
                     eq = outer.switches_fn(macs)
                     self._send({"switches": eq, "n": len(eq),
                                 "ts": int(time.time())})
+                elif p.startswith("/api/tank/") and p.endswith("/vivo"):
+                    # Conteo del encoder AHORA, preguntandoselo al sensor. Lo
+                    # usa la vista de calibracion: sin esto su refresco lo
+                    # marcaba el periodo de envio, y con 30 s quien mueve la
+                    # cinta espera medio minuto por cada lectura.
+                    if not self._auth():
+                        return
+                    import sensor
+                    try:
+                        tid = int(p.split("/")[3])
+                    except (IndexError, ValueError):
+                        return self._send({"error": "tank_id invalido"}, 400)
+                    rec = outer.live.snapshot().get(tid)
+                    if not rec:
+                        return self._send({"error": "ese tanque no esta reportando"}, 404)
+                    ip = sensor.mac_to_ip(rec["mac"])
+                    if not ip:
+                        return self._send({"error": "no se encuentra su IP"}, 409)
+                    try:
+                        dat = outer.vivas.leer(tid, ip)
+                    except Exception as e:
+                        # 503 y no 500: el sensor puede estar ocupado o haberse
+                        # ido un instante. El panel cae al ultimo valor
+                        # empujado en vez de enseñar un error.
+                        return self._send({"error": str(e)}, 503)
+                    self._send({"tank_id": tid, **dat})
+                elif p.startswith("/api/tank/") and p.endswith("/soltar"):
+                    if not self._auth():
+                        return
+                    try:
+                        tid = int(p.split("/")[3])
+                    except (IndexError, ValueError):
+                        return self._send({"error": "tank_id invalido"}, 400)
+                    outer.vivas.soltar(tid)
+                    self._send({"ok": True})
                 elif p == "/api/ota":
                     if not self._auth():
                         return
