@@ -49,6 +49,8 @@ volatile unsigned short g_ph_b10l[6];   /* 0x0108F7  B10L link status */
 volatile unsigned short g_ph_anst[6];   /* 0x070201  AN status */
 volatile unsigned short g_ph_anctl[6];  /* 0x070200  AN control, bit12 = AN on */
 volatile unsigned short g_ph_pma[6];    /* 0x010834  PMA ctrl (maestro/esclavo) */
+volatile unsigned short g_ph_niv[6];    /* 0x0108F6  B10L PMA ctrl, bit12 = 2,4 V
+                                         * RESUELTO (leido con el enlace arriba) */
 volatile int            g_ph_rc[6];     /* rc de la 1a lectura de cada puerto */
 volatile unsigned int g_st[10];
 volatile unsigned int g_st3[5];
@@ -1107,6 +1109,7 @@ int main(void)
 
 	printf("%02x\n", mac_addr[5]);
 
+
 	if (switch_op & BIT(0)) {
 		printf("PSE disabled\n");
 		ret = adin6310_vlan_example();
@@ -1155,6 +1158,69 @@ int main(void)
 
 	printf("Configuration done\n");
 
+		/* ★ El nivel de 2,4 V se pone AQUI, en el bucle, a los ~5 s del
+		 * arranque, y NO en la inicializacion: escribirlo justo tras
+		 * "Configuration done" dejaba la placa MUDA -- no llegaba a arrancar
+		 * (2026-08-07, dos ciclos y 70 s de escucha, silencio total).
+		 * Aqui el sistema ya esta en pie, asi que si tocar el PHY perturba
+		 * algo se VE, en vez de perder la placa. Una sola vez. */
+
+	/* ★ NIVEL DE TRANSMISION 10BASE-T1L, POR PUERTO (2026-08-07).
+	 *
+	 * 10BASE-T1L tiene dos amplitudes: 1,0 Vpp llega a ~200 m y 2,4 Vpp a
+	 * 1000 m. Con un cable de 1000 m al PDM del Port 5 el enlace no sube, y
+	 * NO habia forma de saber a que nivel esta transmitiendo: la
+	 * inicializacion de puertos de aqui no lo toca, el SDK del ADIN6310 no
+	 * registra nada, y las trazas de "2.4V mode" que se ven en la ATT salen
+	 * del driver phy_adin2111 de Zephyr, que esta placa no usa.
+	 *
+	 * RESUELTO EL 2026-08-11. Se deja como documentacion; el firmware NO tiene
+	 * nada que hacer aqui.
+	 *
+	 * Registros del PHY (la unica fuente que no opina):
+	 *   MMD 1 reg 0x08F6 (1.2294)  B10L PMA control -> bit12 = transmitir a 2,4 V
+	 *   MMD 1 reg 0x08F7 (1.2295)  B10L PMA status  -> bit12 = CAPAZ de 2,4 V
+	 *
+	 * ⚠️ PERO EL BIT DEL PMA NO SE ELIGE: LO FIJA LA AUTONEGOCIACION. Con la AN
+	 * encendida, el PHY reescribe 0x08F6 con el nivel acordado al enlazar. Para
+	 * subir a 2,4 V hay que PEDIRLO EN EL ANUNCIO, y el anuncio BASE-T1 son 48
+	 * bits en TRES registros de MMD 7:
+	 *
+	 *     0x0202  ADV_L  [15:0]
+	 *     0x0203  ADV_M  [31:16]   bit 14 = "compatible con 10BASE-T1L"
+	 *     0x0204  ADV_H  [47:32]   bit 13 = capaz de 2,4 V
+	 *                              bit 12 = PIDE 2,4 V     <- este
+	 *
+	 * ⚠️ NO ES EL 0x0203. Una jornada entera se fue en eso: leiamos 0x0203 =
+	 * 0x4000 y lo tomabamos por "capaz pero sin pedirlo", cuando ese bit solo
+	 * dice "hago 10BASE-T1L" y esta puesto siempre. Las escrituras del supuesto
+	 * bit de peticion caian en un bit reservado, no cambiaban nada, y parecia
+	 * que el PHY las revertia desde sus straps. No revertia: no escribiamos
+	 * donde habia que escribir. (MDIO_AN_T1_ADV_H_10L_TX_HI_REQ, uapi/mdio.h.)
+	 *
+	 * El enlace resuelve 2,4 V si LOS DOS extremos son capaces y AL MENOS UNO
+	 * lo pide.
+	 *
+	 * ★ Y NO SE ARREGLA POR FIRMWARE, SE ARREGLA POR HARDWARE: en el ADIN1100
+	 * hay que ABRIR EL INTERRUPTOR DE `RXD0` del DIP de 4 posiciones del
+	 * modulo. El strap habilita la capacidad REAL del PHY (0x08F7 bit 12) y de
+	 * ahi sale todo en cascada -- capacidad, anuncio, peticion y el bit del
+	 * PMA. Medido: con el DIP abierto el puerto llega solo a advH=3000 y
+	 * negocia 2,4 V. Escribir el anuncio desde aqui es un no-op, y donde el
+	 * strap esta cerrado el PHY ni siquiera es capaz, asi que tampoco serviria.
+	 *
+	 * ⚠️ HAY QUE ABRIRLO EN LOS DOS EXTREMOS de cada tirada larga, incluidos
+	 * los modulos PDM entre switches, no solo los puertos de sensor.
+	 *
+	 * ⚠️ Y AUN ASI EL CABLE MANDA. Los 1000 m del estandar suponen par
+	 * trenzado de 100 ohmios y <=45 nF/km (fieldbus Type A). Con cable de
+	 * instrumentacion de 4 hilos sueltos (Teldor INS 4x18, 70 nF/km medidos)
+	 * NO ENLAZA A 1000 m ni con los dos extremos a 2,4 V: el PHY no ve nada
+	 * (anst=0008, igual que un puerto vacio) aunque la CONTINUA SI PASE. Ver
+	 * `2026-08-11` en el historial y la nota de memoria spe-1000m-cable.
+	 */
+#define AN_T1_ADV_H          0x070204   /* MMD 7: bit13 = capaz, bit12 = pide */
+
 	/* Deteccion de cortos PSM/PDM + LED (feature Mayker). Sustituye al bloque
 	 * de sondeo RJ45/ADIN1300 del macPort5 (hardware inexistente en el field
 	 * switch, todo SPE) que crasheaba la app. */
@@ -1194,6 +1260,24 @@ int main(void)
 				v = 0; SES_ReadPhyReg(phl[q], 0x070201, &v);              g_ph_anst[q]  = v;
 				v = 0; SES_ReadPhyReg(phl[q], 0x070200, &v);              g_ph_anctl[q] = v;
 				v = 0; SES_ReadPhyReg(phl[q], 0x010834, &v);              g_ph_pma[q]   = v;
+			}
+
+			/* Nivel de transmision RESUELTO, por si hay que volver a
+			 * validar un cable largo. Se guarda, no se imprime: la
+			 * traza que usamos el 2026-08-11 sacaba seis lineas cada
+			 * 10 s por consola, util en el banco e inaceptable en
+			 * servicio.
+			 *
+			 * ⚠️ ES ESTA LECTURA LA QUE VALE, NO LA DEL ARRANQUE: antes
+			 * de enlazar, 0x08F6 solo refleja el valor por defecto del
+			 * strap. El nivel de verdad lo fija la autonegociacion al
+			 * enlazar. Con link=1 y bit12=0 el que no concede 2,4 V es
+			 * el extremo REMOTO; con anst=0008 no hay nadie al otro
+			 * lado y el sospechoso es el cable.
+			 */
+			for (int q = 0; q < 6; q++) {
+				v = 0; SES_ReadPhyReg(phl[q], 0x0108F6, &v);
+				g_ph_niv[q] = v;
 			}
 		}
 

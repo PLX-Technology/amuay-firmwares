@@ -1343,6 +1343,69 @@ static void att_phy_dormir(bool dormir)
 	LOG_INF("PHY del ADIN2111: %s", dormir ? "EN BAJO CONSUMO" : "despiertos");
 }
 
+/* Pide 2,4 Vpp de nivel de transmision (10BASE-T1L largo alcance).
+ *
+ * POR QUE: a 1,0 Vpp el alcance util son ~200 m. En la refineria hay tiradas
+ * de 900-1000 m, que solo funcionan a 2,4 Vpp.
+ *
+ * ⚠️ EL NIVEL NO SE ELIGE, SE NEGOCIA. En 802.3cg el enlace sube a 2,4 V solo
+ * si LOS DOS extremos declaran ser CAPACES y AL MENOS UNO lo PIDE. Escribir el
+ * bit de nivel del PMA (1.0x08F6 bit 12) no basta: al resolver la
+ * autonegociacion, el PHY lo reescribe con el resultado acordado.
+ *
+ * ⚠️ EL REGISTRO ES EL 0x0204, NO EL 0x0203. El anuncio BASE-T1 son 48 bits
+ * repartidos en tres registros de MMD 7, y los de 2,4 V estan en el ALTO:
+ *
+ *     0x0202  ADV_L  [15:0]
+ *     0x0203  ADV_M  [31:16]   bit 14 = "compatible con 10BASE-T1L"
+ *     0x0204  ADV_H  [47:32]   bit 13 = capaz de 2,4 V
+ *                              bit 12 = PIDE 2,4 V     <- este
+ *
+ * Esto costo una jornada entera: leiamos 0x0203 = 0x4000 y lo interpretabamos
+ * como "capaz de 2,4 V pero sin pedirlo", cuando ese bit solo dice "hago
+ * 10BASE-T1L" y esta puesto siempre. Las escrituras iban a un bit reservado y
+ * parecia que el PHY las revertia. Referencia: MDIO_AN_T1_ADV_H_10L_TX_HI_REQ
+ * en include/uapi/linux/mdio.h.
+ *
+ * Es seguro dejarlo puesto siempre: si el otro extremo no es capaz, la
+ * negociacion resuelve 1,0 V y el enlace sube igual. Pedirlo no fuerza nada.
+ */
+#define AN_T1_ADV_H         0x0204
+#define AN_T1_ADV_H_2V4_ABL BIT(13)
+#define AN_T1_ADV_H_2V4_REQ BIT(12)
+
+static void att_phy_2v4(void)
+{
+	for (int i = 0; i < 2; i++) {
+		uint16_t adv = 0, anctl = 0;
+
+		if (!device_is_ready(attphy[i])) {
+			continue;
+		}
+		if (phy_read_c45(attphy[i], 7, AN_T1_ADV_H, &adv) != 0) {
+			LOG_WRN("PHY%d: no pude leer el anuncio de AN", i + 1);
+			continue;
+		}
+		if (!(adv & AN_T1_ADV_H_2V4_ABL)) {
+			LOG_WRN("PHY%d: no declara ser capaz de 2,4 V (advH=%04x)", i + 1, adv);
+		}
+		if (adv & AN_T1_ADV_H_2V4_REQ) {
+			continue;               /* ya lo pide */
+		}
+		if (phy_write_c45(attphy[i], 7, AN_T1_ADV_H, adv | AN_T1_ADV_H_2V4_REQ) != 0) {
+			LOG_WRN("PHY%d: no pude pedir 2,4 V", i + 1);
+			continue;
+		}
+		/* Reiniciar la AN: el anuncio solo viaja en una negociacion nueva. */
+		if (phy_read_c45(attphy[i], 7, 0x0200, &anctl) == 0 && (anctl & BIT(12))) {
+			phy_write_c45(attphy[i], 7, 0x0200, anctl | BIT(9));
+		}
+		phy_read_c45(attphy[i], 7, AN_T1_ADV_H, &adv);
+		LOG_INF("PHY%d: 2,4 Vpp pedido (advH=%04x req=%d)", i + 1, adv,
+			!!(adv & AN_T1_ADV_H_2V4_REQ));
+	}
+}
+
 static void att_phy_dump(void)
 {
 	for (int i = 0; i < 2; i++) {
@@ -1520,6 +1583,10 @@ int main(void)
 	 *    con -EACCES si la interfaz ya esta arriba, y el DHCP tiene que
 	 *    salir con la definitiva o pedira concesion con la vieja. */
 	att_set_unique_mac();
+
+	/* Antes de levantar las interfaces: la AN se reinicia aqui y el enlace
+	 * sube ya con el nivel acordado, sin un primer enlace a 1,0 V. */
+	att_phy_2v4();
 
 	iface = net_if_get_default();
 	for (int i = 1; i <= 2; i++) {
