@@ -24,14 +24,37 @@ import time
 #     +2,+3  count crudo del encoder (int32)
 #     +4     errores del encoder
 #     +5     antiguedad de la ultima muestra, en segundos
-#     +6     estado: bit0 = online
+#     +6     online: 1 / 0
 #     +7     uptime del sensor, en minutos
-#     +8,+9  reservados
+#     +8     ★ PALABRA DE ESTADO (ver ST_*)
+#     +9     reservado
 #
 # Con 30 tanques son 300 registros; Modbus admite hasta 65536, asi que escala
 # sin problema. Se eligio bloque-por-tanque (y no un unit_id por tanque)
 # porque un SCADA puede leerlos todos de una pasada.
 REGS_PER_TANK = 10
+
+# ★ PALABRA DE ESTADO (registro +8), anadida 2026-08-12 para integrar con PLC.
+#
+# POR QUE HACE FALTA. Un nivel invalido viaja como NaN (ver tank_regs), pero
+# **los PLC antiguos se atragantan con NaN**: en un PLC-5 una comparacion
+# contra NaN puede dar resultados raros o marcar fallo en el bloque. Hacia
+# falta una senal de validez que se lea con un AND, no con aritmetica de coma
+# flotante.
+#
+# Y faltaba ademas decir si el tanque esta CALIBRADO. Sin calibrar, el "nivel"
+# que se publica son CUENTAS del encoder, no milimetros. Por MQTT eso ya se
+# distingue; por Modbus no habia forma, y un SCADA leyendo el numero crudo no
+# tiene modo de saber que no es una medida.
+ST_ONLINE    = 1 << 0    # el sensor esta reportando
+ST_CALIBRADO = 1 << 1    # hay recta de calibracion (no es la identidad)
+ST_REF_OK    = 1 << 2    # la ATT tiene referencia: su cuenta significa algo
+ST_ERRORES   = 1 << 3    # el encoder acumula errores
+ST_VALIDO    = 1 << 4    # ★ los tres primeros a la vez: USA ESTE NUMERO
+#
+# ⚠️ Un tanque desconocido devuelve TODO CEROS, o sea `valido = 0`. Es la
+# respuesta segura: quien lee no puede confundir "no se nada de ese tanque"
+# con "el tanque esta a cero".
 
 
 def tank_regs(rec: dict) -> list:
@@ -53,8 +76,29 @@ def tank_regs(rec: dict) -> list:
         min(int(rec.get("age_s") or 0), 0xFFFF),
         1 if rec.get("online") else 0,
         min(int((rec.get("uptime_s") or 0) // 60), 0xFFFF),
-        0, 0,
+        estado_word(rec),
+        0,
     ]
+
+
+def estado_word(rec: dict) -> int:
+    """Palabra de estado del tanque. Ver ST_* arriba."""
+    if rec is None:
+        return 0
+    online = bool(rec.get("online"))
+    cal = bool(rec.get("calibrado"))
+    ref = bool(rec.get("ref_ok", True))
+    v = 0
+    if online:               v |= ST_ONLINE
+    if cal:                  v |= ST_CALIBRADO
+    if ref:                  v |= ST_REF_OK
+    if rec.get("errors"):    v |= ST_ERRORES
+    # ⚠️ Las TRES condiciones. Falta cualquiera y el numero del registro de
+    # nivel no es una medida de nivel: o esta viejo, o son pulsos, o la ATT no
+    # sabe donde esta. Un solo bit para que el PLC no tenga que razonarlo.
+    if online and cal and ref:
+        v |= ST_VALIDO
+    return v
 
 
 # ============================================================ MQTT
@@ -760,6 +804,59 @@ class HttpOut:
                         return self._send({"error": "tank_id invalido"}, 400)
                     outer.vivas.soltar(tid)
                     self._send({"ok": True})
+                elif p == "/api/modbus":
+                    # La tabla Modbus TAL COMO LA LEE UN CLIENTE, con los
+                    # valores de este instante. Es la unica forma de resolver
+                    # una integracion sin discutir: se compara lo que ve el PLC
+                    # con lo que ve el panel, registro a registro, y se acabo.
+                    if not self._auth():
+                        return
+                    snap = outer.live.snapshot()
+                    tanques = []
+                    for tid in sorted(snap):
+                        rec = snap[tid]
+                        regs = tank_regs(rec)
+                        est = regs[8]
+                        tanques.append({
+                            "tank_id": tid,
+                            "nombre": rec.get("name"),
+                            "base": (tid - 1) * REGS_PER_TANK,
+                            "registros": regs,
+                            "nivel": rec.get("value"),
+                            "unidad": rec.get("unit"),
+                            "estado": est,
+                            "bits": {
+                                "online": bool(est & ST_ONLINE),
+                                "calibrado": bool(est & ST_CALIBRADO),
+                                "ref_ok": bool(est & ST_REF_OK),
+                                "errores": bool(est & ST_ERRORES),
+                                "valido": bool(est & ST_VALIDO),
+                            },
+                        })
+                    mt = (outer.full_cfg.get("modbus_tcp") or {})
+                    mr = (outer.full_cfg.get("modbus_rtu") or {})
+                    self._send({
+                        "regs_por_tanque": REGS_PER_TANK,
+                        "campos": [
+                            {"off": "0-1", "nombre": "nivel", "tipo": "float32 (palabra alta primero)"},
+                            {"off": "2-3", "nombre": "conteo del encoder", "tipo": "uint32"},
+                            {"off": "4", "nombre": "errores", "tipo": "uint16"},
+                            {"off": "5", "nombre": "edad del dato (s)", "tipo": "uint16 satura a 65535"},
+                            {"off": "6", "nombre": "en linea", "tipo": "1 / 0"},
+                            {"off": "7", "nombre": "marcha del sensor (min)", "tipo": "uint16 satura"},
+                            {"off": "8", "nombre": "palabra de estado", "tipo": "bits: 0 en linea · 1 calibrado · 2 con referencia · 3 errores · 4 VALIDO"},
+                            {"off": "9", "nombre": "reservado", "tipo": "—"},
+                        ],
+                        "servidores": {
+                            "tcp": {"activo": bool(mt.get("enabled")),
+                                    "puerto": mt.get("port"), "unit_id": mt.get("unit_id")},
+                            "rtu": {"activo": bool(mr.get("enabled")),
+                                    "puerto": mr.get("device"), "baud": mr.get("baud"),
+                                    "paridad": mr.get("parity"), "unit_id": mr.get("unit_id")},
+                        },
+                        "funciones": "FC 03 y FC 04, indistintamente",
+                        "tanques": tanques,
+                    })
                 elif p == "/api/ota":
                     if not self._auth():
                         return

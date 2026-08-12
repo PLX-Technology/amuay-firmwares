@@ -1907,6 +1907,12 @@ def ingest(cfg: dict, store: Store, live: Live, outs: list):
             "value": (count * (c.get("scale") or 1.0) + (c.get("offset") or 0.0)
                       if fr["ref_ok"] else None),
             "ref_ok": fr["ref_ok"],
+            # ★ Va en el estado VIVO para que las salidas no tengan que
+            # re-deducirlo cada una por su cuenta -- y sobre todo para que
+            # Modbus pueda decirlo, que no tiene forma de mandar un null.
+            # Recta identidad = sin calibrar: el "nivel" son PULSOS.
+            "calibrado": not ((c.get("scale") or 1.0) == 1.0
+                              and (c.get("offset") or 0.0) == 0.0),
             "unit": c.get("unit") or "mm",
             "name": c.get("name") or f"tank{tank_id}",
             # Ambiente (v3). None = la placa no lo reporta.

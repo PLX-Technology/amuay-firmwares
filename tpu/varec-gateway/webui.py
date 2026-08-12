@@ -332,6 +332,10 @@ PAGE = r"""<!doctype html>
  .msg.ok{background:#1a7f3722;color:var(--ok);display:block}
  .msg.err{background:#cf222e22;color:var(--bad);display:block}
  .mut{color:var(--mut);font-size:13px}
+ /* Cifras que se comparan columna a columna --direcciones y registros-- con
+    ancho fijo: si no, alinear una tabla Modbus a ojo es imposible. */
+ .mono{font-family:ui-monospace,"Cascadia Mono",Consolas,monospace;
+       font-variant-numeric:tabular-nums}
  .hd{display:flex;align-items:center;gap:10px;margin-bottom:12px}
  .hd h2{margin:0}
 </style></head><body>
@@ -405,6 +409,16 @@ PAGE = r"""<!doctype html>
     <button id="save">Guardar y aplicar</button>
     <span class="mut" style="margin-left:10px">Al guardar, el servicio se reinicia
       (unos segundos).</span>
+
+    <div class="card" style="margin-top:22px">
+      <h2>Tabla Modbus</h2>
+      <p class="mut" style="margin:0 0 10px">Los registros <b>tal como los lee un
+        PLC o un SCADA</b>, con los valores de este instante. Sirve para resolver una
+        integraci&oacute;n sin discutir: se compara registro a registro lo que ve el
+        cliente con lo que ve la pasarela.</p>
+      <button id="mb_ver" type="button">Consultar tabla Modbus</button>
+      <div id="mb_wrap" style="margin-top:14px"></div>
+    </div>
   </div>
 </main>
 <div id="calbg" style="display:none;position:fixed;inset:0;background:#000a;z-index:50;
@@ -1317,6 +1331,54 @@ async function tpu(){
   }
 }
 
+
+// ---------------- tabla Modbus (bajo demanda, en Settings) ----------------
+// No se refresca sola: se consulta cuando alguien esta integrando. Es una
+// herramienta de puesta en marcha, no un panel de vigilancia.
+async function verModbus(){
+  const w = $('#mb_wrap');
+  w.innerHTML = '<p class="mut">consultando…</p>';
+  try{
+    const d = await (await fetch('/api/modbus')).json();
+    const s = d.servidores;
+    const srv = `<p class="mut" style="margin:0 0 10px">
+      <b>TCP</b>: ${s.tcp.activo ? 'activo, puerto '+s.tcp.puerto+', unit '+s.tcp.unit_id
+                                 : '<span style="color:#d29922">desactivado</span>'} ·
+      <b>RTU</b>: ${s.rtu.activo ? 'activo, '+s.rtu.puerto+' '+s.rtu.baud+' '+s.rtu.paridad+', unit '+s.rtu.unit_id
+                                 : '<span style="color:#d29922">desactivado</span>'} ·
+      ${d.funciones} · ${d.regs_por_tanque} registros por tanque</p>`;
+
+    const campos = `<table><thead><tr><th>Desplazamiento</th><th>Campo</th><th>Tipo</th></tr></thead><tbody>`
+      + d.campos.map(c=>`<tr><td class="mono">+${c.off}</td><td>${c.nombre}</td><td class="mut">${c.tipo}</td></tr>`).join('')
+      + '</tbody></table>';
+
+    const filas = (d.tanques||[]).map(t=>{
+      const b = t.bits;
+      const chip = (on,txt,col) => `<span style="color:${on?col:'#6e7681'}">${on?'●':'○'} ${txt}</span>`;
+      return `<tr>
+        <td>${t.nombre||('tank'+t.tank_id)}</td>
+        <td class="mono">${t.base}–${t.base+d.regs_por_tanque-1}</td>
+        <td class="mono">${t.nivel==null?'NaN':(+t.nivel).toFixed(1)} ${t.unidad||''}</td>
+        <td class="mono">0x${t.estado.toString(16).padStart(4,'0')}</td>
+        <td style="font-size:12px">${chip(b.valido,'válido','#3fb950')} ·
+          ${chip(b.online,'en línea','#3fb950')} ·
+          ${chip(b.calibrado,'calibrado','#3fb950')} ·
+          ${chip(b.ref_ok,'referencia','#3fb950')} ·
+          ${chip(b.errores,'errores','#f85149')}</td>
+        <td class="mono mut" style="font-size:11px">${t.registros.join(' ')}</td>
+      </tr>`;
+    }).join('');
+
+    w.innerHTML = srv + campos
+      + '<h2 style="margin-top:22px">Valores ahora</h2>'
+      + `<table><thead><tr><th>Tanque</th><th>Registros</th><th>Nivel</th>
+         <th>Estado</th><th>Bits</th><th>Crudo</th></tr></thead><tbody>${filas}</tbody></table>`
+      + '<p class="mut" style="margin:10px 0 0">El <b>bit 4 (válido)</b> es el que debe '
+      + 'mirar el PLC: exige en línea, calibrado y con referencia a la vez. Sin él, el '
+      + 'número del registro de nivel no es una medida de nivel.</p>';
+  }catch(e){ w.innerHTML = '<p class="mut" style="color:#f85149">no pude consultar: '+e+'</p>'; }
+}
+if($('#mb_ver')) $('#mb_ver').addEventListener('click', verModbus);
 
 tanks(); setInterval(tanks,5000);
 tpu();   setInterval(tpu,10000);
