@@ -53,6 +53,19 @@ def check_login(user: str, pw: str, cfg) -> bool:
     return ok_u and ok_p
 
 
+def check_pass(pw: str, cfg) -> bool:
+    """Solo la clave, para RECONFIRMAR una accion destructiva.
+
+    La sesion ya prueba quien eres; esto prueba que estas delante y que no ha
+    sido un clic de mas. Se pide en el borrado de un tanque, que se lleva por
+    delante su historico y no tiene deshacer.
+    """
+    want = ui_pass(cfg)
+    if not want:
+        return True                       # sin clave configurada = abierto
+    return hmac.compare_digest(pw or "", want)
+
+
 def new_session() -> str:
     _purge()
     tok = secrets.token_urlsafe(32)
@@ -568,8 +581,31 @@ PAGE = r"""<!doctype html>
     <div style="display:flex;gap:8px;margin-top:6px">
       <button id="calsave" style="flex:1">Guardar</button>
       <button id="calclose" style="flex:0 0 auto;background:#2b3846">Cancelar</button>
+      <button id="calborrar" type="button"
+              style="flex:0 0 auto;background:#3d2220;color:#f85149">Eliminar</button>
     </div>
     <p id="calm" class="mut" style="margin:10px 0 0"></p>
+
+    <!-- Zona de baja. Oculta hasta que alguien pulsa Eliminar: no debe estar
+         a la vista mientras se calibra. -->
+    <div id="calbaja" style="display:none;margin-top:14px;padding:12px;
+         border:1px solid #f85149;background:#3d222030">
+      <p style="margin:0 0 8px;font-size:13px"><b style="color:#f85149">Dar de baja
+        este tanque.</b> Se borran su registro, su calibraci&oacute;n y
+        su hist&oacute;rico completo. <b>No hay deshacer.</b></p>
+      <p class="mut" style="margin:0 0 10px;font-size:13px">Cuando el sensor
+        vuelva, la pasarela lo detectar&aacute; sola como placa nueva y podr&aacute;s
+        asignarle su n&uacute;mero otra vez.</p>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input type="password" id="cb_pass" placeholder="clave del panel"
+               autocomplete="current-password" style="flex:1">
+        <button id="cb_ok" type="button" style="flex:0 0 auto;background:#8c291d">
+          Confirmar baja</button>
+        <button id="cb_no" type="button" style="flex:0 0 auto;background:#2b3846">
+          Cancelar</button>
+      </div>
+      <p id="cb_msg" class="mut" style="margin:8px 0 0"></p>
+    </div>
   </div>
 </div>
 <script>
@@ -1030,6 +1066,9 @@ function calOpen(id){
     ? 'Actual: escala '+(+t.scale).toFixed(6)+' / offset '+(+t.offset).toFixed(2)
     : 'Sin calibrar: el valor mostrado son los pulsos crudos.';
   calModo('geo');
+  // La zona de baja siempre cerrada al abrir: no debe estar a la vista
+  // mientras alguien calibra.
+  if($c('calbaja')) $c('calbaja').style.display='none';
   $c('calbg').style.display='flex';
   calVivoArrancar();
 }
@@ -1125,6 +1164,39 @@ if($c('cb_now')) $c('cb_now').onclick=()=>calNow('cb_c');
 if($c('m_n1')) $c('m_n1').onclick=()=>calNow('m_c1');
 if($c('m_n2')) $c('m_n2').onclick=()=>calNow('m_c2');
 if($c('m_go')) $c('m_go').onclick=geoMedir;
+// ---------------- baja de un tanque ----------------
+// La clave se pide OTRA VEZ aunque la sesion ya este abierta: la sesion dice
+// quien eres, esto dice que estas delante y que no fue un clic de mas. Se
+// lleva por delante el historico y no hay deshacer.
+if($c('calborrar')) $c('calborrar').onclick=()=>{
+  $c('cb_msg').textContent = '';
+  $c('cb_pass').value = '';
+  $c('calbaja').style.display = '';
+  $c('cb_pass').focus();
+};
+if($c('cb_no')) $c('cb_no').onclick=()=>{ $c('calbaja').style.display='none'; };
+if($c('cb_ok')) $c('cb_ok').onclick=async()=>{
+  const pw = $c('cb_pass').value;
+  if(!pw){ $c('cb_msg').textContent='Escribe la clave del panel.'; return; }
+  $c('cb_ok').disabled = true;
+  $c('cb_msg').textContent = 'dando de baja…';
+  try{
+    const r = await fetch(`/api/tank/${CALID}/borrar`, {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({pass: pw})});
+    const d = await r.json();
+    if(!r.ok){ $c('cb_msg').textContent = d.error || 'no se pudo'; $c('cb_ok').disabled=false; return; }
+    const b = d.borrado || {};
+    $c('calbg').style.display='none'; calVivoParar();
+    $c('calbaja').style.display='none';
+    tanks();
+    alert('Tanque '+CALID+' dado de baja.\n\n'
+      + (b.samples_raw||0)+' muestras crudas, '+(b.samples_1m||0)+' por minuto y '
+      + (b.samples_1h||0)+' por hora eliminadas.');
+  }catch(e){ $c('cb_msg').textContent='error: '+e; }
+  $c('cb_ok').disabled = false;
+};
+
 if($c('mg_geo')) $c('mg_geo').onclick=()=>calModo('geo');
 if($c('mg_2p'))  $c('mg_2p').onclick =()=>calModo('2p');
 if($c('mg_fw'))  $c('mg_fw').onclick =()=>calModo('fw');

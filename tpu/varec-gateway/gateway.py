@@ -1637,6 +1637,37 @@ class Store:
         c.commit()
         c.close()
 
+    def borrar_tanque(self, tank_id: int) -> dict:
+        """Da de baja un tanque: su registro, su calibracion y su historico.
+
+        PARA QUE SIRVE: retirar del sistema un sensor que ya no esta. Mientras
+        su fila siga en `tanks`, el tanque aparece en el panel, en el arbol y
+        en el mapa Modbus como un equipo caido -- indistinguible de una averia.
+
+        ⚠️ SE BORRA TAMBIEN EL HISTORICO, y a proposito. Si mañana ese mismo
+        numero de tanque lo ocupa OTRO sensor --que es justo lo que pasa al
+        sustituir una placa-- las muestras viejas quedarian pegadas a las
+        nuevas en la misma serie, sin nada que las separe. Mejor empezar
+        limpio que arrastrar un historico que mezcla dos tanques.
+
+        ⚠️ NO se borra el evento de la baja: se escribe DESPUES de limpiar los
+        suyos, para que quede rastro de que alguien lo quito y cuando.
+        """
+        if not self.disponible:
+            return {"error": "sin almacenamiento"}
+        c = self._conn()
+        cuenta = {}
+        for tabla in ("samples_raw", "samples_1m", "samples_1h",
+                      "events", "id_conflicts", "tanks"):
+            cur = c.execute(f"DELETE FROM {tabla} WHERE tank_id=?", (tank_id,))
+            cuenta[tabla] = cur.rowcount
+        c.execute("INSERT INTO events(ts,tank_id,kind,detail) VALUES(?,?,?,?)",
+                  (now(), tank_id, "baja",
+                   "eliminado desde el panel: %d muestras" % cuenta["samples_raw"]))
+        c.commit()
+        c.close()
+        return cuenta
+
     def set_cal(self, tank_id: int, scale: float, offset: float,
                 unit: str = None):
         """Guarda la recta de calibracion de un tanque.
@@ -1768,6 +1799,15 @@ class Live:
         """Se llama al asignarle identidad: deja de ser una placa nueva."""
         with self.lock:
             self.nuevas.pop(mac, None)
+
+    def olvidar_tanque(self, tank_id: int):
+        """Lo saca del estado vivo al darlo de baja.
+
+        Sin esto seguiria apareciendo --como caido-- hasta reiniciar el
+        servicio, y el operador acabaria dudando de si el borrado funciono.
+        """
+        with self.lock:
+            self.tanks.pop(tank_id, None)
 
     def snapshot(self) -> dict:
         t = now()

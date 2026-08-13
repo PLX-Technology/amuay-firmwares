@@ -219,6 +219,19 @@ class MqttOut:
                               and (rec.get("offset") or 0.0) == 0.0),
         }), self.qos, self.retain)
 
+    def borrar_retenidos(self, tank_id: int):
+        """Limpia los topicos retenidos de un tanque dado de baja.
+
+        ⚠️ SIN ESTO EL TANQUE NO SE VA. Un mensaje retenido lo guarda el broker
+        y se lo entrega a TODO el que se suscriba desde ahora hasta el fin de
+        los tiempos: el tanque desapareceria del panel y seguiria vivo en la
+        sala de visualizacion, con su ultimo nivel, para siempre.
+        Se borra publicando carga VACIA con retain -- que es como MQTT dice
+        "olvida esto".
+        """
+        for suf in ("value", "raw"):
+            self.c.publish(f"{self.prefix}/{tank_id}/{suf}", "", self.qos, True)
+
     def close(self):
         self.c.publish(f"{self.prefix}/gateway/status", "offline", qos=1, retain=True)
         self.c.loop_stop()
@@ -365,7 +378,8 @@ class ModbusOut:
 # ============================================================ HTTP / JSON / UI
 class HttpOut:
     def __init__(self, cfg, live, store, stop, full_cfg=None, cfg_path=None,
-                 pse_fn=None, switches_fn=None, arbol_fn=None, cal_fn=None):
+                 pse_fn=None, switches_fn=None, arbol_fn=None, cal_fn=None,
+                 mqtt_fn=None):
         import http.server
         import webui
         self.live, self.store, self.stop = live, store, stop
@@ -380,6 +394,10 @@ class HttpOut:
         # un caso limite que la otra no. Compartiendo la funcion, calibrar
         # desde el panel y calibrar desde la sala son literalmente lo mismo.
         self.cal_fn = cal_fn
+        # Limpieza de topicos retenidos al dar de baja un tanque. Se recibe la
+        # funcion en vez de el objeto MQTT porque puede no haberlo (MQTT
+        # desactivado) y el borrado tiene que funcionar igual.
+        self.mqtt_fn = mqtt_fn
         self.full_cfg = full_cfg or {}
         self.cfg_path = cfg_path
         import ota as ota_mod
@@ -455,6 +473,8 @@ class HttpOut:
                     return self._ota_imagen()
                 if p.startswith("/api/ota/tank/"):
                     return self._ota_lanzar(p)
+                if p.startswith("/api/tank/") and p.endswith("/borrar"):
+                    return self._tank_borrar(p)
                 if p.startswith("/api/tank/"):
                     return self._tank_post(p)
                 if p != "/api/config":
@@ -580,6 +600,52 @@ class HttpOut:
                 if "error" in res:
                     return self._send(res, 409)
                 return self._send(res)
+
+            def _tank_borrar(self, p):
+                """Da de baja un tanque.  POST /api/tank/<id>/borrar {"pass": ...}
+
+                ⚠️ PIDE LA CLAVE OTRA VEZ. La sesion ya dice quien eres; esto
+                dice que estas delante y que no ha sido un clic de mas. Se
+                lleva por delante el historico y no hay deshacer.
+
+                ⚠️ SE NIEGA SI EL TANQUE ESTA REPORTANDO. Un sensor vivo se
+                vuelve a dar de alta solo en la siguiente trama --el alta es
+                automatica, y asi debe ser-- de modo que el borrado duraria
+                medio segundo y el operador se quedaria pensando que fallo.
+                Primero se retira el sensor, luego se da de baja.
+                """
+                if not self._auth():
+                    return
+                import webui
+                try:
+                    tid = int(p.split("/")[3])
+                    n = int(self.headers.get("Content-Length", 0))
+                    body = json.loads(self.rfile.read(n))
+                except Exception as e:
+                    return self._send({"error": f"peticion mal formada: {e}"}, 400)
+
+                if not webui.check_pass(body.get("pass"), outer.full_cfg):
+                    return self._send({"error": "clave incorrecta"}, 403)
+
+                rec = outer.live.snapshot().get(tid)
+                if rec and rec.get("online"):
+                    return self._send(
+                        {"error": "ese tanque esta reportando ahora mismo: "
+                                  "retira el sensor primero, o volvera a darse "
+                                  "de alta solo en la siguiente trama"}, 409)
+
+                cuenta = outer.store.borrar_tanque(tid)
+                if "error" in cuenta:
+                    return self._send(cuenta, 503)
+                outer.live.olvidar_tanque(tid)
+                # Y los retenidos del broker, o el tanque seguiria vivo en la
+                # sala de visualizacion aunque aqui ya no exista.
+                if outer.mqtt_fn is not None:
+                    try:
+                        outer.mqtt_fn(tid)
+                    except Exception as e:              # noqa: BLE001
+                        print(f"[borrar] no pude limpiar MQTT: {e}", file=sys.stderr)
+                self._send({"ok": True, "tank_id": tid, "borrado": cuenta})
 
             def _tank_post(self, p):
                 """Reconfigura un sensor ATT en remoto por Modbus."""
@@ -911,10 +977,16 @@ class HttpOut:
 def build_outputs(cfg, live, store, stop, pse_fn=None, switches_fn=None,
                   arbol_fn=None, cal_fn=None) -> list:
     outs = []
+    mqtt_fn = None
     if cfg.get("mqtt", {}).get("enabled"):
         try:
-            outs.append(MqttOut(cfg["mqtt"], live, stop, arbol_fn=arbol_fn,
-                                cal_fn=cal_fn))
+            mq = MqttOut(cfg["mqtt"], live, stop, arbol_fn=arbol_fn,
+                         cal_fn=cal_fn)
+            outs.append(mq)
+            # Para que el borrado de un tanque pueda limpiar sus retenidos.
+            # Si MQTT esta desactivado queda en None y el borrado funciona
+            # igual: no hay nada que limpiar.
+            mqtt_fn = mq.borrar_retenidos
         except Exception as e:
             print(f"[mqtt] deshabilitado: {e}", file=sys.stderr)
     if cfg.get("modbus_tcp", {}).get("enabled") or cfg.get("modbus_rtu", {}).get("enabled"):
@@ -925,5 +997,6 @@ def build_outputs(cfg, live, store, stop, pse_fn=None, switches_fn=None,
                             pse_fn=pse_fn,
                             switches_fn=switches_fn,
                             arbol_fn=arbol_fn,
-                            cal_fn=cal_fn))
+                            cal_fn=cal_fn,
+                            mqtt_fn=mqtt_fn))
     return outs

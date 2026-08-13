@@ -235,3 +235,111 @@ clase 13 exige 50 V. Para volver a servicio, devolverle los 50 V.
 
 De paso, ese `23709` frente a 24 000 confirma el error de ganancia del ADC
 (-1,2 % aqui, -2,2 % medido en el MPS) — ver `power-switch/FLASHEO.md` §8.3.
+
+---
+
+## 9. ★★ PLACA NUEVA: SON CUATRO PASOS, NO UNO
+
+2026-08-12. Puesta en marcha de dos field switches recien fabricados. **La
+receta que teniamos estaba incompleta**: creiamos que una placa nueva se
+grababa y ya, y hacen falta **cuatro** pasos. El que faltaba —la CRK— nos
+costo la mitad de la jornada porque las placas anteriores ya la traian de
+fabrica y nunca lo habiamos visto.
+
+| # | Que se graba | Sesion | Por que |
+|---|---|---|---|
+| 1 | **CRK** en el OTP | `<SBT>/devices/MAX32690/scp_packets/writemaximcrk.zip` | Sin ella el ROM no valida una imagen firmada |
+| 2 | Firmware de produccion | `sesion_prod.zip` | La aplicacion |
+| 3 | **Aprovisionamiento del ADIN6310** | `adin6310_provision.sbin` (rama `mps`, `power-switch/prebuilt/`) + **POR largo de ~10 s** + esperar 30 s | El switch viene EN BLANCO y el firmware de produccion no consigue cargarselo |
+| 4 | Firmware de produccion **otra vez** | `sesion_prod.zip` | El paso 3 sobrescribio la aplicacion |
+
+⚠️ **El paso 3 va SIEMPRE a 24 V, nunca a 50.** Esa imagen es anterior a las
+protecciones y **energiza sin negociar**: es la que quemo dos LTC4296. A 24 V
+el LTC4296 se niega a energizar y el paso es seguro.
+
+⚠️ **El OTP es de UNA SOLA ESCRITURA.** La CRK no se puede borrar ni cambiar.
+Se graba la `maximtestcrk` de fabrica, que es con la que firmamos todo.
+
+---
+
+## 10. ★ DIAGNOSTICO POR DONDE FALLA
+
+Es lo mas util de todo lo aprendido: **el punto en el que muere la sesion dice
+que le pasa a la placa.** Para verlo hay que capturar la salida a fichero, sin
+tuberia — con `| tail` el progreso se buffea y no se ve nada.
+
+| Sintoma | Significa | Que hacer |
+|---|---|---|
+| `Connection Failed`, **nunca conecta** | El ROM no contesta | Placa mala (ver §11), o **sin alimentar** — comprobarlo ANTES |
+| Conecta y muere en el **1 %** | **Falta la CRK.** Corta en la autenticacion, justo tras el saludo | Paso 1 |
+| Muere en un **% aleatorio** (14, 41, 67…) | El rail de 24 V se hunde en las rafagas de escritura | Reintentar; subir `--packet-delay`; o alimentar a 50 V |
+| Muere **siempre al 99 %** | Imagen sin rellenar a pagina | Ver §2 |
+| Llega al 100 % pero la consola repite `Firmware update in progress` | **ADIN6310 sin aprovisionar** | Pasos 3 y 4 |
+
+**Comprobacion final de una placa buena** (§8), con CERO lineas de
+`Firmware update in progress`:
+
+```
+dev_id (USN): 6b44218b1e176ce2
+Check Firmware Version :: SC0000519-005-329     <- el ADIN6310 responde
+Configured MAC address: 00:18:80:53:4d:69
+PSE enabled
+VID 1 enabled on ports 0 to 5 :: 0
+```
+
+---
+
+## 11. ★ La tecnica del POR, corregida
+
+§4 dice cuando hace falta un POR. Lo que faltaba es **con que ritmo**:
+
+- **Placa virgen**: el ROM espera indefinidamente. **Engancha sola**, sin tocar
+  nada, en el primer minuto.
+- **⚠️ Tras una sesion FALLIDA el ROM sale de su bucle de escucha**, aunque la
+  flash siga vacia. Ya no engancha sola: hay que darle un POR. Esto no estaba
+  documentado y costo siete minutos de espera inutil.
+- **Con firmware valido**: la ventana es un parpadeo. **Ciclar la alimentacion
+  cada 30 segundos** y parar en cuanto conecte.
+
+⚠️ **NO ciclar cada 10 segundos.** Entre que la sesion engancha, alguien lo ve
+y avisa, pasan segundos: con ciclos cortos el siguiente POR cae **ya
+transfiriendo** y mata la sesion. Paso tres veces seguidas. Con 30 s hay margen
+de sobra.
+
+⚠️ **Ciclar la alimentacion puede tirar el USB del Pico** (`WriteFile failed`,
+`el dispositivo no reconoce el comando`). Se recupera solo; hay que relanzar.
+Cortar y devolver la tension de forma limpia y no mover el cable USB.
+
+⚠️ **No lanzar una sesion antes de que la anterior suelte el puerto**
+(`could not open port: Acceso denegado`). Esperar a que el proceso termine de
+verdad, no unos segundos.
+
+---
+
+## 12. Defecto de lote (2026-08-12) — pendiente de Mayker
+
+De ocho placas del lote nuevo, **dos funcionaron y seis no responden al ROM**,
+ni alimentadas, ni ciclando, ni por dos adaptadores serie distintos. En una se
+**sustituyo el MAX32690** y siguio igual, asi que el chip no es el culpable.
+
+**El dato que orienta la reparacion:** en una de las mudas, el `LPUART_TX` del
+J11 **mantiene 3,3 V con una carga de 1 kΩ a masa**. Eso prueba que hay una
+salida real empujando — el micro esta vivo, ejecutando y gobernando su
+transmision. Lo que no funciona es **la recepcion**: nuestro byte no le llega.
+
+⇒ Sospechoso unico: la linea **`LPUART_RX` entre el J11 pin 08 y la bola H10**
+del micro.
+
+**Como clasificar una placa en un minuto**, sin programador:
+
+```
+J11 pin 06 (LPUART_TX) ──[ 1 kΩ ]── masa      (comparar contra una placa buena)
+```
+
+- mantiene ~3,3 V → micro vivo, transmision buena ⇒ repasar la RX
+- se desploma → nadie gobierna la linea ⇒ repasar la TX o el micro
+
+⚠️ **Medir siempre contra una placa buena.** Y ojo con el consumo como
+indicador de "micro vivo": el boton de reset esta puenteado en `SJ4` con el
+reset del ADIN6310, asi que **resetea los dos chips** y la variacion de
+corriente no se puede atribuir a ninguno.
