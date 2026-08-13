@@ -320,6 +320,36 @@ static uint16_t att_pwr_estado(void)
  * ⚠️ ALCANCE REAL, y conviene no prometer de mas: solo el LED de TX depende del
  * micro. El de RX lo gobierna la salida RO del transceptor, que el firmware no
  * controla; si ese sigue encendido, es hardware.
+ *
+ * ★★ EL CIRCUITO, LEIDO DEL ESQUEMATICO (2026-08-12). No cuelgan directamente
+ * de las lineas: van por **U34**, una puerta doble en SOT-23-6 alimentada del
+ * 3V3 permanente, con los LED en sus SALIDAS contra masa:
+ *
+ *     UART0_TX -> U34.1A    U34.1Y -> R7 -> LED10 -> GND
+ *     UART0_RX -> U34.2A    U34.2Y -> R6 -> LED9  -> GND
+ *
+ * U34 es un BUFFER (no inversor): con las lineas en reposo ALTAS, sus salidas
+ * quedan altas y los dos LED lucen. Confirmado en placa -- estan encendidos con
+ * SPE y con bateria, y durante el trafico se ATENUAN (parpadean hacia oscuro),
+ * que es la firma de esta topologia. No indican actividad: indican reposo.
+ *
+ * ⚠️ Y SOLTAR EL PIN NO LOS APAGA, al contrario: deja flotando la entrada 1A de
+ * U34, su salida queda indeterminada --normalmente alta, el LED sigue luciendo--
+ * y ademas el buffer consume corriente de conmutacion. El unico nivel que
+ * apagaria LED10 es el BAJO, y ESO NO SE PUEDE HACER (ver el aviso de arriba:
+ * dejaria mudo el bus entero). Asi que **por firmware no hay arreglo**.
+ *
+ * ★ EL ARREGLO ES DE UNA PIEZA, PARA MAYKER: sustituir U34 por su variante
+ * INVERSORA (74LVC2G14 en vez de 74LVC2G17). Mismo encapsulado y MISMO
+ * patillaje --1=1A, 2=GND, 3=2A, 4=2Y, 5=VCC, 6=1Y-- asi que no cambia el
+ * trazado. Con eso: reposo -> salida baja -> LED APAGADO, y parpadeo hacia
+ * claro con el trafico, que es lo que se esperaba de ellos.
+ *
+ * ⚠️ IMPORTA MAS DE LO QUE PARECE: dos LED encendidos las 24 h son del orden de
+ * 4 a 10 mA segun R6/R7, en una placa que consume ~10 mA en total (medido
+ * 2026-08-11). Pueden estar gastando tanto como el resto de la ATT entera, y
+ * explicarian que el ahorro de apagar SPE y RS-485 en bateria no se note tanto
+ * como deberia. Medir R6 y R7 para ponerle numero.
  */
 #define R485_TX_PIN 12
 #define R485_RX_PIN 11
@@ -354,8 +384,13 @@ static void att_485_pines(int soltar)
 		 * cero, por lo del comparador de direccion explicado arriba. */
 		gpio_pin_configure(gpa, R485_TX_PIN, GPIO_INPUT);
 		gpio_pin_configure(gpa, R485_RX_PIN, GPIO_INPUT);
-		LOG_INF("RS-485: pines TX/RX en alta impedancia (LED de TX apagado;"
-			" el de RX lo gobierna el transceptor)");
+		/* ⚠️ NO se anuncia que apague ningun LED: no lo hace. Lo decia antes
+		 * y era falso -- los dos siguen encendidos, los gobierna U34 desde el
+		 * 3V3 permanente y el firmware no los alcanza (ver el bloque de
+		 * arriba). Un mensaje que promete de mas manda a la gente a buscar
+		 * una averia donde no la hay. */
+		LOG_INF("RS-485: pines TX/RX en alta impedancia (el micro deja de"
+			" atacar la linea; los LED siguen encendidos, es hardware)");
 	} else {
 		LL_GPIO_SetAFPin_8_15(GPIOA, LL_GPIO_PIN_11, LL_GPIO_AF_3);
 		LL_GPIO_SetAFPin_8_15(GPIOA, LL_GPIO_PIN_12, LL_GPIO_AF_3);

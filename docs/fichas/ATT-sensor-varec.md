@@ -126,7 +126,47 @@ e indistinguible de un sensor averiado. Comprobar antes en **esa** placa.
 
 ---
 
-## 6. Actualización remota
+## 6. ⚠️ Los LEDs del RS-485 están siempre encendidos — 2026-08-12
+
+**No es una avería y no hay que buscarla.** Los dos LEDs del RS-485 lucen
+permanentemente, con alimentación por SPE y con batería, y durante el tráfico
+se **atenúan** en vez de encenderse.
+
+Es la topología del circuito: cuelgan de las salidas de un buffer (**U34**)
+alimentado del 3,3 V permanente, y las líneas de una UART **reposan en alto**.
+Así que el buffer copia ese alto y los LEDs conducen. No indican actividad:
+indican reposo.
+
+**Por firmware no tiene arreglo.** El único nivel que apagaría el LED de
+transmisión es el bajo, y eso **no se puede hacer**: el transceptor no tiene
+línea de habilitación —conmuta dirección con un comparador que vigila la propia
+línea de transmisión— y leería ese nivel bajo como *"estoy transmitiendo"*,
+poniéndose a atacar el bus de forma permanente. Con varios Varec en el mismo
+bus, eso **deja mudos a todos los demás equipos**.
+
+### El arreglo, para fabricación
+
+**Sustituir U34 por su variante inversora** (74LVC2G14 en lugar de 74LVC2G17).
+Mismo encapsulado y **mismo patillaje**, así que no cambia el trazado ni la
+lista de materiales más allá de esa línea. Con el inversor:
+
+```
+línea en reposo  →  salida baja  →  LED APAGADO
+tráfico          →  parpadea hacia claro
+```
+
+### Y por qué importa
+
+Dos LEDs encendidos las 24 horas son del orden de **4 a 10 mA** según el valor
+de sus resistencias — en una placa que consume **~10 mA en total**. Pueden estar
+gastando tanto como el resto del sensor, y explicarían que el ahorro de apagar
+el SPE y el RS-485 en batería no se note tanto como debería.
+
+⚠️ **Medir R6 y R7 antes de decidir**, para ponerle número exacto al ahorro.
+
+---
+
+## 7. Actualización remota
 
 Por SPE desde la pasarela: pestaña **Firmware** del modal de cada tanque.
 
@@ -137,6 +177,6 @@ tanque**.
 
 ⚠️ **MCUboot no se actualiza por esa vía** — vive en su propia partición.
 
-**[Mayker]** dimensiones, fijación al cabezal, grado de protección, rango de
+**[Mayker]** ★ sustituir U34 por su variante inversora (ver §6) · dimensiones, fijación al cabezal, grado de protección, rango de
 temperatura, LEDs, conectores, certificación de zona clasificada y condiciones
 de seguridad intrínseca si aplica.
