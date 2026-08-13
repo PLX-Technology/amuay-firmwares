@@ -381,9 +381,27 @@ static void att_485_pines(int soltar)
 	}
 	if (soltar) {
 		/* Alta impedancia: el micro deja de atacar la linea. NO se pone a
-		 * cero, por lo del comparador de direccion explicado arriba. */
-		gpio_pin_configure(gpa, R485_TX_PIN, GPIO_INPUT);
-		gpio_pin_configure(gpa, R485_RX_PIN, GPIO_INPUT);
+		 * cero, por lo del comparador de direccion explicado arriba.
+		 *
+		 * ★ PERO CON PULL-UP, no al aire (2026-08-12). Soltarlo a secas
+		 * dejaba FLOTANDO la entrada de U34: una entrada CMOS sin nivel
+		 * definido deriva a media tension y hace conducir a la vez las dos
+		 * ramas de la puerta -- corriente de conmutacion permanente, y en
+		 * bateria eso es justo lo que se venia a evitar. Tambien dejaba sin
+		 * definir la entrada del comparador de direccion del ADM2587E, que
+		 * es peor: un nivel indeterminado ahi puede leerse como
+		 * "transmitiendo" y poner al transceptor a atacar el bus.
+		 *
+		 * El pull-up resuelve las dos cosas SIN afirmar un nivel: la linea
+		 * queda en reposo (alto), que es lo que el comparador entiende como
+		 * "no transmito", y el micro sigue sin atacarla -- si otro la baja,
+		 * no hay conflicto. Es el mismo criterio que el devicetree aplica al
+		 * pin de RX, donde su pull-up "no es decorativo".
+		 *
+		 * ⚠️ NO apaga los LED: siguen encendidos porque U34 copia ese alto.
+		 * Eso es hardware y no tiene arreglo por aqui (ver arriba). */
+		gpio_pin_configure(gpa, R485_TX_PIN, GPIO_INPUT | GPIO_PULL_UP);
+		gpio_pin_configure(gpa, R485_RX_PIN, GPIO_INPUT | GPIO_PULL_UP);
 		/* ⚠️ NO se anuncia que apague ningun LED: no lo hace. Lo decia antes
 		 * y era falso -- los dos siguen encendidos, los gobierna U34 desde el
 		 * 3V3 permanente y el firmware no los alcanza (ver el bloque de
